@@ -26,7 +26,7 @@ jobs:
           WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          GH_PAT: ${{ secrets.GH_PAT || secrets.GITHUB_PAT || secrets.PAT }}
+          GH_PAT: ${{ secrets.GH_PAT || secrets.GH_PATH || secrets.GITHUB_PAT || secrets.PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -o pipefail
