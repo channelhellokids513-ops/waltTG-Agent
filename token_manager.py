@@ -114,7 +114,11 @@ class TokenManager:
             if pat and repo:
                 update_github_secret(repo, "WALT_REFRESH_TOKEN", self.refresh_token, pat)
             else:
-                print("[INFO] Simpan token baru ini ke GitHub Secret WALT_REFRESH_TOKEN jika belum pakai GH_PAT.")
+                if not pat:
+                    print("⚠️  [AUTO-SYNC GAGAL] Secret 'GH_PAT' belum ada di GitHub Secrets!")
+                    print("   Silakan buat secret baru bernama 'GH_PAT' di GitHub Settings -> Secrets.")
+                if not repo:
+                    print("⚠️  [AUTO-SYNC GAGAL] GITHUB_REPOSITORY tidak terdeteksi.")
 
     def _update_local_env(self, new_token: str):
         try:
