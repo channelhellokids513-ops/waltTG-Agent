@@ -138,9 +138,25 @@ def main():
     print(f"\nAccess token (expire {tokens.get('expires_in', 'N/A')}s, buat test):")
     print(tokens["access_token"])
     print("\nScope diberikan:", tokens.get("scope", SCOPES))
-    print("\nSimpan ke file .env lokal juga untuk test:")
-    print(f'  echo "WALT_CLIENT_ID={client_id}" >> .env')
-    print(f'  echo "WALT_REFRESH_TOKEN={tokens["refresh_token"]}" >> .env')
+
+    # Auto-update .env jika file .env ada
+    try:
+        env_path = ".env"
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            import re
+            content = re.sub(r"^WALT_CLIENT_ID=.*", f"WALT_CLIENT_ID={client_id}", content, flags=re.M)
+            content = re.sub(r"^WALT_REFRESH_TOKEN=.*", f"WALT_REFRESH_TOKEN={tokens['refresh_token']}", content, flags=re.M)
+            with open(env_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            print("\n💾 File .env lokal telah OTOMATIS diperbarui dengan Client ID dan Refresh Token baru.")
+    except Exception as err:
+        print(f"\n⚠️  Gagal auto-update .env: {err}")
+
+    print("\n⚠️  PENTING: Jangan lupa update KEDUA secret ini di GitHub Settings -> Secrets:")
+    print("   1. WALT_CLIENT_ID")
+    print("   2. WALT_REFRESH_TOKEN")
 
 
 if __name__ == "__main__":
