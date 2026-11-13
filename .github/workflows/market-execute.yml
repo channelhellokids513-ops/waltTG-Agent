@@ -1,0 +1,37 @@
+name: Walt Market-Open Execute (US stocks)
+
+on:
+  schedule:
+    # 21:40 WIB Mon-Fri = 14:40 UTC Mon-Fri
+    # (US stock market open 09:30 ET = 21:30 WIB saat Standard Time)
+    - cron: '40 14 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (preview only, no execute)"
+        required: false
+        default: "false"
+
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Execute planned positions
+        env:
+          WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}
+          WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
+          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: python walt_bot.py market_execute

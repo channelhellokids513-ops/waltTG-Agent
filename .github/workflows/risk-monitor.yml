@@ -1,0 +1,29 @@
+name: Walt Risk Monitor (4h)
+
+on:
+  schedule:
+    # Tiap 4 jam di menit 35 UTC: 00:35, 04:35, 08:35, 12:35, 16:35, 20:35
+    - cron: '35 */4 * * *'
+  workflow_dispatch:
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run risk monitor
+        env:
+          WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}
+          WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python walt_bot.py monitor
