@@ -376,9 +376,12 @@ def get_news_sentiment(ticker: str) -> tuple[str, str]:
         return "unknown", f"fetch error: {e}"
 
 
-def research_stock(ticker: str) -> Research:
+def research_stock(ticker: str, qwen: Optional[QwenClient] = None) -> Research:
     """Full research bundle untuk 1 saham."""
     log.info(f"🔍 Researching {ticker}...")
+    if qwen:
+        import llm_research
+        return llm_research.research_stock(ticker, qwen)
     days = check_earnings_date(ticker)
     sentiment, narrative = get_news_sentiment(ticker)
     return Research(
@@ -386,6 +389,7 @@ def research_stock(ticker: str) -> Research:
         days_to_earnings=days,
         news_sentiment=sentiment,  # type: ignore
         narrative=narrative,
+        confidence=0.5,
         fetched_at=datetime.now(timezone.utc).isoformat(),
     )
 
