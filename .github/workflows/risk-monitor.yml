@@ -26,4 +26,20 @@ jobs:
           WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python walt_bot.py monitor
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -o pipefail
+          python walt_bot.py monitor 2>&1 | tee monitor_output.log
+
+      - name: Publish Summary
+        if: always()
+        run: |
+          echo "## 🛡️ Hasil Risk Monitor" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          if [ -f monitor_output.log ]; then
+            cat monitor_output.log >> $GITHUB_STEP_SUMMARY
+          else
+            echo "File log tidak ditemukan." >> $GITHUB_STEP_SUMMARY
+          fi
+          echo '```' >> $GITHUB_STEP_SUMMARY

@@ -34,4 +34,20 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
-        run: python walt_bot.py market_execute
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -o pipefail
+          python walt_bot.py market_execute 2>&1 | tee execute_output.log
+
+      - name: Publish Summary
+        if: always()
+        run: |
+          echo "## 🚀 Hasil Market Execute" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          if [ -f execute_output.log ]; then
+            cat execute_output.log >> $GITHUB_STEP_SUMMARY
+          else
+            echo "File log tidak ditemukan." >> $GITHUB_STEP_SUMMARY
+          fi
+          echo '```' >> $GITHUB_STEP_SUMMARY
