@@ -17,8 +17,13 @@ TOKEN_URL = f"{AUTH_SERVER}/oauth/v1/token"
 
 class TokenManager:
     def __init__(self, client_id: str | None = None, refresh_token: str | None = None):
-        self.client_id = client_id or os.environ["WALT_CLIENT_ID"]
-        self.refresh_token = refresh_token or os.environ["WALT_REFRESH_TOKEN"]
+        self.client_id = (client_id or os.environ.get("WALT_CLIENT_ID", "")).strip()
+        self.refresh_token = (refresh_token or os.environ.get("WALT_REFRESH_TOKEN", "")).strip()
+        if not self.client_id or not self.refresh_token:
+            raise ValueError(
+                "❌ WALT_CLIENT_ID atau WALT_REFRESH_TOKEN belum di-set atau masih kosong!\n"
+                "Silakan tambahkan di Settings -> Secrets and variables -> Actions di GitHub."
+            )
         self._access_token: str | None = None
         self._expires_at: float = 0
         self._lock = threading.Lock()
@@ -37,16 +42,20 @@ class TokenManager:
             "refresh_token": self.refresh_token,
             "client_id": self.client_id,
         }
-        r = httpx.post(TOKEN_URL, data=body, timeout=30.0)
-        r.raise_for_status()
+        try:
+            r = httpx.post(TOKEN_URL, data=body, timeout=30.0)
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            print(f"❌ Gagal refresh token Walt (HTTP {e.response.status_code}): {e.response.text}")
+            raise
         data = r.json()
         self._access_token = data["access_token"]
         self._expires_at = time.time() + int(data.get("expires_in", 3600))
         # Rotate refresh_token kalau ada (RFC 6749 §6)
         if "refresh_token" in data and data["refresh_token"] != self.refresh_token:
             self.refresh_token = data["refresh_token"]
-            print(f"⚠️  Refresh token di-rotate oleh Walt. Update GitHub Secret WALT_REFRESH_TOKEN:")
-            print(f"    {self.refresh_token}")
+            print(f"[WARN] Refresh token di-rotate oleh Walt. Update GitHub Secret WALT_REFRESH_TOKEN:")
+            print(f"       {self.refresh_token}")
 
 
 if __name__ == "__main__":
