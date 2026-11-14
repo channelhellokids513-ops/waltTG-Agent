@@ -102,18 +102,18 @@ class GeminiClient:
         if not self.api_key:
             raise ValueError("DASHSCOPE_API_GEMINI_KEY / GEMINI_API_KEY belum di-set!")
 
-        # Normalisasi model string (misal jika user passing "models/gemini-flash-latest:generateContent")
+        # Normalisasi model string (misal: "models/gemini-flash-latest:generateContent" -> "gemini-flash-latest")
         model_name = (model or DEFAULT_GEMINI_MODEL).strip()
         if model_name.startswith("models/"):
             model_name = model_name[7:]
         if model_name.endswith(":generateContent"):
             model_name = model_name[:-16]
         self.model = model_name
-        self.client = httpx.Client(timeout=60.0)
+        self.client = httpx.Client(timeout=30.0)
 
     def chat_json(self, prompt: str) -> dict:
         """Kirim prompt analisis ke endpoint generateContent resmi Google Gemini."""
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
         headers = {
             "Content-Type": "application/json",
             "X-goog-api-key": self.api_key,
@@ -134,22 +134,7 @@ class GeminiClient:
             },
         }
 
-        # 1. Coba request dengan header X-goog-api-key
-        try:
-            r = self.client.post(url, headers=headers, json=payload, timeout=60.0)
-            if r.status_code == 200:
-                return self._parse_response(r.json())
-        except Exception:
-            pass
-
-        # 2. Fallback parameter ?key=
-        fallback_url = f"{url}?key={self.api_key}"
-        r = self.client.post(
-            fallback_url,
-            headers={"Content-Type": "application/json"},
-            json=payload,
-            timeout=60.0,
-        )
+        r = self.client.post(url, headers=headers, json=payload, timeout=30.0)
         r.raise_for_status()
         return self._parse_response(r.json())
 
@@ -169,7 +154,33 @@ class GeminiClient:
             text = text[3:]
         if text.endswith("```"):
             text = text[:-3]
-        return json.loads(text.strip())
+        parsed = json.loads(text.strip())
+
+        # Normalisasi struktur output
+        raw_s = str(parsed.get("sentiment") or parsed.get("sentimen") or parsed.get("sentimen_keseluruhan") or "neutral").lower()
+        if "bull" in raw_s:
+            sentiment = "bullish"
+        elif "bear" in raw_s:
+            sentiment = "bearish"
+        else:
+            sentiment = "neutral"
+
+        raw_c = parsed.get("confidence") or parsed.get("skor_sentimen") or 0.5
+        try:
+            c = float(raw_c)
+            if c > 1.0:
+                c = c / 100.0
+        except Exception:
+            c = 0.5
+
+        narrative = str(parsed.get("narrative") or parsed.get("ringkasan") or parsed.get("alasan") or parsed.get("rekomendasi") or "")
+        return {
+            "sentiment": sentiment,
+            "confidence": round(c, 2),
+            "narrative": narrative,
+            "key_drivers": parsed.get("key_drivers", []),
+            "upcoming_risk_event": parsed.get("upcoming_risk_event", "none"),
+        }
 
 
 def fetch_headlines(ticker: str, limit: int = 10) -> list[str]:
