@@ -4,7 +4,7 @@
 **Dibuat:** 13 November 2026  
 **Terakhir Diperbarui:** 14 November 2026 (Sinkronisasi Live GitHub Actions & Exclude Crypto/GRAM)  
 **Platform Eksekusi:** Walt Perps Relay API (`walletbot.me`) via GitHub Actions Autonomous Runner  
-**AI Research Engine:** Alibaba Cloud Qwen-Plus (DashScope API)  
+**AI Research Engine:** Dual-AI Collaboration (Alibaba Cloud Qwen-Plus & Google Gemini via `DASHSCOPE_API_GEMINI_KEY`)  
 **Notifikasi:** Telegram Bot API (`notifier.py` → `TELEGRAM_CHAT_ID`)  
 **Target:** $100/bulan dari funding income untuk cover tagihan rutin  
 
@@ -105,28 +105,37 @@ Setiap posisi baru langsung dilindungi oleh batas pengaman baseline:
 
 ---
 
-## 5. AI Research Layer (Alibaba Cloud Qwen-Plus)
+## 5. Dual-AI Collaboration Layer (Qwen-Plus + Google Gemini)
 
-Khusus untuk instrumen saham US, sebelum order dieksekusi, bot menjalankan lapisan analisis fundamental dan sentimen menggunakan model LLM **Qwen-Plus** (`llm_research.py`):
+Khusus untuk instrumen saham US, sebelum order dieksekusi, bot menjalankan lapisan analisis fundamental dan sentimen menggunakan arsitektur **Dual-AI Collaboration & Consensus** yang memadukan dua model kecerdasan buatan terdepan:
+1. **Model 1: Alibaba Cloud Qwen-Plus** (via `DASHSCOPE_API_KEY`)
+2. **Model 2: Google Gemini 1.5 Flash** (via `DASHSCOPE_API_GEMINI_KEY` / `GEMINI_API_KEY`)
+
+Kedua model mengevaluasi berita pasar secara independen, kemudian disintesiskan oleh konsensus engine untuk menghasilkan keputusan yang lebih tajam dan objektif.
 
 ### 5.1 Parameter Riset AI
 1. **Deteksi Jadwal Rilis Laporan Keuangan (Earnings Date):**
    - Menghitung jumlah hari menuju rilis earnings berikutnya (`days_to_earnings`).
    - Mencegah risiko lonjakan volatilitas harga ekstrem (*binary event risk*).
-2. **Analisis Sentimen Berita Terkini:**
-   - Mengambil intisari berita finansial terkini.
-   - Mengklasifikasikan sentimen: `bullish`, `bearish`, atau `neutral`.
-   - Menghasilkan ringkasan narasi dominan (1–2 kalimat) dan skor keyakinan (*confidence score*).
+2. **Dual-Model Sentiment Analysis & Cross-Validation:**
+   - Mengambil intisari berita finansial terkini (Yahoo Finance Feed).
+   - Qwen dan Gemini masing-masing mengklasifikasikan sentimen: `bullish`, `bearish`, atau `neutral` beserta confidence score dan ringkasan narasi.
+3. **Logika Konsensus Kolaborasi AI:**
+   - **STRONG_CONSENSUS (Konsensus Kuat):** Qwen dan Gemini sepakat pada arah yang sama (keduanya *bullish* atau keduanya *bearish*). Skor keyakinan (*confidence*) ditingkatkan dan rekomendasi eksekusi menjadi `GO (Full Size)`.
+   - **PARTIAL_CONSENSUS (Konsensus Parsial):** Satu model menentukan arah (*directional*) sedangkan model lainnya menilai *neutral*. Arah dari model aktif dijadikan acuan dengan alokasi modal terukur.
+   - **CONFLICT (Proteksi Konflik ⚡):** Qwen dan Gemini saling berlawanan arah (satu *bullish*, satu *bearish*). Pasar dinilai dalam kondisi polarisasi tinggi / bias tak terduga. Sistem otomatis mengaktifkan **circuit breaker proteksi modal**: sentimen diturunkan ke `neutral` dan ukuran posisi dibatasi ke `HALF Size` (atau `SKIP`).
+   - **RESILIENT FALLBACK:** Jika salah satu API key mengalami limit atau gangguan jaringan, sistem otomatis berjalan dengan mode *Single-Model* tanpa memutus alur trading.
 
 ### 5.2 Decision Matrix (Keputusan Eksekusi AI)
 
-| Sinyal Funding | Sentimen Berita AI | Hari Menuju Earnings | Keputusan Bot | Aksi & Margin |
-|---|---|---|---|---|
-| Tinggi (≥0.5%/hari) | **Confirm** arah posisi | > 7 hari | ✅ **GO (Full Size)** | Buka posisi full ($2.50 – $3.00 USDC) |
-| Tinggi (≥0.5%/hari) | **Neutral / Unknown** | > 7 hari | ⚠️ **HALF Size** | Buka posisi separuh ($1.25 – $1.50 USDC) |
-| Tinggi (≥0.5%/hari) | **Melawan** arah posisi | > 7 hari | ❌ **SKIP** | Batalkan eksekusi, hindari melawan tren |
-| Berapapun | Berapapun | **≤ 7 hari** | ❌ **SKIP** | Batalkan eksekusi (hindari risiko earnings) |
-| Rendah (<0.5%/hari)| Berapapun | Berapapun | ❌ **SKIP** | Batalkan eksekusi (funding rate kurang menarik) |
+| Sinyal Funding | Status Konsensus AI | Sentimen Gabungan | Hari Earnings | Keputusan Bot | Aksi & Margin |
+|---|---|---|---|---|---|
+| Tinggi (≥0.5%/hari) | **STRONG_CONSENSUS** | Aligned dg posisi | > 7 hari | ✅ **GO (Full Size)** | Buka posisi full ($2.50 – $3.00 USDC) |
+| Tinggi (≥0.5%/hari) | **PARTIAL_CONSENSUS** | Aligned dg posisi | > 7 hari | ✅ **GO / HALF** | Buka posisi ($1.50 – $2.50 USDC) |
+| Tinggi (≥0.5%/hari) | **CONFLICT (Qwen vs Gemini)** | Netral (Proteksi) | > 7 hari | ⚠️ **HALF / SKIP** | Proteksi risiko: alokasi separuh ($1.25) |
+| Tinggi (≥0.5%/hari) | Model Manapun | Melawan arah posisi | > 7 hari | ❌ **SKIP** | Batalkan eksekusi, hindari melawan tren |
+| Berapapun | Model Manapun | Berapapun | **≤ 7 hari** | ❌ **SKIP** | Batalkan eksekusi (hindari risiko earnings) |
+| Rendah (<0.5%/hari)| Model Manapun | Berapapun | Berapapun | ❌ **SKIP** | Batalkan eksekusi (funding rate kurang menarik) |
 
 *Aturan Alignment:*
 - `SHORT` + sentimen `bearish` = **Confirm** (berita bearish mendukung posisi Short).

@@ -26,7 +26,7 @@ from typing import Any, Literal, Optional
 import httpx  # pip install httpx
 
 from token_manager import TokenManager
-from llm_research import QwenClient, research_stock, Research
+from llm_research import QwenClient, GeminiClient, research_stock, Research
 from notifier import send_telegram
 
 
@@ -376,12 +376,16 @@ def get_news_sentiment(ticker: str) -> tuple[str, str]:
         return "unknown", f"fetch error: {e}"
 
 
-def research_stock(ticker: str, qwen: Optional[QwenClient] = None) -> Research:
-    """Full research bundle untuk 1 saham."""
+def research_stock(
+    ticker: str,
+    qwen: Optional[QwenClient] = None,
+    gemini: Optional[GeminiClient] = None,
+) -> Research:
+    """Full research bundle untuk 1 saham dengan kolaborasi Dual-AI (Qwen + Gemini)."""
     log.info(f"🔍 Researching {ticker}...")
-    if qwen:
+    if qwen or gemini:
         import llm_research
-        return llm_research.research_stock(ticker, qwen)
+        return llm_research.research_stock(ticker, qwen=qwen, gemini=gemini)
     days = check_earnings_date(ticker)
     sentiment, narrative = get_news_sentiment(ticker)
     return Research(
@@ -391,6 +395,7 @@ def research_stock(ticker: str, qwen: Optional[QwenClient] = None) -> Research:
         narrative=narrative,
         confidence=0.5,
         fetched_at=datetime.now(timezone.utc).isoformat(),
+        consensus="FALLBACK_RULE_BASED",
     )
 
 
@@ -399,7 +404,7 @@ def decide_go_nogo(
     research: Optional[Research],
 ) -> tuple[Literal["GO", "HALF", "SKIP"], str, float]:
     """
-    Apply decision matrix.
+    Apply decision matrix dengan pertimbangan konsensus Dual-AI.
     Return (verdict, reason, margin_multiplier).
     margin_multiplier = 1.0 (full) atau 0.5 (half) atau 0 (skip).
     """
@@ -419,6 +424,10 @@ def decide_go_nogo(
     if research.days_to_earnings is not None and research.days_to_earnings <= 7:
         return "SKIP", f"earnings H-{research.days_to_earnings}", 0.0
 
+    # Proteksi Dual-AI Conflict: Jika Qwen dan Gemini berseberangan (misal 1 bullish 1 bearish)
+    if research.consensus == "CONFLICT":
+        return "HALF", f"Dual-AI Conflict (Qwen:{research.qwen_sentiment} vs Gemini:{research.gemini_sentiment}) → proteksi HALF size", 0.5
+
     # Sentiment alignment
     if research.news_sentiment == "unknown":
         return "HALF", "sentiment unknown", 0.5
@@ -433,7 +442,8 @@ def decide_go_nogo(
     )
 
     if align:
-        return "GO", f"{research.news_sentiment} news aligns with {opp.side.upper()}", 1.0
+        tag = "Dual-AI Strong Consensus" if research.consensus == "STRONG_CONSENSUS" else f"{research.news_sentiment} news"
+        return "GO", f"{tag} aligns with {opp.side.upper()}", 1.0
     if opposite:
         return "SKIP", f"{research.news_sentiment} news bertolak belakang dengan {opp.side.upper()}", 0.0
     # neutral
@@ -800,9 +810,14 @@ def format_summary_telegram(summary: dict, researches: dict[str, Research]) -> s
         if research:
             days = research.days_to_earnings
             earn_str = f"{days}d" if days is not None else "—"
-            lines.append(f"   Earnings: {earn_str} | Sentiment: {research.news_sentiment}")
+            lines.append(f"   Earnings: {earn_str} | Sentiment: *{research.news_sentiment}*")
+            if research.consensus and research.consensus not in ("NONE", "NO_DATA"):
+                lines.append(f"   🤖 Dual-AI: `{research.consensus}`")
+                if research.qwen_sentiment and research.gemini_sentiment:
+                    lines.append(f"   ├ Qwen: `{research.qwen_sentiment}` ({int((research.qwen_confidence or 0)*100)}%)")
+                    lines.append(f"   └ Gemini: `{research.gemini_sentiment}` ({int((research.gemini_confidence or 0)*100)}%)")
             if research.narrative:
-                lines.append(f"   _{research.narrative[:150]}_")
+                lines.append(f"   _{research.narrative[:180]}_")
         lines.append(f"   → {verdict}: {reason}")
 
     lines.append(f"\n_Fee taker 0.09%/sisi | Max lev 2x | Fokus saham+komoditas_")
@@ -810,20 +825,28 @@ def format_summary_telegram(summary: dict, researches: dict[str, Research]) -> s
 
 
 def scan_with_research(client: WaltClient) -> dict:
-    """Daily scan + Qwen research + Telegram notif."""
+    """Daily scan + Dual-AI research (Qwen + Gemini) + Telegram notif."""
     log.info("📊 Running daily scan + research...")
     summary = daily_scan(client)
 
     # Research tiap stock candidate
     qwen = QwenClient() if os.getenv("DASHSCOPE_API_KEY") else None
+    gemini = (
+        GeminiClient()
+        if (os.getenv("DASHSCOPE_API_GEMINI_KEY") or os.getenv("GEMINI_API_KEY"))
+        else None
+    )
     researches: dict[str, Research] = {}
 
     for opp in summary["top_opportunities"]:
         asset = opp["asset"]
-        if asset in ALLOWED_STOCKS and qwen:
+        if asset in ALLOWED_STOCKS and (qwen or gemini):
             try:
-                researches[asset] = research_stock(asset, qwen)
-                log.info(f"  ✓ research {asset}: {researches[asset].news_sentiment}")
+                researches[asset] = research_stock(asset, qwen=qwen, gemini=gemini)
+                log.info(
+                    f"  ✓ research {asset}: {researches[asset].news_sentiment} "
+                    f"(Consensus: {researches[asset].consensus})"
+                )
             except Exception as e:
                 log.warning(f"  ✗ research {asset} failed: {e}")
 
@@ -868,11 +891,16 @@ def market_execute(client: WaltClient, dry_run: bool = False) -> dict:
 
     # Research saham (hanya yang masuk shortlist 5 teratas)
     qwen = QwenClient() if os.getenv("DASHSCOPE_API_KEY") else None
+    gemini = (
+        GeminiClient()
+        if (os.getenv("DASHSCOPE_API_GEMINI_KEY") or os.getenv("GEMINI_API_KEY"))
+        else None
+    )
     researches: dict[str, Research] = {}
     for opp in opps[:5]:
-        if opp.base_asset in ALLOWED_STOCKS and qwen:
+        if opp.base_asset in ALLOWED_STOCKS and (qwen or gemini):
             try:
-                researches[opp.base_asset] = research_stock(opp.base_asset, qwen)
+                researches[opp.base_asset] = research_stock(opp.base_asset, qwen=qwen, gemini=gemini)
             except Exception as e:
                 log.warning(f"research {opp.base_asset}: {e}")
 

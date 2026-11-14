@@ -10,12 +10,12 @@
 
 ## 1. Executive Summary
 
-Dokumen ini mendefinisikan peta jalan pengembangan **Walt Perps Trading Bot** melalui pendekatan bertahap (*phased rollout*). Bot ini berfokus pada strategi *funding rate arbitrage* (delta-neutral dan directional funding capture) di platform Walt (`walletbot.me`) dengan perbantuan riset kecerdasan buatan (Alibaba Cloud Qwen).
+Dokumen ini mendefinisikan peta jalan pengembangan **Walt Perps Trading Bot** melalui pendekatan bertahap (*phased rollout*). Bot ini berfokus pada strategi *funding rate arbitrage* (delta-neutral dan directional funding capture) di platform Walt (`walletbot.me`) dengan perbantuan riset kecerdasan buatan kolaboratif (**Dual-AI Consensus: Alibaba Cloud Qwen & Google Gemini**).
 
 Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersialisasi masa depan**, peta jalan dibagi menjadi 2 fase utama:
 
 1. **Fase 1: Owner-Dedicated Core Bot (Infrastruktur Eksisting & Segera Diterapkan)**  
-   - Menggunakan infrastruktur eksisting yang sudah berjalan: Python 3.12, GitHub Actions cloud cron, Qwen DashScope API, dan notifikasi Telegram terarah.  
+   - Menggunakan infrastruktur eksisting yang sudah berjalan: Python 3.12, GitHub Actions cloud cron, Dual-AI Consensus (Qwen-Plus + Google Gemini via `DASHSCOPE_API_GEMINI_KEY`), dan notifikasi Telegram terarah.  
    - **Eksklusif untuk Platform Owner (Rizal Dicky)**: Menghasilkan *passive income* harian ($50–$100/bulan) dari modal pribadi, memverifikasi stabilitas eksekusi Walt API, dan memperketat risk guardrails dengan biaya infrastruktur $0 (memanfaatkan GitHub Actions free tier).  
    - **Status:** **Prioritas Utama — Siap dan Perlu Segera Diterapkan.**
 
@@ -37,7 +37,7 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
 | **Mekanisme Scheduler** | GitHub Actions Cron (`.github/workflows/*.yml`) | Google Cloud Scheduler + Pub/Sub (WIB Precision) |
 | **Basis Data & State** | Statless / GitHub Actions Artifacts / Memory Cache | Google Cloud Firestore (Multi-Tenant Document Store) |
 | **Kredensial & Secrets** | GitHub Repository Secrets & Local `.env` | AES-256-GCM Vault di Firestore + Google Cloud KMS |
-| **Riset AI (Qwen)** | Pemanggilan langsung per-run oleh script Python | *Shared AI Engine* (1 pemanggilan global untuk semua user) |
+| **Riset AI (Dual-AI)** | Qwen-Plus + Google Gemini Consensus per-run | *Shared Dual-AI Engine* (1 pemanggilan global untuk semua user) |
 | **Antarmuka Utama** | Notifikasi Broadcast Telegram ke `TELEGRAM_CHAT_ID` | **Dashboard Interaktif (Telegram Mini App)** + Menu Bot |
 | **Sistem Bisnis / Billing**| $0 (Self-funded dari hasil funding rate pribadi) | Pembayaran Otomatis: QRIS, Crypto (USDT), Telegram Stars |
 | **Koneksi Walt** | 1 Akun Walt Owner via OAuth Refresh Token | Multi-Tenant Dynamic OAuth PKCE per Pengguna |
