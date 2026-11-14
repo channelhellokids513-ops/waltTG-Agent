@@ -339,8 +339,8 @@ def get_news_sentiment(ticker: str) -> tuple[str, str]:
     Return (sentiment, narrative_1_2_sentences).
     
     Implementasi minimal: pakai Yahoo Finance news feed (gratis).
-    Untuk production, bisa ganti dengan WebSearch via Claude Code
-    atau subscribe ke news API (Finnhub, Alpha Vantage, dll).
+    Untuk production, evaluasi dilakukan via Qwen DashScope (llm_research.py)
+    atau fallback ke news feed / news API (Yahoo Finance, Finnhub, dll).
     """
     try:
         url = f"https://query1.finance.yahoo.com/v1/finance/search"
