@@ -1,13 +1,15 @@
 """
 Dual-AI Research Layer (Alibaba Cloud Qwen + Google Gemini Consensus).
-Menggabungkan riset sentimen finansial dari dua model AI terdepan untuk
-mencapai konsensus sinyal pasar yang lebih akurat dan aman.
+Menggabungkan riset sentimen finansial dari dua model AI terdepan:
+  1. Alibaba Cloud Qwen-Plus (DashScope API)
+  2. Google Gemini (Endpoint: models/gemini-flash-latest:generateContent)
+untuk mencapai konsensus sinyal pasar yang lebih akurat, objektif, dan aman.
 
 Butuh env:
     DASHSCOPE_API_KEY        — dari Alibaba Cloud Model Studio (Qwen)
     DASHSCOPE_API_GEMINI_KEY — dari Google AI Studio (Gemini) (atau GEMINI_API_KEY)
     (opsional) DASHSCOPE_MODEL — default "qwen-plus"
-    (opsional) GEMINI_MODEL    — default "gemini-1.5-flash"
+    (opsional) GEMINI_MODEL    — default "gemini-flash-latest"
 """
 
 import os
@@ -19,7 +21,7 @@ import httpx
 
 DASHSCOPE_BASE = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 DEFAULT_QWEN_MODEL = os.getenv("DASHSCOPE_MODEL", "qwen-plus")
-DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+DEFAULT_GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 
 
 @dataclass
@@ -89,7 +91,7 @@ class QwenClient:
 
 
 class GeminiClient:
-    """Google Gemini Client via OpenAI-compatible endpoint with native REST fallback."""
+    """Google Gemini Client via models/gemini-flash-latest:generateContent."""
 
     def __init__(self, api_key: str | None = None, model: str = DEFAULT_GEMINI_MODEL):
         self.api_key = (
@@ -99,46 +101,29 @@ class GeminiClient:
         ).strip()
         if not self.api_key:
             raise ValueError("DASHSCOPE_API_GEMINI_KEY / GEMINI_API_KEY belum di-set!")
-        self.model = model
+
+        # Normalisasi model string (misal jika user passing "models/gemini-flash-latest:generateContent")
+        model_name = (model or DEFAULT_GEMINI_MODEL).strip()
+        if model_name.startswith("models/"):
+            model_name = model_name[7:]
+        if model_name.endswith(":generateContent"):
+            model_name = model_name[:-16]
+        self.model = model_name
         self.client = httpx.Client(timeout=60.0)
 
     def chat_json(self, prompt: str) -> dict:
-        """Kirim prompt analisis ke Gemini dan kembalikan JSON dict."""
-        # 1. Coba endpoint resmi Google OpenAI-compatible
-        try:
-            url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            }
-            payload = {
-                "model": self.model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "Kamu analis saham US profesional. Output HANYA JSON valid.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0.2,
-                "response_format": {"type": "json_object"},
-            }
-            r = self.client.post(url, json=payload, headers=headers)
-            if r.status_code == 200:
-                data = r.json()
-                content = data["choices"][0]["message"]["content"]
-                return json.loads(content)
-        except Exception:
-            pass
-
-        # 2. Fallback ke endpoint Native REST Generative Language API
-        native_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
-        native_payload = {
+        """Kirim prompt analisis ke endpoint generateContent resmi Google Gemini."""
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+        headers = {
+            "Content-Type": "application/json",
+            "X-goog-api-key": self.api_key,
+        }
+        payload = {
             "contents": [
                 {
                     "parts": [
                         {
-                            "text": f"Kamu analis saham US profesional. Output HANYA JSON valid.\n\n{prompt}"
+                            "text": f"Kamu analis saham US profesional. Output HANYA JSON valid tanpa penjelasan di luar JSON.\n\n{prompt}"
                         }
                     ]
                 }
@@ -148,9 +133,27 @@ class GeminiClient:
                 "responseMimeType": "application/json",
             },
         }
-        r = self.client.post(native_url, json=native_payload, timeout=60.0)
+
+        # 1. Coba request dengan header X-goog-api-key
+        try:
+            r = self.client.post(url, headers=headers, json=payload, timeout=60.0)
+            if r.status_code == 200:
+                return self._parse_response(r.json())
+        except Exception:
+            pass
+
+        # 2. Fallback parameter ?key=
+        fallback_url = f"{url}?key={self.api_key}"
+        r = self.client.post(
+            fallback_url,
+            headers={"Content-Type": "application/json"},
+            json=payload,
+            timeout=60.0,
+        )
         r.raise_for_status()
-        res_data = r.json()
+        return self._parse_response(r.json())
+
+    def _parse_response(self, res_data: dict) -> dict:
         candidates = res_data.get("candidates", [])
         if not candidates:
             raise RuntimeError(f"Gemini API empty response: {res_data}")
@@ -159,7 +162,7 @@ class GeminiClient:
             raise RuntimeError(f"Gemini API empty parts: {res_data}")
         text = parts[0].get("text", "").strip()
 
-        # Bersihkan format markdown jika ada ```json ... ```
+        # Bersihkan formatting markdown jika ada
         if text.startswith("```json"):
             text = text[7:]
         if text.startswith("```"):
@@ -259,7 +262,7 @@ def synthesize_dual_ai(
             final_sent = q_sent if q_sent != "neutral" else g_sent
             dominant_conf = q_conf if q_sent != "neutral" else g_conf
             final_conf = round(max(0.40, dominant_conf * 0.85), 2)
-            narrative = f"[Konsensus Parsial] {q_sent.upper()} (Qwen) vs {g_sent.upper()} (Gemini). {q_nar if q_sent != 'neutral' else g_nar}"
+            narrative = f"[Konsensus Parsial] Qwen ({q_sent.upper()}) & Gemini ({g_sent.upper()}). {q_nar if q_sent != 'neutral' else g_nar}"
 
         # Skenario 1.3: Konflik Arah (Bullish vs Bearish) -> Auto-Protection Risk Circuit
         else:
