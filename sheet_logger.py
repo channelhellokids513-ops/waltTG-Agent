@@ -25,6 +25,22 @@ def _ensure_dir(path: str):
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
 
+def _normalize_webhook_url(url: str) -> str:
+    """Menjamin format Webhook URL selalu lengkap dengan protocol https:// dan format Web App."""
+    url = (url or "").strip().strip('"').strip("'")
+    if not url:
+        return ""
+    if url.startswith("AKfycb"):
+        return f"https://script.google.com/macros/s/{url}/exec"
+    if not url.startswith(("http://", "https://")):
+        if "script.google.com" in url:
+            return f"https://{url}"
+        elif "/" not in url:
+            return f"https://script.google.com/macros/s/{url}/exec"
+        return f"https://{url}"
+    return url
+
+
 def log_scan_to_csv(summary: dict, researches: dict[str, Any], filepath: str = "logs/scan_history.csv"):
     """Catat baris scan ke file CSV lokal."""
     _ensure_dir(filepath)
@@ -87,14 +103,16 @@ def log_scan_to_csv(summary: dict, researches: dict[str, Any], filepath: str = "
 
 def log_scan_via_webhook(rows: list[list[Any]], webhook_url: str) -> bool:
     """Kirim data scan ke Google Sheets melalui Google Apps Script Web App."""
-    if not webhook_url:
+    url = _normalize_webhook_url(webhook_url)
+    if not url:
         return False
     try:
         payload = {"action": "log_scan", "sheet": "Daily_Scans", "rows": rows}
-        r = httpx.post(webhook_url, json=payload, timeout=15.0)
-        return r.status_code == 200
+        r = httpx.post(url, json=payload, follow_redirects=True, timeout=20.0)
+        log.info(f"Google Sheet Webhook response status: {r.status_code}")
+        return r.status_code in (200, 302)
     except Exception as e:
-        log.warning(f"Gagal kirim ke Google Sheets Webhook: {e}")
+        log.warning(f"Gagal kirim ke Google Sheets Webhook ({url[:35]}...): {e}")
         return False
 
 
@@ -187,11 +205,11 @@ def log_execution(executions: list[dict], filepath: str = "logs/executions_histo
             writer.writerow(headers)
         writer.writerows(rows)
 
-    webhook_url = os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", DEFAULT_WEBHOOK_URL)
+    webhook_url = _normalize_webhook_url(os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", DEFAULT_WEBHOOK_URL))
     if webhook_url and rows:
         try:
-            httpx.post(webhook_url, json={"action": "log_execution", "sheet": "Executions_Log", "rows": rows}, timeout=15.0)
-        except Exception:
-            pass
+            httpx.post(webhook_url, json={"action": "log_execution", "sheet": "Executions_Log", "rows": rows}, follow_redirects=True, timeout=20.0)
+        except Exception as e:
+            log.warning(f"Gagal kirim eksekusi ke Google Sheets Webhook: {e}")
 
     return {"executions_count": len(rows), "csv_logged": True}
