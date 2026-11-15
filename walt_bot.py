@@ -415,6 +415,10 @@ def decide_go_nogo(
     if research.days_to_earnings is not None and research.days_to_earnings <= 7:
         return "SKIP", f"earnings H-{research.days_to_earnings}", 0.0
 
+    # Ketiadaan Berita / Sentimen Unknown
+    if research.consensus == "NO_DATA" or research.news_sentiment == "unknown":
+        return "HALF", "tidak ada berita/headlines → proteksi HALF size (panen yield funding konservatif)", 0.5
+
     # P5 Risk Catalysts Check (katalis event resiko tinggi >= 0.70)
     p5_risk = research.p1_to_p7_scores.get("P5_risk_catalysts", 0.0) if research.p1_to_p7_scores else 0.0
     if p5_risk >= 0.70:
