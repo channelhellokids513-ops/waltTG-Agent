@@ -292,15 +292,6 @@ def rank_opportunities(contracts: list[dict]) -> list[Opportunity]:
 # RESEARCH LAYER — fundamentals & news check untuk saham
 # =============================================================================
 
-@dataclass
-class Research:
-    ticker: str
-    days_to_earnings: Optional[int]  # None kalau tidak ketemu
-    news_sentiment: Literal["bullish", "bearish", "neutral", "unknown"]
-    narrative: str  # 1-2 kalimat ringkas
-    fetched_at: str
-
-
 def check_earnings_date(ticker: str) -> Optional[int]:
     """
     Cek days_to_earnings via Yahoo Finance API (gratis, no key).
@@ -404,7 +395,7 @@ def decide_go_nogo(
     research: Optional[Research],
 ) -> tuple[Literal["GO", "HALF", "SKIP"], str, float]:
     """
-    Apply decision matrix dengan pertimbangan konsensus Dual-AI.
+    Apply decision matrix dengan pertimbangan konsensus 4-Voter Swarm AI (P1-P7).
     Return (verdict, reason, margin_multiplier).
     margin_multiplier = 1.0 (full) atau 0.5 (half) atau 0 (skip).
     """
@@ -420,13 +411,22 @@ def decide_go_nogo(
     if research is None:
         return "HALF", "no research data (fallback)", 0.5
 
-    # Earnings risk
+    # Earnings risk (H-7)
     if research.days_to_earnings is not None and research.days_to_earnings <= 7:
         return "SKIP", f"earnings H-{research.days_to_earnings}", 0.0
 
-    # Proteksi Dual-AI Conflict: Jika Qwen dan Gemini berseberangan (misal 1 bullish 1 bearish)
-    if research.consensus == "CONFLICT":
-        return "HALF", f"Dual-AI Conflict (Qwen:{research.qwen_sentiment} vs Gemini:{research.gemini_sentiment}) → proteksi HALF size", 0.5
+    # P5 Risk Catalysts Check (katalis event resiko tinggi >= 0.70)
+    p5_risk = research.p1_to_p7_scores.get("P5_risk_catalysts", 0.0) if research.p1_to_p7_scores else 0.0
+    if p5_risk >= 0.70:
+        return "HALF", f"High Risk Catalyst (P5={p5_risk:.2f} >= 0.70) → proteksi HALF size", 0.5
+
+    # Proteksi Divergensi Konsensus (SPLIT atau Vendor Conflict)
+    if (
+        research.overall_consensus_level == "SPLIT"
+        or research.vendor_alignment == "split"
+        or research.consensus == "CONFLICT"
+    ):
+        return "HALF", f"Swarm Consensus SPLIT (Qwen:{research.qwen_sentiment} vs Gemini:{research.gemini_sentiment}) → proteksi HALF size", 0.5
 
     # Sentiment alignment
     if research.news_sentiment == "unknown":
@@ -442,12 +442,20 @@ def decide_go_nogo(
     )
 
     if align:
-        tag = "Dual-AI Strong Consensus" if research.consensus == "STRONG_CONSENSUS" else f"{research.news_sentiment} news"
-        return "GO", f"{tag} aligns with {opp.side.upper()}", 1.0
+        # P6 Contrarian crowdedness check
+        p6_crowded = research.p1_to_p7_scores.get("P6_contrarian_check", 0.0) if research.p1_to_p7_scores else 0.0
+        if p6_crowded >= 0.85:
+            return "HALF", f"Align tapi Crowded (P6={p6_crowded:.2f}) → HALF size", 0.5
+
+        if research.overall_consensus_level in ("UNANIMOUS", "STRONG"):
+            return "GO", f"Swarm Strong Consensus ({research.final_score:+.2f}) aligns with {opp.side.upper()}", 1.0
+        return "HALF", f"Swarm Mixed Consensus ({research.final_score:+.2f}) aligns with {opp.side.upper()} → HALF size", 0.5
+
     if opposite:
-        return "SKIP", f"{research.news_sentiment} news bertolak belakang dengan {opp.side.upper()}", 0.0
+        return "SKIP", f"{research.news_sentiment} news (Score: {research.final_score:+.2f}) bertolak belakang dengan {opp.side.upper()}", 0.0
+
     # neutral
-    return "HALF", "neutral sentiment → half size", 0.5
+    return "HALF", f"neutral sentiment (Score: {research.final_score:+.2f}) → half size", 0.5
 
 
 # =============================================================================
@@ -766,7 +774,8 @@ def format_summary_telegram(summary: dict, researches: dict[str, Research]) -> s
     """Format summary jadi Telegram-ready markdown."""
     lines = []
     lines.append("*📊 Walt Perps — Daily Scan*")
-    lines.append(f"_{summary['ts'][:16].replace('T', ' ')} UTC_\n")
+    ts = summary.get("ts") or summary.get("scanned_at") or datetime.now(timezone.utc).isoformat()
+    lines.append(f"_{ts[:16].replace('T', ' ')} UTC_\n")
 
     # Balance
     accounts = summary.get("balance", [])
@@ -810,12 +819,19 @@ def format_summary_telegram(summary: dict, researches: dict[str, Research]) -> s
         if research:
             days = research.days_to_earnings
             earn_str = f"{days}d" if days is not None else "—"
-            lines.append(f"   Earnings: {earn_str} | Sentiment: *{research.news_sentiment}*")
+            lines.append(f"   Earnings: {earn_str} | Sentiment: *{research.news_sentiment}* (Score: `{research.final_score:+.2f}`)")
             if research.consensus and research.consensus not in ("NONE", "NO_DATA"):
-                lines.append(f"   🤖 Dual-AI: `{research.consensus}`")
+                lines.append(f"   🤖 Swarm AI: `{research.overall_consensus_level}` (Vendor: `{research.vendor_alignment}`)")
                 if research.qwen_sentiment and research.gemini_sentiment:
-                    lines.append(f"   ├ Qwen: `{research.qwen_sentiment}` ({int((research.qwen_confidence or 0)*100)}%)")
-                    lines.append(f"   └ Gemini: `{research.gemini_sentiment}` ({int((research.gemini_confidence or 0)*100)}%)")
+                    lines.append(f"   ├ Qwen: `{research.qwen_sentiment}` | Gemini: `{research.gemini_sentiment}`")
+                p1_7 = research.p1_to_p7_scores
+                if p1_7:
+                    lines.append(
+                        f"   ├ P1(`{p1_7.get('P1_sentiment_polarity', 0.0):+.2f}`) "
+                        f"P4(`{p1_7.get('P4_momentum_direction', 0.0):+.2f}`) "
+                        f"P5(`{p1_7.get('P5_risk_catalysts', 0.0):.2f}`) "
+                        f"P6(`{p1_7.get('P6_contrarian_check', 0.0):.2f}`)"
+                    )
             if research.narrative:
                 lines.append(f"   _{research.narrative[:180]}_")
         lines.append(f"   → {verdict}: {reason}")

@@ -37,7 +37,7 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
 | **Mekanisme Scheduler** | GitHub Actions Cron (`.github/workflows/*.yml`) | Google Cloud Scheduler + Pub/Sub (WIB Precision) |
 | **Basis Data & State** | Statless / GitHub Actions Artifacts / Memory Cache | Google Cloud Firestore (Multi-Tenant Document Store) |
 | **Kredensial & Secrets** | GitHub Repository Secrets & Local `.env` | AES-256-GCM Vault di Firestore + Google Cloud KMS |
-| **Riset AI (Dual-AI)** | Qwen-Plus + Google Gemini Consensus per-run | *Shared Dual-AI Engine* (1 pemanggilan global untuk semua user) |
+| **Riset AI (Swarm Voting + Aggregator)** | 4 Voters balanced vendor: 2 Qwen (turbo + plus) + 2 Gemini (flash + pro) → Qwen-max meta-aggregator | *Shared Swarm Engine* (1 pemanggilan global untuk semua user, hasil di-broadcast) |
 | **Antarmuka Utama** | Notifikasi Broadcast Telegram ke `TELEGRAM_CHAT_ID` | **Dashboard Interaktif (Telegram Mini App)** + Menu Bot |
 | **Sistem Bisnis / Billing**| $0 (Self-funded dari hasil funding rate pribadi) | Pembayaran Otomatis: QRIS, Crypto (USDT), Telegram Stars |
 | **Koneksi Walt** | 1 Akun Walt Owner via OAuth Refresh Token | Multi-Tenant Dynamic OAuth PKCE per Pengguna |
@@ -117,10 +117,491 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
    - Penanganan fallback: Jika order dengan TP/SL gagal karena buffer exchange, bot mengeksekusi order terbuka dan mengatur penutupan terpisah.
 
 ### 3.4 Langkah Penerapan Segera (Fase 1 Action Plan)
-- [x] Pastikan GitHub Secret terkonfigurasi lengkap di repository (`WALT_CLIENT_ID`, `WALT_REFRESH_TOKEN`, `DASHSCOPE_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`).
+- [x] Pastikan GitHub Secret terkonfigurasi lengkap di repository (`WALT_CLIENT_ID`, `WALT_REFRESH_TOKEN`, `DASHSCOPE_API_KEY`, `DASHSCOPE_API_GEMINI_KEY` (Gemini — fallback `GEMINI_API_KEY`), `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`).
 - [ ] Lakukan verifikasi uji coba manual (*manual trigger*) untuk workflow `daily-scan.yml`, `risk-monitor.yml`, dan `market-execute.yml` (mode `DRY_RUN=true`).
 - [ ] Aktifkan mode eksekusi riil pada saldo terdedikasi di Walt Perps.
 - [ ] Pantau notifikasi Telegram selama 7 hari berturut-turut untuk kalibrasi funding rate capture dan stabilitas rotasi token.
+
+### 3.5 Arsitektur Riset AI: Swarm Voting + Qwen Aggregator
+
+Sistem analisis AI berbasis **4 Voter + 1 Meta-Aggregator** yang dipakai sejak Fase 1 (shared untuk Fase 2).
+
+#### 3.5.1 Prinsip Desain
+- **Standardized Validation Parameters:** Semua 4 voter menilai **7 parameter yang SAMA** (P1-P7). Perbedaannya cuma di **reasoning style** masing-masing voter, bukan di input/metric yang dinilai.
+- **Apples-to-Apples Comparability:** Dengan parameter sama, aggregator bisa compare per-parameter dari tiap voter (bukan free-form reasoning yang susah dibandingkan).
+- **Swarm Voting:** Keempat model bekerja paralel, masing-masing kasih P1-P7 score + reasoning per parameter.
+- **Divisi Vendor Balance 50/50:** 2 model Qwen (DashScope: turbo + plus) + 2 model Gemini (AI Studio: flash + pro). Bias vendor tereliminasi sempurna karena jumlah model seimbang dari dua ekosistem berbeda.
+- **Meta-Aggregator (per-parameter analysis):** Qwen-max analisa consensus/divergence per parameter, identifikasi voter paling kredibel per dimensi, lalu produce final weighted score.
+- **Explainability Tinggi:** Setiap keputusan dapat ditelusuri ke parameter spesifik dan voter mana yang paling berpengaruh di parameter itu.
+
+#### 3.5.2 Konfigurasi Voter (2 Qwen + 2 Gemini — Vendor Balance 50/50)
+
+| Voter | Model | Vendor / API | Role | Bobot Dasar | Keunggulan |
+|---|---|---|---|---|---|
+| **V1** | `qwen-turbo` | Alibaba / DashScope Intl | Quick Signal | 0.25 | Cepat, surface-level sentiment |
+| **V2** | `qwen-plus` | Alibaba / DashScope Intl | Balanced Analyst | 0.25 | Balanced depth-vs-speed |
+| **V3** | `gemini-flash-latest` (env `DASHSCOPE_API_GEMINI_KEY`) | Google / AI Studio | Realtime Web | 0.25 | Google Search + current events (cepat) |
+| **V4** | `gemini-pro-latest` (env `DASHSCOPE_API_GEMINI_KEY`) | Google / AI Studio | Deep Reasoner | 0.25 | Deep reasoning + multimodal context |
+
+**Pemisahan vendor:**
+- 2 model Alibaba (Qwen) → kuat di analisa teks + Asian market context
+- 2 model Google (Gemini) → kuat di realtime search + current events US market
+- Vendor bias terseimbangkan 50/50, nggak ada pihak dominan
+
+#### 3.5.3 Konfigurasi Aggregator
+- **Model:** `qwen-max` (via DashScope Intl — Alibaba)
+- **Alasan Pilih Qwen-max:** Reasoning strong, cost $0.0024/1K token, netral di meta-level (tidak ikut voting)
+- **Input:** Headlines + context + 4 voter verdicts (score + reasoning)
+- **Output JSON:**
+  ```json
+  {
+    "final_score": -1.0 to +1.0,
+    "confidence": 0.0 to 1.0,
+    "agreement_level": "unanimous|strong|mixed|split",
+    "vendor_alignment": "both_agree|qwen_dominant|gemini_dominant|split",
+    "trusted_voter": "V1/V2/V3/V4",
+    "justification": "1-2 paragraf reasoning",
+    "disagreement_areas": ["...", "..."]
+  }
+  ```
+
+#### 3.5.3a Standardized Validation Parameters (P1-P7)
+
+Semua voter menilai 7 parameter yang sama. Inilah **kontrak input/output** tiap voter.
+
+| # | Parameter | Definisi | Scale | Weight dalam Final Score |
+|---|---|---|---|---|
+| **P1** | `sentiment_polarity` | Overall tone dari news 7 hari | -1.0 (bearish ekstrem) → +1.0 (bullish ekstrem) | 0.25 |
+| **P2** | `signal_strength` | Berapa banyak headlines align ke arah sama (convergence) | 0.0 (divergen) → 1.0 (unanimous) | 0.10 |
+| **P3** | `source_credibility` | Weighted score berdasarkan quality sources (Reuters/WSJ vs blog) | 0.0 (low) → 1.0 (high tier1) | 0.10 |
+| **P4** | `momentum_direction` | Apakah sentiment akseleratif atau mereda 48 jam terakhir? | -1.0 (reversal) → +1.0 (akseleratif) | 0.20 |
+| **P5** | `risk_catalysts` | Upcoming events yang bisa invalidate thesis (earnings, FOMC, Fed) | 0.0 (no catalyst) → 1.0 (major event <7d) | 0.15 |
+| **P6** | `contrarian_check` | Apakah positioning crowded? (semua long?) | 0.0 (not crowded) → 1.0 (very crowded, reversal risk) | 0.10 |
+| **P7** | `historical_pattern` | Analog ke pattern lampau | -1.0 (pattern negatif) → +1.0 (pattern positif) | 0.10 |
+
+**Total weight = 1.0**
+
+**Final score per voter:** `Σ (P_i × weight_i)`
+**Final decision score (across voters):** per-parameter consensus analysis (lihat Aggregator)
+
+#### 3.5.4 Unified Prompt Template (Semua Voter)
+
+Semua voter dapat prompt dengan shape sama. Perbedaannya hanya di `[VOTER_ROLE]` dan `[VOTER_PERSPECTIVE]`.
+
+##### Template Umum
+```
+[SYSTEM]
+Kamu {VOTER_ROLE}. Analisa ticker berikut dan score 7 parameter validasi
+berikut HARUS dengan JSON valid. Gunakan {VOTER_PERSPECTIVE} untuk reasoning,
+tapi SEMUA voter menilai parameter yang sama.
+
+[USER]
+Ticker: {ticker}
+Sektor: {sector}
+Headlines 7 hari: {headlines_with_sources}
+Harga sekarang: {price}
+Context tambahan: {extra_context}
+
+Score 7 parameter berikut (HARUS output JSON valid):
+{
+  "P1_sentiment_polarity": {
+    "score": -1.0..+1.0,
+    "reasoning": "1-2 kalimat kenapa score ini",
+    "metadata": {"dominant_tone": "bullish|bearish|neutral", "confidence_level": 0..1}
+  },
+  "P2_signal_strength": {
+    "score": 0.0..1.0,
+    "reasoning": "1-2 kalimat",
+    "metadata": {"aligned_count": N, "total_count": N}
+  },
+  "P3_source_credibility": {
+    "score": 0.0..1.0,
+    "reasoning": "1-2 kalimat",
+    "metadata": {"tier1_count": N, "tier2_count": N, "tier3_count": N}
+  },
+  "P4_momentum_direction": {
+    "score": -1.0..+1.0,
+    "reasoning": "1-2 kalimat (fokus 48 jam terakhir)",
+    "metadata": {"recent_48h_tone": "...", "shift_from_7d_avg": number}
+  },
+  "P5_risk_catalysts": {
+    "score": 0.0..1.0,
+    "reasoning": "1-2 kalimat",
+    "metadata": {"catalyst_list": [{"type":"...", "date":"YYYY-MM-DD", "impact":"low|med|high"}], "days_to_nearest": N}
+  },
+  "P6_contrarian_check": {
+    "score": 0.0..1.0,
+    "reasoning": "1-2 kalimat",
+    "metadata": {"crowdedness_indicators": ["...", "..."]}
+  },
+  "P7_historical_pattern": {
+    "score": -1.0..+1.0,
+    "reasoning": "1-2 kalimat",
+    "metadata": {"analog_description": "...", "historical_outcome": "bullish|bearish|mixed"}
+  },
+  "overall_voter_confidence": 0.0..1.0,
+  "voter_id": "{voter_id}"
+}
+```
+
+##### Perbedaan Tiap Voter (Hanya di VOTER_ROLE + VOTER_PERSPECTIVE)
+
+| Voter | `VOTER_ROLE` | `VOTER_PERSPECTIVE` | Kekhususan Reasoning |
+|---|---|---|---|
+| **V1 Qwen-turbo** | "Quick signal analyst" | "Fokus keyword scanning dan surface pattern, cepat" | Kekuatan di P1-P2 (tone polarity + signal strength) |
+| **V2 Qwen-plus** | "Balanced equity analyst" | "Fokus source credibility + narrative consistency" | Kekuatan di P3 (source cred) + P1 nuance |
+| **V3 Gemini-flash** | "Realtime market validator (dengan Google Search grounding)" | "Gunakan Google Search untuk cek breaking news 24h dan upcoming catalysts" | Kekuatan di P4 (momentum 48h) + P5 (risk catalysts) |
+| **V4 Gemini-pro** | "Senior portfolio manager" | "Deep causal reasoning, pattern recognition, contrarian analysis" | Kekuatan di P6 (contrarian) + P7 (historical pattern) |
+
+##### Contoh Isi Prompt untuk V3 (Gemini-flash)
+```
+[SYSTEM]
+Kamu realtime market validator (dengan Google Search grounding).
+Gunakan Google Search untuk cek breaking news 24h dan upcoming catalysts.
+Score 7 parameter validasi dengan JSON valid.
+
+[USER]
+Ticker: NVDA
+Sektor: AI Chips / Semiconductor
+Headlines 7 hari: [list]
+Harga sekarang: $485.30
+
+Score 7 parameter P1-P7 dengan reasoning dan metadata (schema sama seperti voter lain).
+```
+
+Hasilnya: V3 akan score P5 (risk catalysts) dengan data real-time yang lebih update (Fed statement, earnings, SEC filings kemarin), sementara V1 cuma pakai headlines 7 hari.
+
+Tapi **schema outputnya sama persis**. Jadi aggregator bisa compare `V1.P5.score vs V3.P5.score` langsung.
+
+---
+
+##### Voter 1 — Qwen-turbo (Quick Signal Analyst)
+
+**Yang dicari:** Keyword sentiment, dominant tone, polarity cepat.
+**Yang divalidasi:** Apakah sentimen jelas dari permukaan? Berapa banyak headline align?
+
+```
+[SYSTEM]
+Kamu quick signal analyst. Tugas: identifikasi sentiment DOMINAN dari
+headlines dengan cepat (<2 detik). Fokus pada KATA KUNCI dan POLARITY.
+
+[USER]
+Ticker: {ticker}
+Headlines 7 hari terakhir:
+{headlines}
+
+Tugas:
+1. Scan keyword: "surge/crash/beat/miss/upgrade/downgrade/sued/launched"
+2. Hitung headline bullish vs bearish vs neutral
+3. Kalau 4+ dari 5 headline align → confidence tinggi
+
+Output JSON:
+{
+  "score": -1.0..+1.0,
+  "confidence": 0.0..1.0,
+  "reasoning": "1 kalimat: dominant tone + jumlah headlines align",
+  "key_keywords": ["surge", "upgrade", "beat"],
+  "voter": "V1_qwen_turbo"
+}
+```
+
+---
+
+##### Voter 2 — Qwen-plus (Balanced Analyst)
+
+**Yang dicari:** Sentimen + reasoning + source credibility + konsistensi.
+**Yang divalidasi:** Apakah sentimen punya rasional, bukan cuma keyword?
+
+```
+[SYSTEM]
+Kamu balanced equity analyst. Weight headlines berdasarkan source credibility
+(Reuters/WSJ/Bloomberg > blog random). Cari CONSISTENCY narrative.
+
+[USER]
+Ticker: {ticker}
+Sektor: {sector}
+Headlines 7 hari dengan source:
+{headlines_with_sources}
+
+Tugas:
+1. Weighted sentiment: Reuters/WSJ 2x bobot, lain 1x
+2. Cek konsistensi: ada headline yang kontradiksi?
+3. Short-term signal vs long-term thesis
+
+Output JSON:
+{
+  "score": -1.0..+1.0,
+  "confidence": 0.0..1.0,
+  "reasoning": "2-3 kalimat: dominant narrative + support/contradict",
+  "credible_sources": ["Reuters: ...", "WSJ: ..."],
+  "contradiction_found": true/false,
+  "voter": "V2_qwen_plus"
+}
+```
+
+---
+
+##### Voter 3 — Gemini-flash (Realtime Web Validator) ⭐
+
+**Yang dicari:** Breaking news dalam 24 jam, event market-moving, Twitter trends.
+**Yang divalidasi:** Apakah sentimen headlines kita masih valid, atau sudah ter-override event terkini?
+
+```
+[SYSTEM]
+Kamu realtime market validator. Gunakan Google Search grounding untuk
+cari BREAKING NEWS (24 jam terakhir) yang mungkin ubah sentiment.
+
+[USER]
+Ticker: {ticker}
+Headlines historis (7 hari): {headlines}
+
+Tugas:
+1. Search "{ticker} news today" dan "{ticker} breaking"
+2. Cari event dalam 24 jam: Fed announcement, earnings surprise,
+   geopolitical, insider selling, SEC filing
+3. Bandingkan: apakah event terkini CONFIRM atau CONTRADICT headlines?
+4. Cek X/Twitter trending (via search)
+
+Output JSON:
+{
+  "score": -1.0..+1.0,
+  "confidence": 0.0..1.0,
+  "reasoning": "2 kalimat: berita 24h + apakah ubah sentiment",
+  "breaking_news": [
+    {"time": "2h ago", "source": "CNBC", "headline": "...", "impact": "high"}
+  ],
+  "sentiment_overridden": true/false,
+  "voter": "V3_gemini_flash"
+}
+```
+
+---
+
+##### Voter 4 — Gemini-pro (Deep Multi-Angle Reasoner)
+
+**Yang dicari:** Causal chain, second-order effects, contrarian signal, hidden risks.
+**Yang divalidasi:** Apakah narasi sustainable? Ada elephant in the room?
+
+```
+[SYSTEM]
+Kamu senior portfolio manager. Tugas: analisa MULTI-ANGLE dengan
+deep reasoning. Cari CAUSAL CHAIN dan HIDDEN RISKS yang voter dangkal miss.
+
+[USER]
+Ticker: {ticker}
+Sektor: {sector}
+Market cap: {cap}
+Headlines 7 hari: {headlines}
+Related stocks performance: {peers}
+
+Tugas:
+1. Kenapa sentimen bullish/bearish? (causal reasoning)
+2. Second-order effects: dampak ke sektor, suppliers, competitors
+3. Contrarian check: apakah positioning crowded?
+4. Hidden risk: lawsuit, SEC probe, insider selling pattern
+5. Historical analog: situasi serupa dulu outcome apa?
+
+Output JSON:
+{
+  "score": -1.0..+1.0,
+  "confidence": 0.0..1.0,
+  "reasoning": "3-4 kalimat: causal explanation + risk assessment",
+  "causal_chain": ["...", "..."],
+  "hidden_risks": ["lawsuit pending", "insider selling"],
+  "contrarian_signal": true/false,
+  "historical_analog": "Similar to Q2 2024 when ...",
+  "voter": "V4_gemini_pro"
+}
+```
+
+---
+
+#### 3.5.4b Aggregator — Qwen-max (Per-Parameter Analysis)
+
+Aggregator **tidak** cuma rata-rata vote. Dia analisa per-parameter: siapa agree, siapa outlier, siapa paling kredibel per dimensi.
+
+##### Pre-Processing (Rule-Based, Sebelum LLM Call)
+
+```python
+# Input: 4 voter verdicts, masing-masing berisi P1-P7 scores
+voter_scores = {
+    "V1": {"P1": 0.5, "P2": 0.7, "P3": 0.4, "P4": 0.3, "P5": 0.2, "P6": 0.5, "P7": 0.1},
+    "V2": {"P1": 0.6, "P2": 0.8, "P3": 0.6, "P4": 0.4, "P5": 0.3, "P6": 0.5, "P7": 0.2},
+    "V3": {"P1": 0.7, "P2": 0.6, "P3": 0.5, "P4": 0.8, "P5": 0.7, "P6": 0.4, "P7": 0.1},  # V3 beda jauh di P4, P5
+    "V4": {"P1": 0.4, "P2": 0.5, "P3": 0.5, "P4": 0.3, "P5": 0.3, "P6": 0.7, "P7": 0.4},  # V4 beda di P6
+}
+
+# Per-parameter analysis
+per_parameter_analysis = {}
+for param in ["P1", "P2", ..., "P7"]:
+    scores = [v[param] for v in voter_scores.values()]
+    avg = mean(scores)
+    variance = var(scores)
+    
+    if variance < 0.05:
+        consensus_level = "UNANIMOUS"
+    elif variance < 0.15:
+        consensus_level = "STRONG"
+    elif variance < 0.30:
+        consensus_level = "MIXED"
+    else:
+        consensus_level = "SPLIT"
+    
+    # Identify outlier
+    outlier_voter = max(voter_scores.items(),
+                        key=lambda kv: abs(kv[1][param] - avg))
+    
+    per_parameter_analysis[param] = {
+        "avg": avg,
+        "variance": variance,
+        "consensus_level": consensus_level,
+        "outlier_voter": outlier_voter[0] if variance > 0.15 else None,
+    }
+```
+
+##### LLM Prompt untuk Aggregator (Qwen-max)
+
+Aggregator LLM diberi per-parameter breakdown + raw voter reasoning, lalu diminta justifikasi mana yang trusted per parameter.
+
+```
+[SYSTEM]
+Kamu senior portfolio manager dan meta-analyst. Terima breakdown 7 parameter
+dari 4 voter (2 Qwen Alibaba + 2 Gemini Google). Analisa per-parameter:
+siapa paling kredibel, apa consensus, apa outlier.
+
+[USER]
+Ticker: {ticker}
+Konteks: {sector, price, date}
+
+Per-Parameter Breakdown (hasil pre-processing):
+{per_parameter_analysis}
+
+Raw Voter Reasoning (untuk konteks):
+V1 Qwen-turbo:
+  P1: {score} — "{reasoning}"
+  P2: {score} — "{reasoning}"
+  ... (P3-P7)
+V2 Qwen-plus: ... (same structure)
+V3 Gemini-flash: ... (same structure, include breaking news if any)
+V4 Gemini-pro: ... (same structure, include contrarian + historical reasoning)
+
+Tugas:
+1. Untuk tiap parameter SPLIT atau MIXED:
+   - Identifikasi outlier voter dan ALASAN kenapa outlier
+   - Decide: outlier lebih kredibel atau konsensus lebih kredibel untuk situasi ini?
+   - Contoh: V3 Gemini-flash score P5 = 0.7 jauh dari V1-V2 (0.2, 0.3).
+     V3 kredibel kalau alasannya "breaking Fed statement 2h ago".
+     Konsensus (V1-V2 avg 0.25) kredibel kalau alasan V3 cuma noise.
+
+2. Untuk tiap parameter dengan STRONG/UNANIMOUS consensus:
+   - Pakai average sebagai score final parameter tersebut
+
+3. Compute final_score weighted:
+   final_score = Σ(P_i.final × weight_i)
+   weights: P1=0.25, P2=0.10, P3=0.10, P4=0.20, P5=0.15, P6=0.10, P7=0.10
+
+4. Output JSON structured breakdown.
+
+Return JSON:
+{
+  "per_parameter_final": {
+    "P1": {"final_score": -1..1, "trusted_voter": "V1|V2|V3|V4|CONSENSUS", "rationale": "..."},
+    "P2": {...},
+    ... (P3-P7)
+  },
+  "final_score": -1.0..+1.0,
+  "overall_confidence": 0.0..1.0,
+  "overall_consensus_level": "unanimous|strong|mixed|split",
+  "vendor_alignment": "both_agree|qwen_dominant|gemini_dominant|split",
+  "most_influential_parameter": "P1..P7",
+  "justification": "2-3 paragraf: kenapa final score begini, parameter mana paling influential, voter mana paling berperan",
+  "disagreement_summary": ["...", "..."]
+}
+```
+
+##### Output Aggregator — Contoh Nyata
+
+Dengan input sebelumnya (V3 outlier di P4/P5, V4 outlier di P6), aggregator return:
+
+```json
+{
+  "per_parameter_final": {
+    "P1": {"final_score": 0.55, "trusted_voter": "CONSENSUS", "rationale": "4 voter agree bullish 0.4-0.7, avg 0.55"},
+    "P4": {"final_score": 0.6, "trusted_voter": "V3", "rationale": "V3 catch Fed statement 2h ago yang shift momentum — konteks realtime trust V3"},
+    "P5": {"final_score": 0.6, "trusted_voter": "V3", "rationale": "V3 identify upcoming CPI release Rabu — valid catalyst risk"},
+    "P6": {"final_score": 0.55, "trusted_voter": "CONSENSUS", "rationale": "V4 flag crowded tapi reasoning lemah, konsensus lebih reliable"},
+    ...
+  },
+  "final_score": 0.42,
+  "overall_confidence": 0.72,
+  "overall_consensus_level": "mixed",
+  "vendor_alignment": "both_agree",
+  "most_influential_parameter": "P4_momentum_direction",
+  "justification": "Sentiment bullish disetujui semua voter (P1 avg 0.55), tapi momentum 48h shift bearish setelah Fed statement 2h ago (V3 catch, V1-V2 miss karena cuma baca headlines 7 hari). P5 risk catalysts (CPI Rabu) juga depress score. Final: GO HALF karena mix signal.",
+  "disagreement_summary": [
+    "V3 vs V1-V2 di P4/P5: V3 realtime context lebih trusted",
+    "V4 contrarian signal di P6 tidak didukung voter lain"
+  ]
+}
+```
+
+##### Keunggulan Per-Parameter Analysis
+
+| Feature | Benefit |
+|---|---|
+| **Granular trust** | Tiap parameter trust voter yang paling kompeten (bukan trust voter secara total) |
+| **Outlier detection** | Outlier bukan otomatis dibuang — di-evaluate dulu reasoning-nya |
+| **Audit trail** | Final score bisa di-trace per-parameter: "P4 push bearish karena Fed statement" |
+| **ML-ready** | Dataset `(P1-P7 scores, voter, outcome)` bisa dipakai train model akurasi voter per parameter |
+| **Debug friendly** | Kalau final decision salah, bisa identifikasi di parameter mana yang mis-scored |
+
+#### 3.5.4a Ringkasan Validasi Per-Voter (Quick Reference)
+
+| Voter | Input Utama | Horizon | Depth | Fokus Validasi | Kelebihan Unik |
+|---|---|---|---|---|---|
+| **V1 Qwen-turbo** | Headlines | 7 hari | Shallow | Keyword sentiment | Kecepatan triage |
+| **V2 Qwen-plus** | Headlines + source + sector | 7 hari | Medium | Sentiment + reasoning | Balance speed+quality |
+| **V3 Gemini-flash** | Headlines + **Google Search grounding** | **24 jam** | Medium | Realtime events, breaking news | Satu-satunya voter yang tahu "jam ini" |
+| **V4 Gemini-pro** | Headlines + wider context + peers | 7-30 hari | Deep | Causal chain + hidden risks | Multi-angle reasoning |
+
+**Kenapa setup ini robust?**
+- V1 + V2 (Qwen Alibaba) → kuat analisa teks dari static input
+- V3 (Gemini Google) → punya real-time web access yang Qwen nggak punya
+- V4 (Gemini Google) → deep reasoning untuk complex cases
+- Satu-satunya "superpower" Google (realtime search) ter-utilize di V3
+- Satu-satunya "superpower" Qwen (fast cost-effective analysis) ter-utilize di V1+V2
+
+#### 3.5.5 Peran dalam 5 Agents (Fase 2 Full Multi-Agent)
+
+Pada Fase 2, Swarm Voting ini jadi **NewsAgent** dalam sistem 5-agent lebih besar:
+
+| Agent | Mekanisme | Bobot Agent |
+|---|---|---|
+| **FundingAgent** | Pure calc dari Walt funding rate history (no LLM) | 0.20 |
+| **NewsAgent** | 4-Voter Swarm + Qwen-max Aggregator (section 3.5) | 0.20 |
+| **FundamentalAgent** | Qwen-max analisa earnings/filings | 0.20 |
+| **TechnicalAgent** | RSI/MACD/SMA dari Yahoo OHLC (no LLM) | 0.20 |
+| **RegimeAgent** | Qwen-turbo klasifikasi macro regime | 0.20 |
+
+Final decision = `Σ(agent.score × agent.confidence × 0.20)`.
+
+#### 3.5.6 Biaya & Latency per Scan
+
+| Config | Cost/scan | Latency | Vendor Diversity | Robustness |
+|---|---|---|---|---|
+| **2 Qwen + 2 Gemini + Qwen aggregator** ⭐ | ~$0.004-0.006 | ~4-5s | 50/50 balance | Sangat Tinggi |
+| (Alt) Qwen 3x + Qwen aggregator | ~$0.002-0.003 | ~3-4s | 100% Alibaba | Medium |
+| (Alt) Qwen + Gemini dual (current) | ~$0.002 | ~3s | 50/50 tapi no aggregator | Medium |
+| (Alt) 1 model saja | ~$0.001 | ~2s | Single vendor | Rendah |
+
+Delta biaya ~$0.004/scan × 100 scan/bulan = **$0.40/bulan**. Marginal cost, significant quality gain + eliminated vendor bias.
+
+#### 3.5.7 Fallback Strategy
+Jika salah satu voter gagal (API down / rate limit):
+- **3 voter tetap bisa jadi dasar keputusan** dengan bobot re-normalized (33% × 3)
+- Jika < 3 voter responsif → fallback ke `SINGLE_MODEL` mode (dual-AI existing)
+- Aggregator tetap jalan dengan jumlah voter yang ada
+- Log warning + Telegram alert ke owner
 
 ---
 
@@ -148,7 +629,15 @@ Setelah strategi dan eksekusi pada Fase 1 terbukti andal dan menghasilkan imbal 
       │   ┌─────────────────────────────────────────────────┐   │
       │   │      Shared Multi-Agent AI Core (Zero Waste)    │   │
       │   │      - Market Regime Engine (VIX, DXY, SPY)     │   │
-      │   │      - News Sentiment (3x Qwen Consensus)       │   │
+      │   │      - News Sentiment Swarm Voting (50/50):     │   │
+      │   │         Voter 1: Qwen-turbo   (Alibaba, quick)  │   │
+      │   │         Voter 2: Qwen-plus    (Alibaba, balance)│   │
+      │   │         Voter 3: Gemini-flash (Google, realtime)│   │
+      │   │         Voter 4: Gemini-pro   (Google, deep)    │   │
+      │   │      - Aggregator: Qwen-max (meta-reasoner)     │   │
+      │   │        * Output: score, confidence, justification│   │
+      │   │        * Bukan averaging — reasoning-based      │   │
+      │   │        * Vendor-neutral meta-level              │   │
       │   │      - 1x Call -> Dispatched to All Active Users│   │
       │   └────────────────────────┬────────────────────────┘   │
       │                            │ Sinyal Global              │

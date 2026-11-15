@@ -2,9 +2,9 @@
 
 **Pemilik:** Rizal Dicky  
 **Dibuat:** 13 November 2026  
-**Terakhir Diperbarui:** 14 November 2026 (Sinkronisasi Live GitHub Actions & Exclude Crypto/GRAM)  
+**Terakhir Diperbarui:** 15 November 2026 (Swarm AI 4-Voter P1-P7 & Qwen-Max Aggregator Architecture)  
 **Platform Eksekusi:** Walt Perps Relay API (`walletbot.me`) via GitHub Actions Autonomous Runner  
-**AI Research Engine:** Dual-AI Collaboration (Alibaba Cloud Qwen-Plus & Google Gemini via `DASHSCOPE_API_GEMINI_KEY`)  
+**AI Research Engine:** 4-Voter Swarm (2 Qwen + 2 Gemini, Vendor Balance 50/50) + Meta-Aggregator Qwen-Max  
 **Notifikasi:** Telegram Bot API (`notifier.py` → `TELEGRAM_CHAT_ID`)  
 **Target:** $100/bulan dari funding income untuk cover tagihan rutin  
 
@@ -107,34 +107,45 @@ Setiap posisi baru langsung dilindungi oleh batas pengaman baseline:
 
 ## 5. Dual-AI Collaboration Layer (Qwen-Plus + Google Gemini)
 
-Khusus untuk instrumen saham US, sebelum order dieksekusi, bot menjalankan lapisan analisis fundamental dan sentimen menggunakan arsitektur **Dual-AI Collaboration & Consensus** yang memadukan dua model kecerdasan buatan terdepan:
-1. **Model 1: Alibaba Cloud Qwen-Plus** (via `DASHSCOPE_API_KEY`)
-2. **Model 2: Google Gemini 1.5 Flash** (via `DASHSCOPE_API_GEMINI_KEY` / `GEMINI_API_KEY`)
+Khusus untuk instrumen saham US, sebelum order dieksekusi, bot menjalankan lapisan analisis fundamental dan sentimen menggunakan arsitektur **4-Voter Swarm AI + Qwen-Max Aggregator** (sesuai PRD 3.5) yang memadukan 4 model kecerdasan buatan dengan keseimbangan vendor 50/50:
+1. **V1: Alibaba Qwen-Turbo** — *Quick Signal Analyst* (deteksi kata kunci dan polaritas permukaan).
+2. **V2: Alibaba Qwen-Plus** — *Balanced Equity Analyst* (kredibilitas sumber berita dan konsistensi narasi).
+3. **V3: Google Gemini-Flash-Latest** — *Realtime Market Validator* (cek breaking news 24 jam dan katalis terkini).
+4. **V4: Google Gemini-Pro-Latest** — *Deep Multi-Angle Reasoner* (analisis kausalitas, contrarian crowdedness, dan pola historis).
 
-Kedua model mengevaluasi berita pasar secara independen, kemudian disintesiskan oleh konsensus engine untuk menghasilkan keputusan yang lebih tajam dan objektif.
+Keempat voter menilai **7 Parameter Standar Validasi (P1-P7)** yang sama secara independen:
+- **P1 `sentiment_polarity` (Weight: 0.25):** Nada sentimen 7 hari (-1.0 bearish ekstrem hingga +1.0 bullish ekstrem).
+- **P2 `signal_strength` (Weight: 0.10):** Tingkat keselarasan arah berbagai headline (0.0 divergen hingga 1.0 konsensus penuh).
+- **P3 `source_credibility` (Weight: 0.10):** Bobot kualitas reputasi sumber (Tier 1 seperti Reuters/WSJ vs media umum).
+- **P4 `momentum_direction` (Weight: 0.20):** Arah momentum sentimen 48 jam terakhir (-1.0 reversal hingga +1.0 akseleratif).
+- **P5 `risk_catalysts` (Weight: 0.15):** Event risiko mendatang seperti rilis earnings, FOMC, atau regulasi (0.0 aman hingga 1.0 event major <7 hari).
+- **P6 `contrarian_check` (Weight: 0.10):** Posisi pasar terlalu padat/crowded (0.0 sehat hingga 1.0 sangat crowded berisiko reversal).
+- **P7 `historical_pattern` (Weight: 0.10):** Analogi terhadap preseden pola historis pasar serupa (-1.0 negatif hingga +1.0 positif).
 
-### 5.1 Parameter Riset AI
-1. **Deteksi Jadwal Rilis Laporan Keuangan (Earnings Date):**
-   - Menghitung jumlah hari menuju rilis earnings berikutnya (`days_to_earnings`).
-   - Mencegah risiko lonjakan volatilitas harga ekstrem (*binary event risk*).
-2. **Dual-Model Sentiment Analysis & Cross-Validation:**
-   - Mengambil intisari berita finansial terkini (Yahoo Finance Feed).
-   - Qwen dan Gemini masing-masing mengklasifikasikan sentimen: `bullish`, `bearish`, atau `neutral` beserta confidence score dan ringkasan narasi.
-3. **Logika Konsensus Kolaborasi AI:**
-   - **STRONG_CONSENSUS (Konsensus Kuat):** Qwen dan Gemini sepakat pada arah yang sama (keduanya *bullish* atau keduanya *bearish*). Skor keyakinan (*confidence*) ditingkatkan dan rekomendasi eksekusi menjadi `GO (Full Size)`.
-   - **PARTIAL_CONSENSUS (Konsensus Parsial):** Satu model menentukan arah (*directional*) sedangkan model lainnya menilai *neutral*. Arah dari model aktif dijadikan acuan dengan alokasi modal terukur.
-   - **CONFLICT (Proteksi Konflik ⚡):** Qwen dan Gemini saling berlawanan arah (satu *bullish*, satu *bearish*). Pasar dinilai dalam kondisi polarisasi tinggi / bias tak terduga. Sistem otomatis mengaktifkan **circuit breaker proteksi modal**: sentimen diturunkan ke `neutral` dan ukuran posisi dibatasi ke `HALF Size` (atau `SKIP`).
-   - **RESILIENT FALLBACK:** Jika salah satu API key mengalami limit atau gangguan jaringan, sistem otomatis berjalan dengan mode *Single-Model* tanpa memutus alur trading.
+### 5.1 Pre-Processing Varians & Meta-Aggregator (Qwen-Max)
+1. **Analisis Varians Parameter (Rule-Based):**
+   - Menghitung rata-rata (*mean*) dan varians untuk setiap parameter P1–P7.
+   - Mengklasifikasikan level konsensus: `UNANIMOUS` (<0.05), `STRONG` (<0.15), `MIXED` (<0.30), atau `SPLIT` (≥0.30).
+   - Mendeteksi voter outlier bila varians > 0.15.
+2. **Meta-Aggregator (Qwen-Max):**
+   - Menganalisis alasan outlier dan bobot per-parameter secara objektif tanpa bias vendor.
+   - Menghasilkan `final_score` terbobot, `overall_confidence`, `overall_consensus_level`, dan `vendor_alignment`.
+   - Mengaktifkan proteksi bila terjadi `SPLIT` konsensus atau divergensi tajam antara kubu Qwen dan Gemini.
+3. **Fallback Synthesis:**
+   - Bila salah satu voter mengalami rate limit atau gangguan koneksi, sistem tetap berjalan dengan voter yang aktif secara re-normalized.
+   - Jika Meta-Aggregator offline, sistem mengeksekusi rumus sintesis deterministik berbasis bobot P1–P7.
 
-### 5.2 Decision Matrix (Keputusan Eksekusi AI)
+### 5.2 Decision Matrix (Keputusan Eksekusi Swarm AI)
 
-| Sinyal Funding | Status Konsensus AI | Sentimen Gabungan | Hari Earnings | Keputusan Bot | Aksi & Margin |
+| Sinyal Funding | Status Konsensus Swarm | Skor Final & Arah | Risk Catalyst (P5) | Keputusan Bot | Aksi & Margin |
 |---|---|---|---|---|---|
-| Tinggi (≥0.5%/hari) | **STRONG_CONSENSUS** | Aligned dg posisi | > 7 hari | ✅ **GO (Full Size)** | Buka posisi full ($2.50 – $3.00 USDC) |
-| Tinggi (≥0.5%/hari) | **PARTIAL_CONSENSUS** | Aligned dg posisi | > 7 hari | ✅ **GO / HALF** | Buka posisi ($1.50 – $2.50 USDC) |
-| Tinggi (≥0.5%/hari) | **CONFLICT (Qwen vs Gemini)** | Netral (Proteksi) | > 7 hari | ⚠️ **HALF / SKIP** | Proteksi risiko: alokasi separuh ($1.25) |
-| Tinggi (≥0.5%/hari) | Model Manapun | Melawan arah posisi | > 7 hari | ❌ **SKIP** | Batalkan eksekusi, hindari melawan tren |
-| Berapapun | Model Manapun | Berapapun | **≤ 7 hari** | ❌ **SKIP** | Batalkan eksekusi (hindari risiko earnings) |
+| Tinggi (≥0.5%/hari) | **UNANIMOUS / STRONG** | Aligned dg posisi | P5 < 0.70 | ✅ **GO (Full Size)** | Buka posisi full ($2.50 – $3.00 USDC) |
+| Tinggi (≥0.5%/hari) | **MIXED** | Aligned dg posisi | P5 < 0.70 | ⚠️ **HALF** | Buka posisi separuh ($1.25 – $1.50 USDC) |
+| Tinggi (≥0.5%/hari) | Model Manapun | Aligned dg posisi | **P5 ≥ 0.70** (Katalis Tinggi) | ⚠️ **HALF / SKIP** | Proteksi event katalis: batas ukuran posisi |
+| Tinggi (≥0.5%/hari) | **SPLIT / Vendor Conflict** | Netral / Terpecah | Berapapun | ⚠️ **HALF** | Proteksi divergensi sinyal AI: setengah posisi |
+| Tinggi (≥0.5%/hari) | Model Manapun | Crowded (**P6 ≥ 0.85**) | Berapapun | ⚠️ **HALF** | Proteksi contrarian crowded positioning |
+| Tinggi (≥0.5%/hari) | Model Manapun | Melawan arah posisi | Berapapun | ❌ **SKIP** | Batalkan eksekusi, hindari melawan tren |
+| Berapapun | Model Manapun | Berapapun | **Earnings ≤ 7 hari** | ❌ **SKIP** | Batalkan eksekusi (hindari risiko earnings) |
 | Rendah (<0.5%/hari)| Model Manapun | Berapapun | Berapapun | ❌ **SKIP** | Batalkan eksekusi (funding rate kurang menarik) |
 
 *Aturan Alignment:*
