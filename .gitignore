@@ -6,6 +6,9 @@ __pycache__/
 .venv/
 venv/
 *.log
+logs/*.csv
+logs/*.json
+!logs/.gitkeep
 .DS_Store
 .vscode/
 .idea/

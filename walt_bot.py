@@ -871,6 +871,14 @@ def scan_with_research(client: WaltClient) -> dict:
     sent = send_telegram(msg)
     log.info(f"Telegram sent: {sent}")
 
+    # Logging ke Google Sheet / CSV
+    try:
+        from sheet_logger import log_scan
+        log_res = log_scan(summary, researches)
+        log.info(f"📊 Logging scan result: {log_res}")
+    except Exception as e:
+        log.warning(f"Logging scan to sheet failed: {e}")
+
     return {"summary": summary, "researches": {k: v.__dict__ for k, v in researches.items()}}
 
 
@@ -999,6 +1007,15 @@ def market_execute(client: WaltClient, dry_run: bool = False) -> dict:
             msg_lines.append(f"• {e['asset']}: {e['reason']}")
 
     send_telegram("\n".join(msg_lines))
+
+    # Logging eksekusi ke Google Sheet / CSV
+    try:
+        from sheet_logger import log_execution
+        log_res = log_execution(executions)
+        log.info(f"📊 Logging executions result: {log_res}")
+    except Exception as e:
+        log.warning(f"Logging execution to sheet failed: {e}")
+
     return {"executions": executions, "deployed": deployed, "available": available}
 
 

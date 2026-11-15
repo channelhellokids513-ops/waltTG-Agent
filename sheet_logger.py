@@ -1,0 +1,197 @@
+"""
+Google Sheets & Local CSV Logger for Walt Bot (Phase 1 Logging).
+Mencatat hasil daily scan, evaluasi Swarm AI (P1-P7), dan eksekusi order ke:
+  1. Google Spreadsheet via Webhook (Google Apps Script Web App)
+  2. Google Spreadsheet via gsheets CLI (jika terinstall lokal)
+  3. Local CSV Audit Log (logs/scan_history.csv & logs/executions_history.csv)
+"""
+
+import os
+import csv
+import json
+import logging
+import subprocess
+from datetime import datetime, timezone
+from typing import Any, Optional
+import httpx
+
+log = logging.getLogger("sheet_logger")
+
+DEFAULT_SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID", "1ag6MqYnOLdZgkFwk_cs3W-22EOX5e5DGQTVvPWENHTg")
+DEFAULT_WEBHOOK_URL = os.getenv("GOOGLE_SHEET_WEBHOOK_URL", "")
+
+
+def _ensure_dir(path: str):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
+
+def log_scan_to_csv(summary: dict, researches: dict[str, Any], filepath: str = "logs/scan_history.csv"):
+    """Catat baris scan ke file CSV lokal."""
+    _ensure_dir(filepath)
+    file_exists = os.path.exists(filepath)
+
+    headers = [
+        "timestamp_utc", "balance_usdc", "open_positions", "asset", "side",
+        "funding_daily_pct", "price", "swarm_score", "sentiment", "consensus",
+        "vendor_alignment", "p1_polarity", "p4_momentum", "p5_catalysts", "p6_contrarian",
+        "verdict", "margin_allocated", "reason", "narrative"
+    ]
+
+    ts = summary.get("ts") or datetime.now(timezone.utc).isoformat()
+    balance = "0.0"
+    accounts = summary.get("balance", [])
+    if accounts:
+        balance = str(accounts[0].get("balance_available", "0.0"))
+    pos_count = summary.get("positions_count", 0)
+
+    rows = []
+    for opp in summary.get("top_opportunities", []):
+        asset = opp["asset"]
+        side = opp["side"].upper()
+        funding = opp["funding_daily_pct"]
+        price = opp.get("price", 0.0)
+        res = researches.get(asset)
+
+        # Decision
+        from walt_bot import decide_go_nogo, DEFAULT_MARGIN
+        from types import SimpleNamespace
+        pseudo_opp = SimpleNamespace(base_asset=asset, side=opp["side"], funding_daily=funding/100)
+        verdict, reason, mult = decide_go_nogo(pseudo_opp, res)
+        margin = DEFAULT_MARGIN * mult
+
+        score = f"{res.final_score:+.2f}" if res and hasattr(res, "final_score") else "—"
+        sent = res.news_sentiment if res else "—"
+        cons = getattr(res, "overall_consensus_level", "—") if res else "—"
+        align = getattr(res, "vendor_alignment", "—") if res else "—"
+        p1_7 = getattr(res, "p1_to_p7_scores", {}) if res else {}
+        p1 = f"{p1_7.get('P1_sentiment_polarity', 0):+.2f}" if p1_7 else "—"
+        p4 = f"{p1_7.get('P4_momentum_direction', 0):+.2f}" if p1_7 else "—"
+        p5 = f"{p1_7.get('P5_risk_catalysts', 0):.2f}" if p1_7 else "—"
+        p6 = f"{p1_7.get('P6_contrarian_check', 0):.2f}" if p1_7 else "—"
+        narrative = getattr(res, "narrative", "") if res else ""
+
+        rows.append([
+            ts, balance, pos_count, asset, side, f"{funding:+.3f}%",
+            f"{price:.4f}", score, sent, cons, align, p1, p4, p5, p6,
+            verdict, f"{margin:.2f}", reason, narrative
+        ])
+
+    with open(filepath, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(headers)
+        writer.writerows(rows)
+
+    return rows
+
+
+def log_scan_via_webhook(rows: list[list[Any]], webhook_url: str) -> bool:
+    """Kirim data scan ke Google Sheets melalui Google Apps Script Web App."""
+    if not webhook_url:
+        return False
+    try:
+        payload = {"action": "log_scan", "sheet": "Daily_Scans", "rows": rows}
+        r = httpx.post(webhook_url, json=payload, timeout=15.0)
+        return r.status_code == 200
+    except Exception as e:
+        log.warning(f"Gagal kirim ke Google Sheets Webhook: {e}")
+        return False
+
+
+def log_scan_via_gsheets_cli(rows: list[list[Any]], spreadsheet_id: str) -> bool:
+    """Kirim data scan ke Google Sheets menggunakan gsheets CLI jika tersedia."""
+    try:
+        batch_req = [{"op": "append", "range": "Daily_Scans!A1", "data": rows}]
+        tmp_json = "logs/_tmp_sheet_batch.json"
+        _ensure_dir(tmp_json)
+        with open(tmp_json, "w", encoding="utf-8") as f:
+            json.dump(batch_req, f)
+
+        cmd = f'gsheets mutate batch {spreadsheet_id} -f "{tmp_json}"'
+        res = subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=25.0
+        )
+        return res.returncode == 0
+    except Exception as e:
+        log.warning(f"gsheets CLI logging failed: {e}")
+        return False
+    finally:
+        if os.path.exists(tmp_json):
+            try:
+                os.remove(tmp_json)
+            except Exception:
+                pass
+
+
+def log_scan(summary: dict, researches: dict[str, Any]) -> dict:
+    """
+    Eksekusi logging lengkap untuk Daily Scan:
+    1. CSV lokal
+    2. Google Apps Script Webhook (jika URL tersedia)
+    3. gsheets CLI (jika terinstall di environment)
+    """
+    rows = log_scan_to_csv(summary, researches)
+
+    webhook_ok = False
+    webhook_url = os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", DEFAULT_WEBHOOK_URL)
+    if webhook_url:
+        webhook_ok = log_scan_via_webhook(rows, webhook_url)
+
+    cli_ok = False
+    sheet_id = os.environ.get("GOOGLE_SHEET_ID", DEFAULT_SPREADSHEET_ID)
+    if not webhook_ok and sheet_id:
+        cli_ok = log_scan_via_gsheets_cli(rows, sheet_id)
+
+    return {
+        "rows_count": len(rows),
+        "csv_logged": True,
+        "webhook_logged": webhook_ok,
+        "cli_logged": cli_ok,
+        "sheet_id": sheet_id,
+    }
+
+
+def log_execution(executions: list[dict], filepath: str = "logs/executions_history.csv") -> dict:
+    """Catat eksekusi order ke CSV lokal dan Google Sheet (Executions_Log)."""
+    _ensure_dir(filepath)
+    file_exists = os.path.exists(filepath)
+
+    headers = [
+        "timestamp_utc", "asset", "side", "verdict", "margin", "entry_price",
+        "tp", "sl", "order_id", "reason"
+    ]
+
+    ts = datetime.now(timezone.utc).isoformat()
+    rows = []
+    for ex in executions:
+        rows.append([
+            ts,
+            ex.get("asset", ""),
+            ex.get("side", "").upper(),
+            ex.get("verdict", ""),
+            ex.get("margin", 0.0),
+            ex.get("price", 0.0),
+            ex.get("tp", ""),
+            ex.get("sl", ""),
+            ex.get("order_id", ""),
+            ex.get("reason", "")
+        ])
+
+    with open(filepath, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(headers)
+        writer.writerows(rows)
+
+    webhook_url = os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", DEFAULT_WEBHOOK_URL)
+    if webhook_url and rows:
+        try:
+            httpx.post(webhook_url, json={"action": "log_execution", "sheet": "Executions_Log", "rows": rows}, timeout=15.0)
+        except Exception:
+            pass
+
+    return {"executions_count": len(rows), "csv_logged": True}
