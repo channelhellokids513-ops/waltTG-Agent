@@ -2,10 +2,10 @@ name: Walt Market-Open Execute (US stocks)
 
 on:
   schedule:
-    # 21:43 WIB Mon-Fri = 14:43 UTC Mon-Fri (menit prima sepi antrean, 13 mnt pasca US Open)
-    # (US stock market open 09:30 ET = 21:30 WIB saat Standard Time)
-    # Jadwal didaftarkan ulang oleh akun pemilik repo (2026-11-16)
-    - cron: '43 14 * * 1-5'
+    # 09:43 ET Mon-Fri (13 menit setelah US market open 09:30 ET)
+    # Dua entry: EDT (UTC-4) dan EST (UTC-5). Runtime check mencegah double-run.
+    - cron: '43 13 * * 1-5'   # 09:43 EDT (Mar-Nov)
+    - cron: '43 14 * * 1-5'   # 09:43 EST (Nov-Mar)
   workflow_dispatch:
     inputs:
       dry_run:
@@ -27,7 +27,25 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Check NY time (skip wrong UTC offset)
+        id: ny_time_check
+        if: github.event_name == 'schedule'
+        shell: bash
+        run: |
+          NY_HOUR=$(TZ=America/New_York date +%H)
+          NY_MIN=$(TZ=America/New_York date +%M)
+          echo "Current NY time: ${NY_HOUR}:${NY_MIN}"
+
+          if [ "$NY_HOUR" = "09" ] && [ "$NY_MIN" -ge 40 ] && [ "$NY_MIN" -le 50 ]; then
+            echo "run_execute=true" >> "$GITHUB_OUTPUT"
+            echo "✅ Within 09:40–09:50 ET window. Proceeding."
+          else
+            echo "run_execute=false" >> "$GITHUB_OUTPUT"
+            echo "⚠️ Not in 09:40–09:50 ET window. Skipping scheduled trigger."
+          fi
+
       - name: Execute planned positions
+        if: github.event_name != 'schedule' || steps.ny_time_check.outputs.run_execute == 'true'
         env:
           WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}
           WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
@@ -46,7 +64,7 @@ jobs:
           python walt_bot.py market_execute 2>&1 | tee execute_output.log
 
       - name: Upload Logs Artifact
-        if: always()
+        if: always() && (github.event_name != 'schedule' || steps.ny_time_check.outputs.run_execute == 'true')
         uses: actions/upload-artifact@v4
         with:
           name: walt-execute-logs
@@ -54,7 +72,7 @@ jobs:
           retention-days: 30
 
       - name: Publish Summary
-        if: always()
+        if: always() && (github.event_name != 'schedule' || steps.ny_time_check.outputs.run_execute == 'true')
         run: |
           echo "## 🚀 Hasil Market Execute" >> $GITHUB_STEP_SUMMARY
           echo '```text' >> $GITHUB_STEP_SUMMARY
