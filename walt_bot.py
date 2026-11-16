@@ -311,6 +311,20 @@ def rank_opportunities(
         ))
     # Rank by absolute funding, descending
     opps.sort(key=lambda o: abs(o.funding_daily), reverse=True)
+    if not opps:
+        candidates = []
+        for c in contracts:
+            if c.get("base_asset") in target_assets:
+                candidates.append((
+                    c["base_asset"],
+                    float(c.get("volume_24h_usd", 0)),
+                    float(c.get("funding_rate_hourly", 0)) * 24
+                ))
+        candidates.sort(key=lambda x: abs(x[2]), reverse=True)
+        log.info(
+            f"0 opps lolos filter (MIN_VOL=${MIN_VOL_24H:,.0f}, MIN_FR={MIN_FUNDING_DAILY*100:.2f}%/hari). "
+            f"Top kandidat: {[(a, f'vol=${v:,.0f}', f'fr={fr*100:+.3f}%/hari') for a, v, fr in candidates[:5]]}"
+        )
     return opps
 
 
