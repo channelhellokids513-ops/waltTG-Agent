@@ -99,28 +99,39 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
 ```
 
 ### 3.3 Jadwal & Spesifikasi Eksekusi Fase 1
-1. **Daily Scan (`daily-scan.yml` — 07:17 WIB / 00:17 UTC):**
-   - Mengambil seluruh 127 kontrak perpetual di Walt.
-   - Menyaring volume 24 jam > $1.000.000 USD.
+1. **Daily Scan (`daily-scan.yml` — 07:17 WIB / 00:17 UTC via `walt-daily-scan` Scheduler):**
+   - Mengambil seluruh 130 kontrak perpetual di Walt.
+   - Menyaring volume 24 jam > $1.000.000 USD dan `|funding_daily| >= 0.50%/hari`.
    - Menghitung *annualized funding rate* untuk SHORT (funding positif tinggi) dan LONG (funding negatif ekstrim).
-   - Memanggil Swarm AI (`llm_research.py` — Qwen + Gemini) untuk menganalisis sentimen berita & makro aset pilihan.
-   - Mengirimkan rangkuman terstruktur peluang terbaik langsung ke Telegram Owner.
-2. **Risk Monitor (`risk-monitor.yml` — Tiap 4 Jam di menit 23):**
-   - Mengecek seluruh posisi aktif Owner.
+   - Memanggil Swarm AI (`llm_research.py` — Qwen + Gemini 4-voter) untuk menganalisis sentimen berita & makro aset pilihan.
+   - Mengirimkan rangkuman terstruktur peluang terbaik langsung ke Telegram Owner & Google Sheets.
+2. **Risk Monitor (`risk-monitor.yml` — Tiap 4 Jam di menit 23 WIB via `walt-risk-monitor` Scheduler):**
+   - Mengecek seluruh posisi aktif Owner secara otomatis.
    - Menghitung akumulasi funding rate yang sudah diperoleh.
-   - Memverifikasi rasio margin dan batas likuidasi.
-   - Mengirim peringatan jika rasio risiko mendekati ambang batas (*buffer* minimum 15%).
-3. **Market Execute (`market-execute.yml` — 21:43 WIB Senin–Jumat / 14:43 UTC):**
-   - Bertepatan dengan pembukaan pasar saham AS (US Market Open).
-   - Membuka posisi terukur pada saham US (misal: NVDA, MSTR, PLTR, TSLA) atau komoditas (XAU, XAG, BRENTOIL).
-   - Parameter ketat: Leverage maksimal 2x, alokasi margin $2.50 – $3.00 USDC per posisi, maksimal 2–4 posisi simultan.
-   - Penanganan fallback: Jika order dengan TP/SL gagal karena buffer exchange, bot mengeksekusi order terbuka dan mengatur penutupan terpisah.
+   - Menerapkan **4 Lapis Proteksi Risiko**:
+     - Lapis 1: Baseline Dynamic TP/SL.
+     - Lapis 2: Funding Integrity (*emergency close* jika funding flip sign, breakeven jika funding meluruh tajam <0.1%/hari).
+     - Lapis 3: Volatility tightening (SL diperketat ke 4% jika loss > 3%).
+     - Lapis 4: **Tangga Trailing Stop 4-Tiers** (+1.5% zero-risk lock ke Entry+0.3%, +2.5% lock cuan 1.2%, +4% trailing 1.5%, +6% trailing 1.0%).
+3. **Market Execute (`market-execute.yml` — 21:43 WIB Senin–Jumat / 14:43 UTC via `walt-market-execute` Scheduler):**
+   - Bertepatan dengan likuiditas tinggi pembukaan pasar saham AS (US Market Open).
+   - Membuka posisi terukur pada saham US (NVDA, MSTR, PLTR, TSLA) atau komoditas (XAU, XAG, BRENTOIL).
+   - Parameter ketat: Leverage maksimal 2x, alokasi margin $2.50 – $3.00 USDC per posisi, buffer modal wajib 15%.
+   - **Order Size Clamping:** Otomatis menyesuaikan margin jika derived size di bawah `min_size_base` bursa Walt (contoh: NVDA $1.79).
+4. **Crypto Execute (`crypto-execute.yml` — Tiap 8 Jam / 07:11, 15:11, 23:11 WIB):**
+   - Modul mandiri untuk capture yield crypto bluechip (`BTC`, `ETH`, `SOL`).
+   - Strict altcoin exclusion: token spekulatif dan memecoin (seperti GRAM) di-blacklist permanen.
+   - Dynamic TP/SL: TP +3.5%, SL 4.5% (cepat amankan sebelum dump).
+   - Dapat diaktifkan atau dinonaktifkan secara independen tanpa memengaruhi bot saham.
 
 ### 3.4 Langkah Penerapan Segera (Fase 1 Action Plan)
-- [x] Pastikan GitHub Secret terkonfigurasi lengkap di repository (`WALT_CLIENT_ID`, `WALT_REFRESH_TOKEN`, `DASHSCOPE_API_KEY`, `DASHSCOPE_API_GEMINI_KEY` (Gemini — fallback `GEMINI_API_KEY`), `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`).
-- [ ] Lakukan verifikasi uji coba manual (*manual trigger*) untuk workflow `daily-scan.yml`, `risk-monitor.yml`, dan `market-execute.yml` (mode `DRY_RUN=true`).
-- [ ] Aktifkan mode eksekusi riil pada saldo terdedikasi di Walt Perps.
-- [ ] Pantau notifikasi Telegram selama 7 hari berturut-turut untuk kalibrasi funding rate capture dan stabilitas rotasi token.
+- [x] Pastikan GitHub Secret terkonfigurasi lengkap di repository (`WALT_CLIENT_ID`, `WALT_REFRESH_TOKEN`, `DASHSCOPE_API_KEY`, `DASHSCOPE_API_GEMINI_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GOOGLE_SHEET_WEBHOOK_URL`, `GH_PAT`).
+- [x] Lakukan verifikasi uji coba manual (*manual trigger*) untuk workflow `daily-scan.yml`, `risk-monitor.yml`, `market-execute.yml`, dan `crypto-execute.yml`.
+- [x] Pasang Google Cloud Scheduler Bridge (Jakarta `asia-southeast2`) untuk trigger tepat detik tanpa delay cron GitHub.
+- [x] Implementasikan Dynamic TP/SL per Asset Class, Windfall Rule, dan Tangga Trailing Stop 4-Tier (+1.5% Zero-Risk Lock).
+- [x] Terapkan Minimum Order Size Clamping (`min_size_base`) untuk mencegah kegagalan risk check Walt.
+- [x] Hubungkan real-time logging ke Google Sheets via Google Apps Script Webhook.
+- [x] Aktifkan mode eksekusi riil pada saldo terdedikasi di Walt Perps.
 
 ### 3.5 Arsitektur Riset AI: Swarm Voting + Qwen Aggregator
 

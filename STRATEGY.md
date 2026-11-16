@@ -87,21 +87,26 @@ Setiap kontrak di Walt memiliki ketentuan *minimum order size (min_size_base)*. 
 5. **No Duplicate:** Belum ada posisi aktif yang terbuka pada kontrak/aset yang sama.
 6. **AI Research Confirmation:** Lolos verifikasi model Qwen (skor keputusan **GO** atau **HALF**).
 
-### 4.2 Alur Eksekusi API Walt (Preview → Confirm → Execute)
+### 4.2 Alur Eksekusi API Walt & Minimum Order Sizing
 Walt mewajibkan pola 2-tahap dengan *time-limited confirmation token*:
 1. `perps_prepare_order_place` — Meminta pratinjau order dengan parameter: `contractId`, `side`, `type: "market"`, `leverage: 2`, `amount`, `price`, dan `autoClose` (TP/SL).
-2. Verifikasi respon: Memastikan `ok = true` dan parameter risiko disetujui.
-3. `perps_execute_operation` — Mengirimkan `confirmationToken` (berlaku ~90 detik) untuk konfirmasi eksekusi order di bursa.
-4. **Fallback TP/SL Otomatis:** Jika bursa menolak order awal karena batasan parameter TP/SL di luar toleransi slippage kontrak, bot mengeksekusi order terbuka tanpa `autoClose`, kemudian mengatur TP/SL secara terpisah via `perps_prepare_auto_close_set`.
+2. **Validasi & Clamping Minimum Order Size (`min_size_base`):**
+   - Bursa Walt mensyaratkan: $\text{Derived Size} = (\text{amount} \times \text{leverage} / \text{price}) \ge \text{min\_size\_base}$.
+   - Pada aset berharga tinggi (misal `NVDA` @ $140, `min_size_base = 0.025 NVDA`), keputusan `HALF` size ($1.25 margin) menghasilkan ukuran order di bawah batas bursa ($0.0178$ NVDA) dan ditolak bursa.
+   - **Solusi Clamping Otomatis:** Bot menghitung margin minimum bursa:
+     $$\text{margin}_{\min} = \frac{\text{min\_size\_base} \times \text{price}}{\text{leverage}} \times (1 + \text{slippage}) + 0.02$$
+     Jika `margin < margin_min` dan masih di bawah toleransi risiko portofolio ($\le \text{DEFAULT\_MARGIN} \times 1.5$), margin otomatis dinaikkan ke batas minimum kontrak (misal $1.79 untuk NVDA). Jika melebihi batas risiko, posisi diskip dengan alasan transparan.
+3. Verifikasi respon: Memastikan `ok = true` dan parameter risiko disetujui.
+4. `perps_execute_operation` — Mengirimkan `confirmationToken` (berlaku ~90 detik) untuk konfirmasi eksekusi order di bursa.
+5. **Fallback TP/SL Otomatis:** Jika bursa menolak order awal karena batasan parameter TP/SL di luar toleransi slippage kontrak, bot mengeksekusi order terbuka tanpa `autoClose`, kemudian mengatur TP/SL secara terpisah via `perps_prepare_auto_close_set`.
 
-### 4.3 Parameter TP/SL Baseline Statis
-Setiap posisi baru langsung dilindungi oleh batas pengaman baseline:
-- **Posisi SHORT:**
-  - Stop Loss (SL): `entry_price × 1.07` (+7% toleransi rugi harga)
-  - Take Profit (TP): `entry_price × 0.85` (-15% pergerakan harga menguntungkan)
-- **Posisi LONG:**
-  - Stop Loss (SL): `entry_price × 0.93` (-7% toleransi rugi harga)
-  - Take Profit (TP): `entry_price × 1.15` (+15% pergerakan harga menguntungkan)
+### 4.3 Parameter TP/SL Baseline Dinamis per Kelas Aset
+Menghindari target TP kaku yang sering berbalik sebelum tersentuh (seperti pengalaman kasus token volatile):
+- **ETF / Saham Kalem (SPY, US100, AAPL):** TP +3.5%, SL 4.0%
+- **Crypto Bluechip (BTC, ETH, SOL):** TP +3.5%, SL 4.5% (cepat amankan sebelum dump)
+- **Komoditas Tradisional (XAU, XAG, BRENTOIL):** TP +4.0%, SL 4.5%
+- **Saham Volatil (NVDA, TSLA, MSTR, CRCL, dll):** TP +5.0%, SL 5.0%
+- **Windfall Rule:** Jika keuntungan harga mencapai $\ge 3\times$ funding rate harian, TP diturunkan lebih awal agar akumulasi funding multi-hari segera terkunci tanpa risiko pembalikan harga.
 
 ---
 
@@ -265,14 +270,30 @@ Sistem beroperasi 100% secara otonom di cloud GitHub Actions runners dengan nol 
 | [market-execute.yml](file:///.github/workflows/market-execute.yml) | `43 14 * * 1-5` | **21:43 WIB Senin–Jumat** | Eksekusi order pembukaan posisi saham US bertepatan dengan likuiditas tinggi pembukaan pasar Wall Street. |
 | [crypto-execute.yml](file:///.github/workflows/crypto-execute.yml) | `11 0,8,16 * * *` | **Tiap 8 Jam (07:11, 15:11, 23:11 WIB)** | Eksekusi order posisi Crypto Bluechip (BTC, ETH, SOL) dengan Dynamic TP/SL (dapat dimatikan/dinyalakan mandiri). |
 
+### 7.1 Jadwal Workflow & Google Cloud Scheduler Bridge
+
+Sistem beroperasi dengan arsitektur hibrida: cron internal GitHub Actions didukung oleh **Google Cloud Scheduler Bridge** (Region `asia-southeast2` Jakarta, Project `gen-lang-client-0705791867`) yang menembak REST API `workflow_dispatch` dengan akurasi detik waktu Indonesia Barat (WIB):
+
+| Workflow File | Jadwal Scheduler (WIB) | Jadwal Cron (UTC) | Target Cloud Scheduler | Fungsi Utama |
+|---|---|---|---|---|
+| [daily-scan.yml](file:///.github/workflows/daily-scan.yml) | **07:17 WIB** Tiap Hari | `17 0 * * *` | `walt-daily-scan` | Pemindaian seluruh kontrak, ranking peluang funding harian, riset sentimen Swarm AI (Qwen+Gemini), dan notif Telegram/Sheet. |
+| [risk-monitor.yml](file:///.github/workflows/risk-monitor.yml) | **Tiap 4 Jam** (`03:23`, `07:23`, `11:23`, `15:23`, `19:23`, `23:23` WIB) | `23 */4 * * *` | `walt-risk-monitor` | Evaluasi 4 lapis risiko, geser SL breakeven, trailing stop tier 1–4, dan *emergency close* jika funding berbalik. |
+| [market-execute.yml](file:///.github/workflows/market-execute.yml) | **21:43 WIB** Senin–Jumat | `43 14 * * 1-5` | `walt-market-execute` | Eksekusi order pembukaan posisi saham US & komoditas bertepatan dengan likuiditas tinggi Wall Street open. |
+| [crypto-execute.yml](file:///.github/workflows/crypto-execute.yml) | **Tiap 8 Jam** (`07:11`, `15:11`, `23:11` WIB) | `11 0,8,16 * * *` | *Cron / Manual Toggle* | Eksekusi posisi Crypto Bluechip (BTC, ETH, SOL) dengan Dynamic TP/SL (dapat dimatikan/dinyalakan mandiri). |
+
 ### 7.2 Otomasi Rotasi Token OAuth (`token_manager.py`)
 - Akses ke Walt API menggunakan protokol OAuth 2.0 PKCE dengan Bearer token yang memiliki masa berlaku terbatas.
 - `token_manager.py` memeriksa masa aktif token secara otomatis dan melakukan refresh ke endpoint OAuth Walt sebelum menjalankan operasi trading.
 - **Auto-Sync GitHub Secret:** Jika Walt merotasi `refresh_token`, sistem mengenkripsi token baru menggunakan libsodium (`pynacl`) dan memperbarui secret repository GitHub secara otomatis menggunakan `GH_PAT`. Hal ini memastikan bot beroperasi tanpa risiko terhenti karena token kadaluarsa.
 
-### 7.3 Kanal Notifikasi & Laporan
+### 7.3 Kanal Notifikasi & Laporan (Telegram 3x Auto-Retry)
 - **Telegram Push Alert:** Notifikasi lengkap dikirimkan ke Telegram pribadi Owner (`TELEGRAM_CHAT_ID`) memuat status saldo, posisi aktif, akumulasi funding yang diterima, keputusan AI, dan aksi pengubahan stop loss.
+- **Fault-Tolerant Exponential Backoff:** `notifier.py` dilengkapi sistem 3x percobaan ulang (*retry*) dengan jeda eksponensial untuk mengantisipasi gangguan jaringan sementara (`Connection reset by peer`).
 - **GitHub Step Summary:** Setiap eksekusi mencatat audit log terformat rapi pada antarmuka *Actions Step Summary* di repository GitHub.
+
+### 7.4 Sinkronisasi Real-Time Google Sheets (`sheet_logger.py`)
+- Setiap hasil scan dan eksekusi order secara otomatis dikirimkan ke spreadsheet Google Sheets pribadi Owner melalui Google Apps Script Webhook (`google_apps_script.js`).
+- Spreadsheet mencatat riwayat funding accrual, PnL transaksi, status order ID, dan saldo harian secara permanen untuk audit keuangan bulanan tanpa biaya database tambahan.
 
 ---
 
@@ -301,9 +322,11 @@ Sistem beroperasi 100% secara otonom di cloud GitHub Actions runners dengan nol 
 
 ## 9. Ringkasan File & Komponen Terkait
 
-- [`walt_bot.py`](file:///walt_bot.py) — Core bot orchestrator (scan, research, market execute, 4-layer risk monitor).
+- [`walt_bot.py`](file:///walt_bot.py) — Core bot orchestrator (scan, research, market execute, crypto execute, 4-layer risk monitor, order size clamping).
 - [`token_manager.py`](file:///token_manager.py) — Otomasi refresh OAuth token dan sinkronisasi secret GitHub via PyNaCl.
-- [`llm_research.py`](file:///llm_research.py) — Client Alibaba Cloud Qwen untuk inferensi sentimen berita & jadwal earnings.
-- [`notifier.py`](file:///notifier.py) — Pengirim pesan notifikasi format Markdown ke Telegram Bot API.
-- [`.github/workflows/`](file:///.github/workflows/) — Definisi cron scheduler cloud runners (daily scan, risk monitor, market execute).
+- [`llm_research.py`](file:///llm_research.py) — Client Dual-AI Swarm (Alibaba Qwen + Google Gemini) 4-voter consensus & 7-parameter scoring.
+- [`notifier.py`](file:///notifier.py) — Pengirim pesan notifikasi format Markdown ke Telegram Bot API dengan 3x exponential backoff retry.
+- [`sheet_logger.py`](file:///sheet_logger.py) — Modul pengirim telemetry eksekusi dan scan ke Google Sheets Webhook.
+- [`google_apps_script.js`](file:///google_apps_script.js) — Skrip Google Apps Script endpoint penampung data spreadsheet.
+- [`.github/workflows/`](file:///.github/workflows/) — Definisi cron scheduler cloud runners (daily scan, risk monitor, market execute, crypto execute).
 - [PRD.md](file:///PRD.md) — Dokumen spesifikasi kebutuhan produk untuk Roadmap Evolusi SaaS Fase 1 & Fase 2.
