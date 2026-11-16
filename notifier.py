@@ -27,22 +27,27 @@ def send_telegram(text: str, parse_mode: str = "Markdown") -> bool:
     if len(text) > 4000:
         text = text[:4000] + "\n\n_...truncated_"
 
-    try:
-        r = httpx.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            data={
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": parse_mode,
-                "disable_web_page_preview": True,
-            },
-            timeout=15.0,
-        )
-        r.raise_for_status()
-        return True
-    except Exception as e:
-        print(f"[ERROR] Telegram send failed: {e}")
-        return False
+    import time
+    for attempt in range(1, 4):
+        try:
+            r = httpx.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                data={
+                    "chat_id": chat_id,
+                    "text": text,
+                    "parse_mode": parse_mode,
+                    "disable_web_page_preview": True,
+                },
+                timeout=15.0,
+            )
+            r.raise_for_status()
+            return True
+        except Exception as e:
+            if attempt == 3:
+                print(f"[ERROR] Telegram send failed (attempt {attempt}/3): {e}")
+                return False
+            time.sleep(1.5 * attempt)
+    return False
 
 
 if __name__ == "__main__":
