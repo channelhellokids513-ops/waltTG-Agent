@@ -4,6 +4,7 @@ on:
   schedule:
     # 21:43 WIB Mon-Fri = 14:43 UTC Mon-Fri (menit prima sepi antrean, 13 mnt pasca US Open)
     # (US stock market open 09:30 ET = 21:30 WIB saat Standard Time)
+    # Jadwal didaftarkan ulang oleh akun pemilik repo (2026-11-16)
     - cron: '43 14 * * 1-5'
   workflow_dispatch:
     inputs:
