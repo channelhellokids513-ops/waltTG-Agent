@@ -231,7 +231,9 @@ class Opportunity:
     volume_24h: float
     max_leverage: int
     side: Literal["long", "short"]
-    min_margin_2x: float   # minimum margin efektif di lev 2x
+    min_size_base: float = 0.0
+    price_slippage: float = 0.0
+    min_margin_2x: float = 0.0   # minimum margin efektif di lev 2x
 
     @property
     def funding_annualized_pct(self) -> float:
@@ -291,12 +293,9 @@ def rank_opportunities(
         if abs(fr_daily) < MIN_FUNDING_DAILY:
             continue
 
-        # Minimum margin efektif di 2x (perlu latest price untuk akurat;
-        # di sini perkiraan dari min_size_base × asumsi price)
-        min_base = float(c["min_size_base"])
-        slip = float(c["price_slippage"])
-        # Approximation: butuh price dari latest_rate untuk exact
-        min_margin_2x = min_base * 100 * (1 + slip) / MAX_LEVERAGE  # placeholder
+        min_base = float(c.get("min_size_base", 0.0))
+        slip = float(c.get("price_slippage", 0.0))
+        min_margin_2x = min_base * 100 * (1 + slip) / MAX_LEVERAGE  # placeholder awal
 
         side: Literal["long", "short"] = "short" if fr_daily > 0 else "long"
         opps.append(Opportunity(
@@ -306,6 +305,8 @@ def rank_opportunities(
             volume_24h=vol,
             max_leverage=c["max_leverage"],
             side=side,
+            min_size_base=min_base,
+            price_slippage=slip,
             min_margin_2x=min_margin_2x,
         ))
     # Rank by absolute funding, descending
@@ -536,13 +537,32 @@ def open_position(
     margin: float = DEFAULT_MARGIN,
     leverage: int = MAX_LEVERAGE,
 ) -> Optional[dict]:
-    """Preview → execute buka posisi dengan Dynamic TP/SL."""
+    """Preview → execute buka posisi dengan Dynamic TP/SL dan minimum order size enforcement."""
     market_id = f"{opp.base_asset}-USD-PERP"
     rate_resp = client.latest_rate(market_id)
     price = float(rate_resp["rate"])
     if price <= 0:
         log.warning(f"{opp.base_asset}: price invalid ({price}), skip")
         return None
+
+    # Validasi & penyesuaian batas minimum order exchange:
+    # Syarat exchange: derived_size = (amount * leverage / price) >= min_size_base
+    if opp.min_size_base > 0:
+        # Buffer 1.5% + 0.02 USD untuk toleransi slippage dan pembulatan perps relay
+        min_margin_req = (opp.min_size_base * price / leverage) * (1.0 + max(opp.price_slippage, 0.015))
+        min_margin_req = round(min_margin_req + 0.02, 2)
+        if min_margin_req > DEFAULT_MARGIN * 1.5:
+            log.warning(
+                f"{opp.base_asset}: min margin yang disyaratkan exchange (${min_margin_req:.2f}) "
+                f"melampaui batas risiko portofolio (${DEFAULT_MARGIN * 1.5:.2f}), skip"
+            )
+            return None
+        if margin < min_margin_req:
+            log.info(
+                f"{opp.base_asset}: margin ${margin:.2f} disesuaikan ke batas minimum kontrak "
+                f"${min_margin_req:.2f} (min_size_base={opp.min_size_base} @ ${price:.2f})"
+            )
+            margin = min_margin_req
 
     tp, sl = compute_baseline_tpsl(opp.side, price, asset=opp.base_asset, funding_daily=opp.funding_daily)
 
@@ -558,12 +578,13 @@ def open_position(
         )
 
     if not preview.get("ok"):
-        log.error(f"{opp.base_asset}: risk check gagal: {preview.get('risk')}")
+        risk_detail = preview.get("risk", {})
+        log.error(f"{opp.base_asset}: risk check gagal: {risk_detail}")
         return None
 
     token = preview["confirmationToken"]
     result = client.execute(token)
-    order_id = result.get("order", {}).get("order_id")
+    order_id = result.get("order", {}).get("order_id") if isinstance(result, dict) else None
     log.info(
         f"✅ {opp.side.upper()} {opp.base_asset} opened: margin ${margin} @ ${price:.4f}, "
         f"TP ${tp}, SL ${sl}, order_id={order_id}"
@@ -580,6 +601,8 @@ def open_position(
         except Exception as e:
             log.warning(f"   Gagal set TP/SL terpisah: {e}")
 
+    if isinstance(result, dict):
+        result["actual_margin"] = margin
     return result
 
 
@@ -789,6 +812,10 @@ def daily_scan(client: WaltClient) -> dict:
         except Exception:
             opp_price = 0.0
         setattr(opp, "live_price", opp_price)
+        if opp_price > 0 and opp.min_size_base > 0:
+            opp.min_margin_2x = round(
+                (opp.min_size_base * opp_price / MAX_LEVERAGE) * (1.0 + opp.price_slippage), 2
+            )
 
     # Income tracker
     total_funding = sum(
@@ -1031,12 +1058,20 @@ def market_execute(
         try:
             result = open_position(client, opp, margin=margin, leverage=MAX_LEVERAGE)
             if result:
+                actual_margin = result.get("actual_margin", margin) if isinstance(result, dict) else margin
+                order_id = result.get("order", {}).get("order_id") if isinstance(result, dict) else None
                 executions.append({
-                    "asset": opp.base_asset, "side": opp.side, "margin": margin,
+                    "asset": opp.base_asset, "side": opp.side, "margin": actual_margin,
                     "verdict": "EXECUTED", "reason": reason,
-                    "order_id": result.get("order", {}).get("order_id"),
+                    "order_id": order_id,
                 })
-                deployed += margin
+                deployed += actual_margin
+            else:
+                log.warning(f"  FAILED {opp.base_asset}: preview / risk check gagal")
+                executions.append({
+                    "asset": opp.base_asset, "verdict": "FAILED",
+                    "reason": f"risk check / min size check gagal (verdict={verdict})",
+                })
         except Exception as e:
             log.error(f"  ERROR {opp.base_asset}: {e}")
             executions.append({
@@ -1045,7 +1080,7 @@ def market_execute(
 
     # Report
     executed_list = [e for e in executions if e["verdict"] == "EXECUTED"]
-    skipped_list = [e for e in executions if e["verdict"] == "SKIP"]
+    skipped_list = [e for e in executions if e["verdict"] in ("SKIP", "FAILED", "ERROR")]
 
     msg_lines = [
         f"*{title}*",
@@ -1156,6 +1191,8 @@ def main(command: str = "scan"):
             volume_24h=float(contract["volume_24h_usd"]),
             max_leverage=contract["max_leverage"],
             side=side,  # type: ignore
+            min_size_base=float(contract.get("min_size_base", 0.0)),
+            price_slippage=float(contract.get("price_slippage", 0.0)),
             min_margin_2x=0,
         )
         open_position(client, opp, margin=margin)
