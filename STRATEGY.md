@@ -35,12 +35,12 @@ Risiko utama adalah pergerakan harga aset yang bergerak melawan arah posisi (*di
   `NVDA`, `NBIS`, `CRCL`, `MSTR`, `AAPL`, `GOOGL`, `AMD`, `PLTR`, `COIN`, `SNDK`, `SPY`, `US100`, `AMZN`, `TSLA`, `META`, `LIT`, `VVV`, `ANTHROPIC`
 - **Komoditas Tradisional:**  
   `XAU` (Emas), `XAG` (Perak), `BRENTOIL` (Minyak Mentah Brent)
+- **Crypto Bluechip (Likuiditas Tinggi & Siklus Funding 8 Jam):**  
+  `BTC` (Bitcoin), `ETH` (Ethereum), `SOL` (Solana)
 
-### 2.3 Aturan Eksklusi Ketat (Strict Crypto Exclusion)
-- ❌ **Seluruh token crypto dieksklusi secara permanen:**  
-  Token seperti `BTC`, `ETH`, `SOL`, dan altcoin lainnya **TIDAK DIMASUKKAN** ke dalam universe trading.
-- ❌ **GRAM Dihapus Sepenuhnya:**  
-  Kontrak `GRAM` **TIDAK LAGI DIMASUKKAN** ke dalam universe bot. Seluruh pemindaian (*daily scan*), riset sentimen, dan eksekusi order secara ketat mengabaikan kontrak GRAM dan token kripto spekulatif lainnya.
+### 2.3 Aturan Eksklusi Ketat (Strict Altcoin Exclusion)
+- ❌ **GRAM dan Altcoin/Memecoin Liar Dilarang Keras:**  
+  Kontrak `GRAM` dan token spekulatif bervolatilitas liar **DIHAPUS & DI-BLACKLIST SECARA PERMANEN**. Universe crypto dibatasi ketat hanya pada aset bluechip likuiditas raksasa (`BTC`, `ETH`, `SOL`) untuk memanen yield funding rate tanpa risiko rugi akibat manipulasi likuiditas tipis.
 
 ### 2.4 Formula Ranking Peluang
 Setiap pagi pukul **06:39 WIB**, annualized funding rate dihitung otomatis oleh bot:
@@ -192,17 +192,24 @@ Manajemen risiko berjalan otomatis tiap 4 jam melalui workflow `risk-monitor.yml
 
 ### Penjelasan Detil Tiap Lapis:
 
-1. **Lapis 1 (Baseline TP/SL):**  
-   Memastikan tidak ada posisi yang tidak terlindungi batas stop loss 7% dan take profit 15%.
+1. **Lapis 1 (Dynamic Baseline TP/SL):**  
+   Target TP dan SL tidak disamaratakan 15%, melainkan disesuaikan dengan volatilitas aset:
+   - ETF / Indeks (SPY, US100, AAPL): TP +3.5%, SL 4.0%
+   - Crypto Bluechip (BTC, ETH, SOL): TP +3.5%, SL 4.5% (cepat amankan sebelum dump)
+   - Komoditas (XAU, XAG, BRENTOIL): TP +4.0%, SL 4.5%
+   - Saham Volatil (NVDA, TSLA, MSTR, CRCL): TP +5.0%, SL 5.0%
+   - *Windfall Rule:* Jika keuntungan harga $\ge 3\times$ funding harian, TP disesuaikan lebih cepat agar cuan segera terkunci.
 2. **Lapis 2 (Dinamika Funding Rate — Prioritas Utama):**  
    - Jika arah funding berbalik (*funding flip sign*), misal posisi SHORT namun funding rate berubah menjadi negatif (artinya posisi kita yang harus membayar pasar), **posisi seketika ditutup pasar**. Thesis awal dinyatakan batal.  
    - Jika funding rate meluruh tajam hingga `< 0.1%/hari`, stop loss otomatis dipindahkan ke harga entry (*breakeven*).
 3. **Lapis 3 (Volatilitas & Momentum Harga):**  
-   - Jika posisi merugi > 3% dari entry price, SL diperketat dari 7% menjadi 5% untuk memangkas potensi drawdown lebih lanjut.
-   - Jika posisi berbalik untung > 5%, SL langsung digeser ke harga entry + 1% untuk mengamankan keuntungan bersih di atas biaya transaksi.
-4. **Lapis 4 (Trailing Stop Progresif):**  
-   - Stop Loss hanya digeser ke arah yang menguntungkan (tidak pernah ditarik mundur).
-   - Menggunakan ambang batas buffer minimal 0.1% untuk menghindari perubahan order yang tidak efisien.
+   - Jika posisi merugi > 3% dari entry price, SL diperketat dari 5% menjadi 4% untuk memangkas potensi drawdown lebih lanjut.
+4. **Lapis 4 (Trailing Stop & Early Breakeven Lock):**  
+   Mencegah posisi yang sempat hijau berbalik menjadi rugi:
+   - **Tier 1 (Profit $\ge +1.5\%$):** Geser SL otomatis ke **Entry + 0.3%** (Zero-Risk: kunci modal dan cover fee).
+   - **Tier 2 (Profit $\ge +2.5\%$):** Geser SL ke **Entry + 1.2%** (Kunci Cuan Minimal 1.2%).
+   - **Tier 3 (Profit $\ge +4.0\%$):** Pasang trailing stop ketat **1.5%** di bawah harga running.
+   - **Tier 4 (Profit $\ge +6.0\%$):** Pasang trailing stop sangat ketat **1.0%** di bawah harga running.
 
 ---
 
@@ -217,8 +224,9 @@ Sistem beroperasi 100% secara otonom di cloud GitHub Actions runners dengan nol 
 
     GitHub Cloud Scheduler (cron triggers)
     ├── daily-scan.yml      (07:17 WIB / 00:17 UTC)   → Scan 127 kontrak + Swarm AI + Notif
-    ├── risk-monitor.yml    (Tiap 4 jam di menit 23)   → Evaluasi 4-lapis risiko tiap posisi
-    └── market-execute.yml  (21:43 WIB Mon-Fri)        → Eksekusi saham saat US market open
+    ├── risk-monitor.yml    (Tiap 4 jam di menit 23)   → Evaluasi 4-lapis risiko & Early Breakeven
+    ├── market-execute.yml  (21:43 WIB Mon-Fri)        → Eksekusi saham saat US market open
+    └── crypto-execute.yml  (Tiap 8 jam di menit 11)   → Eksekusi Crypto Bluechip (On/Off Toggle)
                    │
                    ▼
      ┌───────────────────────────┐
@@ -255,6 +263,7 @@ Sistem beroperasi 100% secara otonom di cloud GitHub Actions runners dengan nol 
 | [daily-scan.yml](file:///.github/workflows/daily-scan.yml) | `17 0 * * *` | **07:17 WIB Tiap Hari** | Pemindaian seluruh kontrak, ranking peluang funding harian, riset sentimen Swarm AI (Qwen+Gemini), dan pengiriman ringkasan ke Telegram. |
 | [risk-monitor.yml](file:///.github/workflows/risk-monitor.yml) | `23 */4 * * *` | **Tiap 4 Jam** (07:23, 11:23, 15:23, 19:23, 23:23, 03:23 WIB) | Evaluasi 4 lapis risiko pada semua posisi terbuka, update trailing stop, dan *emergency close* jika funding berbalik. |
 | [market-execute.yml](file:///.github/workflows/market-execute.yml) | `43 14 * * 1-5` | **21:43 WIB Senin–Jumat** | Eksekusi order pembukaan posisi saham US bertepatan dengan likuiditas tinggi pembukaan pasar Wall Street. |
+| [crypto-execute.yml](file:///.github/workflows/crypto-execute.yml) | `11 0,8,16 * * *` | **Tiap 8 Jam (07:11, 15:11, 23:11 WIB)** | Eksekusi order posisi Crypto Bluechip (BTC, ETH, SOL) dengan Dynamic TP/SL (dapat dimatikan/dinyalakan mandiri). |
 
 ### 7.2 Otomasi Rotasi Token OAuth (`token_manager.py`)
 - Akses ke Walt API menggunakan protokol OAuth 2.0 PKCE dengan Bearer token yang memiliki masa berlaku terbatas.

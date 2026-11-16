@@ -37,14 +37,15 @@ from notifier import send_telegram
 WALT_MCP_URL = "https://walletbot.me/bot-relay/public-api/mcp"
 # OAuth via TokenManager — butuh env WALT_CLIENT_ID + WALT_REFRESH_TOKEN
 
-# Universe aset yang diperbolehkan (saham US + komoditas)
+# Universe aset yang diperbolehkan (saham US + komoditas + crypto bluechip)
 ALLOWED_STOCKS = {
     "NVDA", "NBIS", "CRCL", "MSTR", "AAPL", "GOOGL", "AMD", "PLTR",
     "COIN", "SNDK", "SPY", "US100", "AMZN", "TSLA", "META", "LIT", "VVV",
     "ANTHROPIC",
 }
 ALLOWED_COMMODITIES = {"XAU", "XAG", "BRENTOIL"}
-ALLOWED_ASSETS = ALLOWED_STOCKS | ALLOWED_COMMODITIES
+ALLOWED_CRYPTO = {"BTC", "ETH", "SOL"}
+ALLOWED_ASSETS = ALLOWED_STOCKS | ALLOWED_COMMODITIES | ALLOWED_CRYPTO
 
 # Position sizing
 MAX_LEVERAGE = 2
@@ -59,18 +60,43 @@ MIN_FUNDING_DAILY = 0.005   # 0.5%/hari
 # Target income
 MONTHLY_TARGET = 100.0      # USDC
 
-# Risk management parameters
-BASELINE_SL_PCT = 0.07      # 7% dari entry
-BASELINE_TP_PCT = 0.15      # 15% dari entry
+# Risk management parameters (Adaptive per Asset Class)
+DEFAULT_SL_PCT = 0.05       # 5% default SL
+DEFAULT_TP_PCT = 0.05       # 5% default TP (bukan 15% kaku)
 
-# Lapis 4 (trailing stop)
+# Tangga Trailing Stop & Early Breakeven (Agresif & Rapat)
 TRAILING_TIERS = [
-    # (profit_threshold, trailing_pct) — profit=unrealized profit sebagai % dari entry
-    (0.03, None),   # ≥3%: breakeven (SL ke entry)
-    (0.05, 0.025),  # ≥5%: trailing 2.5%
-    (0.10, 0.015),  # ≥10%: trailing 1.5%
-    (0.20, 0.010),  # ≥20%: trailing 1.0%
+    # (profit_threshold, action_or_trailing_pct)
+    # Tier 1: Profit >= +1.5% -> Lock Breakeven + 0.3% (Fee-cover / Zero-Risk)
+    (0.015, "lock_003"),
+    # Tier 2: Profit >= +2.5% -> Lock Cuan Awal + 1.2%
+    (0.025, "lock_012"),
+    # Tier 3: Profit >= +4.0% -> Trailing 1.5%
+    (0.040, 0.015),
+    # Tier 4: Profit >= +6.0% -> Trailing 1.0%
+    (0.060, 0.010),
 ]
+
+
+def get_asset_baseline_tpsl_pct(asset: Optional[str] = None) -> tuple[float, float]:
+    """
+    Return (tp_pct, sl_pct) disesuaikan dengan profil volatilitas aset:
+    - ETF / Saham Kalem (SPY, US100, AAPL): TP +3.5%, SL 4.0%
+    - Crypto Bluechip (BTC, ETH, SOL): TP +3.5%, SL 4.5% (cepat amankan sebelum dump)
+    - Komoditas (XAU, XAG, BRENTOIL): TP +4.0%, SL 4.5%
+    - Saham Volatil (NVDA, TSLA, MSTR, CRCL, dll): TP +5.0%, SL 5.0%
+    """
+    if not asset:
+        return 0.050, 0.050
+    asset_up = asset.upper()
+    if asset_up in {"SPY", "US100", "AAPL"}:
+        return 0.035, 0.040
+    elif asset_up in ALLOWED_CRYPTO:
+        return 0.035, 0.045
+    elif asset_up in ALLOWED_COMMODITIES:
+        return 0.040, 0.045
+    else:
+        return 0.050, 0.050
 
 # Logging
 logging.basicConfig(
@@ -247,12 +273,15 @@ class Position:
 # ASSET SELECTION & RANKING
 # =============================================================================
 
-def rank_opportunities(contracts: list[dict]) -> list[Opportunity]:
-    """Filter + rank kontrak likuid sesuai policy."""
+def rank_opportunities(
+    contracts: list[dict], allowed_assets: Optional[set[str]] = None
+) -> list[Opportunity]:
+    """Filter + rank kontrak likuid sesuai policy (saham, komoditas, atau crypto)."""
+    target_assets = allowed_assets if allowed_assets is not None else ALLOWED_ASSETS
     opps = []
     for c in contracts:
         asset = c["base_asset"]
-        if asset not in ALLOWED_ASSETS:
+        if asset not in target_assets:
             continue
         vol = float(c["volume_24h_usd"])
         if vol < MIN_VOL_24H:
@@ -403,9 +432,14 @@ def decide_go_nogo(
     if abs(opp.funding_daily) < MIN_FUNDING_DAILY:
         return "SKIP", "funding kurang (<0.5%/hari)", 0.0
 
-    # Komoditas / token: skip research, langsung GO
-    if opp.base_asset in ALLOWED_COMMODITIES or opp.base_asset not in ALLOWED_STOCKS:
-        return "GO", "komoditas/non-saham, no research needed", 1.0
+    # Whitelist check
+    if opp.base_asset not in ALLOWED_ASSETS:
+        return "SKIP", f"aset {opp.base_asset} tidak masuk whitelist", 0.0
+
+    # Komoditas / Crypto Bluechip: langsung GO dengan Dynamic TP/SL (no stock research needed)
+    if opp.base_asset in ALLOWED_COMMODITIES or opp.base_asset in ALLOWED_CRYPTO:
+        label = "crypto bluechip" if opp.base_asset in ALLOWED_CRYPTO else "komoditas"
+        return "GO", f"{label}, dynamic TP/SL carry capture", 1.0
 
     # Saham perlu research
     if research is None:
@@ -466,14 +500,33 @@ def decide_go_nogo(
 # ENTRY (continued)
 # =============================================================================
 
-def compute_baseline_tpsl(side: str, entry: float) -> tuple[float, float]:
-    """Return (tp, sl) baseline untuk posisi baru."""
+def compute_baseline_tpsl(
+    side: str,
+    entry: float,
+    asset: Optional[str] = None,
+    funding_daily: float = 0.0,
+) -> tuple[float, float]:
+    """
+    Return (tp, sl) dinamis disesuaikan dengan profil volatilitas aset & windfall funding:
+    - ETF / Saham Kalem: TP +3.5%, SL 4.0%
+    - Crypto Bluechip (BTC, ETH, SOL): TP +3.5%, SL 4.5% (cepat amankan sebelum dump)
+    - Komoditas: TP +4.0%, SL 4.5%
+    - Saham Volatil: TP +5.0%, SL 5.0%
+    - Windfall Take Profit: Jika 3x funding harian realistis (>= 2.5%), TP disesuaikan
+    """
+    tp_pct, sl_pct = get_asset_baseline_tpsl_pct(asset)
+
+    if abs(funding_daily) >= 0.008:
+        windfall_tp = round(abs(funding_daily) * 3.0, 3)
+        if 0.025 <= windfall_tp < tp_pct:
+            tp_pct = windfall_tp
+
     if side == "long":
-        tp = round(entry * (1 + BASELINE_TP_PCT), 4)
-        sl = round(entry * (1 - BASELINE_SL_PCT), 4)
+        tp = round(entry * (1 + tp_pct), 4)
+        sl = round(entry * (1 - sl_pct), 4)
     else:
-        tp = round(entry * (1 - BASELINE_TP_PCT), 4)
-        sl = round(entry * (1 + BASELINE_SL_PCT), 4)
+        tp = round(entry * (1 - tp_pct), 4)
+        sl = round(entry * (1 + sl_pct), 4)
     return tp, sl
 
 
@@ -483,7 +536,7 @@ def open_position(
     margin: float = DEFAULT_MARGIN,
     leverage: int = MAX_LEVERAGE,
 ) -> Optional[dict]:
-    """Preview → execute buka posisi dengan TP/SL baseline."""
+    """Preview → execute buka posisi dengan Dynamic TP/SL."""
     market_id = f"{opp.base_asset}-USD-PERP"
     rate_resp = client.latest_rate(market_id)
     price = float(rate_resp["rate"])
@@ -491,7 +544,7 @@ def open_position(
         log.warning(f"{opp.base_asset}: price invalid ({price}), skip")
         return None
 
-    tp, sl = compute_baseline_tpsl(opp.side, price)
+    tp, sl = compute_baseline_tpsl(opp.side, price, asset=opp.base_asset, funding_daily=opp.funding_daily)
 
     # Coba preview dengan TP/SL
     try:
@@ -535,13 +588,13 @@ def open_position(
 # =============================================================================
 
 def apply_layer1_baseline(client: WaltClient, pos: Position) -> Optional[dict]:
-    """Lapis 1: Set TP/SL baseline kalau belum ada."""
+    """Lapis 1: Set Dynamic TP/SL baseline kalau belum ada."""
     if pos.tp and pos.sl:
         return None
-    tp, sl = compute_baseline_tpsl(pos.side, pos.entry_price)
+    tp, sl = compute_baseline_tpsl(pos.side, pos.entry_price, asset=pos.base_asset)
     new_tp = tp if not pos.tp else None
     new_sl = sl if not pos.sl else None
-    log.info(f"[L1] {pos.base_asset}: set baseline TP={new_tp}, SL={new_sl}")
+    log.info(f"[L1] {pos.base_asset}: set dynamic baseline TP={new_tp}, SL={new_sl}")
     preview = client.preview_auto_close(pos.contract_id, tp=new_tp, sl=new_sl)
     if preview.get("ok"):
         return client.execute(preview["confirmationToken"])
@@ -573,28 +626,16 @@ def apply_layer2_funding(
 
 
 def apply_layer3_volatility(client: WaltClient, pos: Position) -> Optional[dict]:
-    """Lapis 3: Pergerakan harga signifikan."""
+    """Lapis 3: Proteksi pergerakan harga negatif."""
     move = abs((pos.current_price - pos.entry_price) / pos.entry_price)
     profitable = pos.profit_pct_price > 0
 
-    if move > 0.05 and profitable:
-        # Profit >5%: lock dengan geser SL ke breakeven + 1%
-        if pos.side == "long":
-            new_sl = pos.entry_price * 1.01
-        else:
-            new_sl = pos.entry_price * 0.99
-        if _sl_is_improvement(pos, new_sl):
-            log.info(f"[L3] {pos.base_asset}: profit >5% → SL lock ${new_sl:.4f}")
-            preview = client.preview_auto_close(pos.contract_id, sl=round(new_sl, 4))
-            if preview.get("ok"):
-                return client.execute(preview["confirmationToken"])
-
     if move > 0.03 and not profitable:
-        # Loss >3%: perketat SL ke entry ± 5%
+        # Loss >3%: perketat SL ke entry ± 4% untuk batasi drawdown
         if pos.side == "long":
-            new_sl = pos.entry_price * 0.95
+            new_sl = pos.entry_price * 0.96
         else:
-            new_sl = pos.entry_price * 1.05
+            new_sl = pos.entry_price * 1.04
         if _sl_is_improvement(pos, new_sl):
             log.info(f"[L3] {pos.base_asset}: loss >3% → SL diperketat ${new_sl:.4f}")
             preview = client.preview_auto_close(pos.contract_id, sl=round(new_sl, 4))
@@ -604,37 +645,43 @@ def apply_layer3_volatility(client: WaltClient, pos: Position) -> Optional[dict]
 
 
 def apply_layer4_trailing(client: WaltClient, pos: Position) -> Optional[dict]:
-    """Lapis 4: Trailing stop progresif."""
+    """Lapis 4: Trailing stop progresif & Early Breakeven Lock."""
     profit = pos.profit_pct_price  # fraction, bisa negatif
     if profit < TRAILING_TIERS[0][0]:
         return None
 
     # Cari tier tertinggi yang sudah dicapai
     active_tier = None
-    for threshold, trailing_pct in TRAILING_TIERS:
+    for threshold, action in TRAILING_TIERS:
         if profit >= threshold:
-            active_tier = (threshold, trailing_pct)
+            active_tier = (threshold, action)
 
     if active_tier is None:
         return None
 
-    threshold, trailing_pct = active_tier
-    if trailing_pct is None:
-        # Breakeven lock
-        new_sl = pos.entry_price
-    else:
+    threshold, action = active_tier
+    if action == "lock_003":
+        # Tier 1 (+1.5% profit): Kunci Breakeven + 0.3% (Fee-cover / Zero-Risk)
+        new_sl = pos.entry_price * 1.003 if pos.side == "long" else pos.entry_price * 0.997
+    elif action == "lock_012":
+        # Tier 2 (+2.5% profit): Kunci Cuan Awal + 1.2%
+        new_sl = pos.entry_price * 1.012 if pos.side == "long" else pos.entry_price * 0.988
+    elif isinstance(action, (int, float)):
+        trailing_pct = action
         if pos.side == "long":
             new_sl = pos.current_price * (1 - trailing_pct)
         else:
             new_sl = pos.current_price * (1 + trailing_pct)
+    else:
+        new_sl = pos.entry_price
 
     new_sl = round(new_sl, 4)
     if not _sl_is_improvement(pos, new_sl, buffer=0.001):
         return None
 
     log.info(
-        f"[L4] {pos.base_asset}: profit {profit*100:.1f}% ≥ {threshold*100:.0f}% "
-        f"→ trailing SL ke ${new_sl}"
+        f"[L4] {pos.base_asset}: profit {profit*100:.2f}% ≥ {threshold*100:.1f}% "
+        f"→ SL dikunci ke ${new_sl}"
     )
     preview = client.preview_auto_close(pos.contract_id, sl=new_sl)
     if preview.get("ok"):
@@ -890,32 +937,38 @@ def scan_with_research(client: WaltClient) -> dict:
 # MARKET EXECUTE — buka posisi saham saat US market open
 # =============================================================================
 
-def market_execute(client: WaltClient, dry_run: bool = False) -> dict:
-    """Eksekusi posisi baru saat US stock market buka.
+def market_execute(
+    client: WaltClient,
+    dry_run: bool = False,
+    universe: Optional[set[str]] = None,
+    title: str = "🚀 Walt Market Execute",
+) -> dict:
+    """Eksekusi posisi baru dengan Dynamic TP/SL.
     
     Flow:
       1. Check balance
-      2. Get ranked opportunities
+      2. Get ranked opportunities (sesuai universe)
       3. Research stocks → decide GO/HALF/SKIP
       4. Execute top 2 (atau sesuai saldo)
       5. Report via Telegram
     """
-    log.info("🚀 Market execute...")
+    target_universe = universe or (ALLOWED_STOCKS | ALLOWED_COMMODITIES)
+    log.info(f"{title} (Target Universe: {len(target_universe)} aset)...")
     balance_data = client.balance()
     accounts = balance_data.get("accounts", [])
     if not accounts:
-        send_telegram("⚠️ *Walt Execute SKIP* — saldo kosong, deposit USDC dulu.")
+        send_telegram(f"⚠️ *{title} SKIP* — saldo kosong, deposit USDC dulu.")
         return {"status": "no_balance"}
 
     available = float(accounts[0]["balance_available"])
     log.info(f"Balance available: ${available}")
     if available < 3.0:
-        send_telegram(f"⚠️ *Walt Execute SKIP* — saldo terlalu kecil (${available:.2f} < $3).")
+        send_telegram(f"⚠️ *{title} SKIP* — saldo terlalu kecil (${available:.2f} < $3).")
         return {"status": "insufficient_balance", "balance": available}
 
     # Scan + rank
     contracts_data = client.list_contracts()
-    opps = rank_opportunities(contracts_data["contracts"])
+    opps = rank_opportunities(contracts_data["contracts"], allowed_assets=target_universe)
 
     # Research saham (hanya yang masuk shortlist 5 teratas)
     qwen = QwenClient() if os.getenv("DASHSCOPE_API_KEY") else None
@@ -995,7 +1048,7 @@ def market_execute(client: WaltClient, dry_run: bool = False) -> dict:
     skipped_list = [e for e in executions if e["verdict"] == "SKIP"]
 
     msg_lines = [
-        "*🚀 Walt Market Execute*",
+        f"*{title}*",
         f"_{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC_\n",
         f"Saldo awal: `${available:.2f}` | Deploy: `${deployed:.2f}`",
         f"Executed: *{len(executed_list)}* | Skipped: *{len(skipped_list)}*\n",
@@ -1023,6 +1076,16 @@ def market_execute(client: WaltClient, dry_run: bool = False) -> dict:
     return {"executions": executions, "deployed": deployed, "available": available}
 
 
+def crypto_execute(client: WaltClient, dry_run: bool = False) -> dict:
+    """Eksekusi posisi crypto bluechip (BTC, ETH, SOL) dengan Dynamic TP/SL."""
+    return market_execute(
+        client=client,
+        dry_run=dry_run,
+        universe=ALLOWED_CRYPTO,
+        title="⚡ Walt Crypto Execute (Bluechip)",
+    )
+
+
 # =============================================================================
 # MAIN DISPATCHER
 # =============================================================================
@@ -1032,10 +1095,13 @@ def main(command: str = "scan"):
     CLI entry point.
 
     Usage:
-        python walt_bot.py scan           # daily scan
-        python walt_bot.py monitor        # risk monitor run
+        python walt_bot.py scan                  # daily scan
+        python walt_bot.py scan_with_research    # daily scan + AI research
+        python walt_bot.py monitor               # risk monitor run
+        python walt_bot.py market_execute        # execute US stocks & commodities
+        python walt_bot.py crypto_execute        # execute bluechip crypto (BTC, ETH, SOL)
         python walt_bot.py open NBIS short 2.50  # buka posisi manual
-        python walt_bot.py close NBIS     # tutup posisi
+        python walt_bot.py close NBIS            # tutup posisi
     """
     import sys
 
@@ -1059,9 +1125,14 @@ def main(command: str = "scan"):
             send_telegram(msg)
         print(json.dumps(result, indent=2, default=str))
 
-    elif command == "market_execute":
+    elif command in ("market_execute", "execute"):
         dry = os.getenv("DRY_RUN", "false").lower() == "true"
         result = market_execute(client, dry_run=dry)
+        print(json.dumps(result, indent=2, default=str))
+
+    elif command == "crypto_execute":
+        dry = os.getenv("DRY_RUN", "false").lower() == "true"
+        result = crypto_execute(client, dry_run=dry)
         print(json.dumps(result, indent=2, default=str))
 
     elif command == "open":

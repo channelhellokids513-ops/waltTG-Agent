@@ -1,0 +1,65 @@
+name: Walt Crypto Execute (Bluechip BTC/ETH/SOL)
+
+on:
+  schedule:
+    # Tiap 8 jam di menit prima 11 UTC: 00:11, 08:11, 16:11 UTC
+    # (WIB: 07:11, 15:11, 23:11 WIB — sinkron dengan siklus 8 jam funding crypto)
+    - cron: '11 0,8,16 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (preview only, no execute)"
+        required: false
+        default: "false"
+
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Execute planned crypto positions
+        env:
+          WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}
+          WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
+          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+          DASHSCOPE_API_GEMINI_KEY: ${{ secrets.DASHSCOPE_API_GEMINI_KEY || secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-flash-latest' }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || secrets.GOOGLE_SHEET_ID || '1ag6MqYnOLdZgkFwk_cs3W-22EOX5e5DGQTVvPWENHTg' }}
+          GOOGLE_SHEET_WEBHOOK_URL: ${{ secrets.GOOGLE_SHEET_WEBHOOK_URL }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          GH_PAT: ${{ secrets.GH_PAT || secrets.GH_PATH || secrets.GITHUB_PAT || secrets.PAT }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -o pipefail
+          python walt_bot.py crypto_execute 2>&1 | tee crypto_execute_output.log
+
+      - name: Upload Logs Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: walt-crypto-execute-logs
+          path: logs/
+          retention-days: 30
+
+      - name: Publish Summary
+        if: always()
+        run: |
+          echo "## ⚡ Hasil Crypto Execute (Bluechip)" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          if [ -f crypto_execute_output.log ]; then
+            cat crypto_execute_output.log >> $GITHUB_STEP_SUMMARY
+          else
+            echo "File log tidak ditemukan." >> $GITHUB_STEP_SUMMARY
+          fi
+          echo '```' >> $GITHUB_STEP_SUMMARY
