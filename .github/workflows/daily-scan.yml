@@ -3,6 +3,7 @@ name: Daily Walt Perps Funding Scan
 on:
   schedule:
     # 07:17 WIB = 00:17 UTC (menghindari antrean padat midnight 23:00-24:00 UTC)
+    # Jadwal didaftarkan ulang oleh akun pemilik repo (2026-11-16)
     - cron: '17 0 * * *'
   workflow_dispatch:  # manual trigger button
 
