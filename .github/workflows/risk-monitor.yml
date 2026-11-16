@@ -2,8 +2,9 @@ name: Walt Risk Monitor (4h)
 
 on:
   schedule:
-    # Tiap 4 jam di menit 35 UTC: 00:35, 04:35, 08:35, 12:35, 16:35, 20:35
-    - cron: '35 */4 * * *'
+    # Tiap 4 jam di menit prima 23 UTC: 00:23, 04:23, 08:23, 12:23, 16:23, 20:23
+    # (WIB: 07:23, 11:23, 15:23, 19:23, 23:23, 03:23 WIB)
+    - cron: '23 */4 * * *'
   workflow_dispatch:
 
 jobs:

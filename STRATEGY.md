@@ -216,9 +216,9 @@ Sistem beroperasi 100% secara otonom di cloud GitHub Actions runners dengan nol 
 └────────────────────────────────────────────────────────────────────────────────────────┘
 
     GitHub Cloud Scheduler (cron triggers)
-    ├── daily-scan.yml      (06:39 WIB / 23:39 UTC)   → Scan 127 kontrak + Qwen AI + Notif
-    ├── risk-monitor.yml    (Tiap 4 jam di menit 35)   → Evaluasi 4-lapis risiko tiap posisi
-    └── market-execute.yml  (21:40 WIB Mon-Fri)        → Eksekusi saham saat US market open
+    ├── daily-scan.yml      (07:17 WIB / 00:17 UTC)   → Scan 127 kontrak + Swarm AI + Notif
+    ├── risk-monitor.yml    (Tiap 4 jam di menit 23)   → Evaluasi 4-lapis risiko tiap posisi
+    └── market-execute.yml  (21:43 WIB Mon-Fri)        → Eksekusi saham saat US market open
                    │
                    ▼
      ┌───────────────────────────┐
@@ -252,9 +252,9 @@ Sistem beroperasi 100% secara otonom di cloud GitHub Actions runners dengan nol 
 
 | Workflow File | Jadwal Cron (UTC) | Waktu Lokal (WIB) | Fungsi Utama |
 |---|---|---|---|
-| [daily-scan.yml](file:///.github/workflows/daily-scan.yml) | `39 23 * * *` | **06:39 WIB Tiap Hari** | Pemindaian seluruh kontrak, ranking peluang funding harian, riset sentimen AI Qwen, dan pengiriman ringkasan ke Telegram. |
-| [risk-monitor.yml](file:///.github/workflows/risk-monitor.yml) | `35 */4 * * *` | **Tiap 4 Jam** (00:35, 04:35, 08:35, 12:35, 16:35, 20:35 WIB) | Evaluasi 4 lapis risiko pada semua posisi terbuka, update trailing stop, dan *emergency close* jika funding berbalik. |
-| [market-execute.yml](file:///.github/workflows/market-execute.yml) | `40 14 * * 1-5` | **21:40 WIB Senin–Jumat** | Eksekusi order pembukaan posisi saham US bertepatan dengan likuiditas tinggi pembukaan pasar Wall Street. |
+| [daily-scan.yml](file:///.github/workflows/daily-scan.yml) | `17 0 * * *` | **07:17 WIB Tiap Hari** | Pemindaian seluruh kontrak, ranking peluang funding harian, riset sentimen Swarm AI (Qwen+Gemini), dan pengiriman ringkasan ke Telegram. |
+| [risk-monitor.yml](file:///.github/workflows/risk-monitor.yml) | `23 */4 * * *` | **Tiap 4 Jam** (07:23, 11:23, 15:23, 19:23, 23:23, 03:23 WIB) | Evaluasi 4 lapis risiko pada semua posisi terbuka, update trailing stop, dan *emergency close* jika funding berbalik. |
+| [market-execute.yml](file:///.github/workflows/market-execute.yml) | `43 14 * * 1-5` | **21:43 WIB Senin–Jumat** | Eksekusi order pembukaan posisi saham US bertepatan dengan likuiditas tinggi pembukaan pasar Wall Street. |
 
 ### 7.2 Otomasi Rotasi Token OAuth (`token_manager.py`)
 - Akses ke Walt API menggunakan protokol OAuth 2.0 PKCE dengan Bearer token yang memiliki masa berlaku terbatas.

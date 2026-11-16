@@ -2,8 +2,8 @@ name: Daily Walt Perps Funding Scan
 
 on:
   schedule:
-    # 06:39 WIB = 23:39 UTC sehari sebelumnya
-    - cron: '39 23 * * *'
+    # 07:17 WIB = 00:17 UTC (menghindari antrean padat midnight 23:00-24:00 UTC)
+    - cron: '17 0 * * *'
   workflow_dispatch:  # manual trigger button
 
 jobs:

@@ -61,9 +61,9 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
 └────────────────────────────────────────────────────────────────────────────────────────┘
 
     GitHub Actions Scheduled Cron
-    ├─ 06:39 WIB (daily-scan.yml)
-    ├─ Tiap 4 Jam (risk-monitor.yml)
-    └─ 21:40 WIB Mon-Fri (market-execute.yml)
+    ├─ 07:17 WIB (daily-scan.yml)
+    ├─ Tiap 4 Jam di menit 23 (risk-monitor.yml)
+    └─ 21:43 WIB Mon-Fri (market-execute.yml)
                    │
                    ▼
      ┌───────────────────────────┐
@@ -99,18 +99,18 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
 ```
 
 ### 3.3 Jadwal & Spesifikasi Eksekusi Fase 1
-1. **Daily Scan (`daily-scan.yml` — 06:39 WIB / 23:39 UTC):**
+1. **Daily Scan (`daily-scan.yml` — 07:17 WIB / 00:17 UTC):**
    - Mengambil seluruh 127 kontrak perpetual di Walt.
    - Menyaring volume 24 jam > $1.000.000 USD.
    - Menghitung *annualized funding rate* untuk SHORT (funding positif tinggi) dan LONG (funding negatif ekstrim).
-   - Memanggil `llm_research.py` (Qwen-Plus) untuk menganalisis sentimen berita & makro aset pilihan.
+   - Memanggil Swarm AI (`llm_research.py` — Qwen + Gemini) untuk menganalisis sentimen berita & makro aset pilihan.
    - Mengirimkan rangkuman terstruktur peluang terbaik langsung ke Telegram Owner.
-2. **Risk Monitor (`risk-monitor.yml` — Tiap 4 Jam):**
+2. **Risk Monitor (`risk-monitor.yml` — Tiap 4 Jam di menit 23):**
    - Mengecek seluruh posisi aktif Owner.
    - Menghitung akumulasi funding rate yang sudah diperoleh.
    - Memverifikasi rasio margin dan batas likuidasi.
    - Mengirim peringatan jika rasio risiko mendekati ambang batas (*buffer* minimum 15%).
-3. **Market Execute (`market-execute.yml` — 21:40 WIB Senin–Jumat):**
+3. **Market Execute (`market-execute.yml` — 21:43 WIB Senin–Jumat / 14:43 UTC):**
    - Bertepatan dengan pembukaan pasar saham AS (US Market Open).
    - Membuka posisi terukur pada saham US (misal: NVDA, MSTR, PLTR, TSLA) atau komoditas (XAU, XAG, BRENTOIL).
    - Parameter ketat: Leverage maksimal 2x, alokasi margin $2.50 – $3.00 USDC per posisi, maksimal 2–4 posisi simultan.
