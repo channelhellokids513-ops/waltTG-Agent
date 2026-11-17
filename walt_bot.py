@@ -866,10 +866,21 @@ def apply_layer4_trailing(client: WaltClient, pos: Position) -> Optional[dict]:
 
 def risk_monitor_run(client: WaltClient) -> dict:
     """
-    Dispatcher utama risk monitor — jalan tiap 1 jam dari scheduled task.
+    Dispatcher utama risk monitor — jalan tiap 10 menit dari scheduled task.
     Evaluasi terpadu secara atomik untuk setiap posisi aktif.
+    Dilengkapi Opsi A (Smart Fast-Exit Idle): jika 0 posisi aktif, langsung stand by tanpa beban.
     """
     positions_data = client.list_positions(statuses=["open"])
+    active_positions = positions_data.get("positions", [])
+    if not active_positions:
+        log.info("💤 [SMART IDLE] 0 posisi aktif. Semua order aman/kas cair. Masuk mode tidur (fast-exit).")
+        return {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "status": "idle",
+            "positions_checked": 0,
+            "actions": [],
+        }
+
     contracts_data = client.list_contracts()
     contracts_by_id = {c["contract_id"]: c for c in contracts_data["contracts"]}
 

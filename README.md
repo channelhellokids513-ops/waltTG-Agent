@@ -96,7 +96,7 @@ Mengatasi limit bursa Walt pada aset berharga tinggi (seperti `NVDA` atau `MSTR`
 | [`daily-scan.yml`](.github/workflows/daily-scan.yml) | **07:17 & 19:17 WIB** (2x Sehari) | `17 0,12 * * *` | Master Scan seluruh kontrak, ranking peluang funding, riset Swarm AI mendalam (Qwen+Gemini P1-P7), **eksekusi instan order GO/HALF**, simpan database ke Google Sheet & notif Telegram. |
 | [`market-execute.yml`](.github/workflows/market-execute.yml) | **Tiap 2 Jam di menit 43** (24/7) | `43 */2 * * *` | Eksekusi cepat Saham US & Komoditas 24/7. Mengutamakan data riset tervalidasi dari Google Sheet (hemat API) dengan proteksi *anti-duplicate*. |
 | [`crypto-execute.yml`](.github/workflows/crypto-execute.yml) | **Tiap 2 Jam di menit 11** (24/7) | `11 */2 * * *` | Eksekusi cepat Crypto Bluechip (10 Tier-1: BTC, ETH, SOL, BNB, XRP, AVAX, SUI, LINK, NEAR, AAVE) menangkap funding carry & turn-over modal cepat via Cloud Scheduler (`walt-crypto-execute`). |
-| [`risk-monitor.yml`](.github/workflows/risk-monitor.yml) | **Tiap 1 Jam di menit 23** | `23 * * * *` | Evaluasi 4 lapis risiko atomik, kunci Breakeven di +0.60% (Zero-Risk), Take Profit tipis (+1.0% s.d. +1.2%), dan trailing stop rapat. |
+| [`risk-monitor.yml`](.github/workflows/risk-monitor.yml) | **Tiap 10 Menit** (Smart Fast-Exit Idle) | `*/10 * * * *` | Pengawas risiko 4-lapis intensif (Trailing Stop, Early Breakeven +0.60%). Otomatis *fast-exit* dalam 5 detik jika 0 posisi aktif (Opsi A Smart Idle). |
 
 ---
 

@@ -229,7 +229,7 @@ Sistem beroperasi 100% secara otonom di cloud GitHub Actions runners dengan nol 
 
     GitHub & Google Cloud Scheduler (Precision Triggers)
     ├── daily-scan.yml      (07:17 & 19:17 WIB / 2x sehari) → Master Scan 127 kontrak + Swarm AI + Sheet
-    ├── risk-monitor.yml    (Tiap 1 jam di menit 23 WIB)     → Evaluasi 4-lapis risiko & Early Breakeven (+0.6%)
+    ├── risk-monitor.yml    (Tiap 10 menit WIB)              → Pengawas 4-lapis risiko intensif + Smart Fast-Exit Idle
     ├── market-execute.yml  (Tiap 2 jam di menit 43 WIB)     → Eksekusi Saham US & Komoditas (Prioritas Sheet Cache)
     └── crypto-execute.yml  (Tiap 2 jam di menit 11 WIB)     → Eksekusi Crypto Tier-1 Scalp Turn-over (24/7)
                    │
@@ -268,7 +268,7 @@ Sistem beroperasi dengan arsitektur hibrida: cron internal GitHub Actions diduku
 | Workflow File | Jadwal Scheduler (WIB) | Jadwal Cron (UTC) | Target Cloud Scheduler | Fungsi Utama |
 |---|---|---|---|---|
 | [daily-scan.yml](file:///.github/workflows/daily-scan.yml) | **07:17 & 19:17 WIB** (2x Sehari) | `17 0,12 * * *` | `walt-daily-scan` | Master Scan seluruh kontrak, ranking peluang funding harian, riset sentimen Swarm AI (Qwen+Gemini), eksekusi instan sinyal GO/HALF, simpan database ke Google Sheet. |
-| [risk-monitor.yml](file:///.github/workflows/risk-monitor.yml) | **Tiap 1 Jam di menit 23** | `23 * * * *` | `walt-risk-monitor` | Evaluasi 4 lapis risiko, geser SL breakeven di +0.60% (Zero-Risk), trailing stop tier 1–4, dan *emergency close* jika funding berbalik. |
+| [risk-monitor.yml](file:///.github/workflows/risk-monitor.yml) | **Tiap 10 Menit** (Smart Fast-Exit Idle) | `*/10 * * * *` | `walt-risk-monitor` | Evaluasi 4 lapis risiko, geser SL breakeven di +0.60% (Zero-Risk), trailing stop tier 1–4. Fast-exit dalam 5 detik saat 0 posisi. |
 | [market-execute.yml](file:///.github/workflows/market-execute.yml) | **Tiap 2 Jam di menit 43** (24/7) | `43 */2 * * *` | `walt-market-execute` | Eksekusi cepat posisi Saham US & Komoditas 24/7. Mengutamakan riset tervalidasi dari Google Sheet (hemat API) dengan proteksi *anti-duplicate*. |
 | [crypto-execute.yml](file:///.github/workflows/crypto-execute.yml) | **Tiap 2 Jam di menit 11** (24/7) | `11 */2 * * *` | `walt-crypto-execute` | Eksekusi cepat posisi Crypto Bluechip (10 Tier-1) menangkap funding carry & perputaran modal cepat. |
 

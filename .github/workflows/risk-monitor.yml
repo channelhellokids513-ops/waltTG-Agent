@@ -1,9 +1,9 @@
-name: Walt Risk Monitor (Hourly)
+name: Walt Risk Monitor (10-Min Smart Guard)
 
 on:
   schedule:
-    # Berjalan tiap 1 jam di menit 23 UTC (menghindari antrean padat di menit 00)
-    - cron: '23 * * * *'
+    # Berjalan tiap 10 menit dengan fitur Smart Fast-Exit Idle
+    - cron: '*/10 * * * *'
   workflow_dispatch:
 
 jobs:
