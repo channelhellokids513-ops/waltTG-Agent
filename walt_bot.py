@@ -617,6 +617,9 @@ def open_position(
 
     if isinstance(result, dict):
         result["actual_margin"] = margin
+        result["tp"] = tp
+        result["sl"] = sl
+        result["price"] = price
     return result
 
 
@@ -846,6 +849,7 @@ def daily_scan(client: WaltClient) -> dict:
         "progress_pct": progress_pct,
         "top_opportunities": [
             {
+                "contract_id": o.contract_id,
                 "asset": o.base_asset,
                 "side": o.side,
                 "funding_daily_pct": o.funding_daily * 100,
@@ -854,18 +858,23 @@ def daily_scan(client: WaltClient) -> dict:
             }
             for o in top3
         ],
+        "_raw_opportunities": top3,
         "readiness": readiness,
     }
 
 
 # =============================================================================
-# SCAN WITH RESEARCH — daily scan + Qwen analysis + Telegram notif
+# SCAN WITH RESEARCH — daily scan + Qwen/Gemini analysis + Instant Auto-Execution
 # =============================================================================
 
-def format_summary_telegram(summary: dict, researches: dict[str, Research]) -> str:
-    """Format summary jadi Telegram-ready markdown."""
+def format_summary_telegram(
+    summary: dict,
+    researches: dict[str, Research],
+    executions: Optional[list[dict]] = None,
+) -> str:
+    """Format summary jadi Telegram-ready markdown dengan status eksekusi riil."""
     lines = []
-    lines.append("*📊 Walt Perps — Daily Scan*")
+    lines.append("*📊 Walt Perps — Daily Scan & Auto-Execute*")
     ts = summary.get("ts") or summary.get("scanned_at") or datetime.now(timezone.utc).isoformat()
     lines.append(f"_{ts[:16].replace('T', ' ')} UTC_\n")
 
@@ -888,8 +897,8 @@ def format_summary_telegram(summary: dict, researches: dict[str, Research]) -> s
     status = "🟢 ON TRACK" if pct >= 50 else "🟡 BEHIND" if pct >= 20 else "🔴 JAUH"
     lines.append(f"Status: {status}")
 
-    # Top opportunities + research
-    lines.append(f"\n*🎯 Top 3 Peluang (lev 2x, margin $2.50)*")
+    # Top opportunities + research + execution
+    lines.append(f"\n*🎯 Top Peluang & Prosedur Eksekusi*")
     for i, opp in enumerate(summary["top_opportunities"], 1):
         asset = opp["asset"]
         side = opp["side"].upper()
@@ -904,10 +913,31 @@ def format_summary_telegram(summary: dict, researches: dict[str, Research]) -> s
             funding_daily=funding / 100,
         )
         verdict, reason, mult = decide_go_nogo(pseudo_opp, research)  # type: ignore
-        emoji = {"GO": "✅", "HALF": "⚠️", "SKIP": "❌"}[verdict]
 
-        lines.append(f"\n{i}. {emoji} *{side} {asset}* @ `${price:.4f}`")
+        # Cek execution status jika ada
+        ex = next((e for e in (executions or []) if e.get("asset") == asset), None)
+        if ex and ex.get("verdict") == "EXECUTED":
+            badge = "✅ [EXECUTED]"
+        elif ex and ex.get("verdict") == "DRY_RUN":
+            badge = "🧪 [DRY RUN]"
+        elif ex and ex.get("verdict") == "SKIP" and "posisi sudah" in ex.get("reason", ""):
+            badge = "⏭️ [SKIP - AKTIF]"
+        elif ex and ex.get("verdict") in ("SKIP", "FAILED", "ERROR"):
+            badge = f"⚠️ [{ex.get('verdict')}]"
+        else:
+            badge = {"GO": "✅ GO", "HALF": "⚠️ HALF", "SKIP": "❌ SKIP"}.get(verdict, "❓")
+
+        lines.append(f"\n{i}. *{badge}* • *{side} {asset}* @ `${price:.4f}`")
         lines.append(f"   Funding: `{funding:+.3f}%/hari`")
+        if ex and ex.get("verdict") == "EXECUTED":
+            order_id = ex.get("order_id")
+            order_str = f" | Order: `{order_id[:8]}...`" if order_id else ""
+            lines.append(f"   ⚡ Order: Margin `${ex.get('margin', 0):.2f}` (lev 2x){order_str}")
+            if ex.get("tp") and ex.get("sl"):
+                lines.append(f"   🎯 TP: `${ex['tp']:.4f}` | 🛡️ SL: `${ex['sl']:.4f}`")
+        elif ex and ex.get("verdict") == "SKIP" and "posisi sudah" in ex.get("reason", ""):
+            lines.append(f"   ℹ️ _Posisi untuk kontrak ini sudah terbuka di akun._")
+
         if research:
             days = research.days_to_earnings
             earn_str = f"{days}d" if days is not None else "—"
@@ -926,15 +956,32 @@ def format_summary_telegram(summary: dict, researches: dict[str, Research]) -> s
                     )
             if research.narrative:
                 lines.append(f"   _{research.narrative[:180]}_")
-        lines.append(f"   → {verdict}: {reason}")
+        lines.append(f"   → Keputusan: *{verdict}* ({reason})")
 
-    lines.append(f"\n_Fee taker 0.09%/sisi | Max lev 2x | Fokus saham+komoditas_")
+    executed_list = [e for e in (executions or []) if e.get("verdict") == "EXECUTED"]
+    if executed_list:
+        lines.append(f"\n🚀 *Posisi Baru Dibuka ({len(executed_list)}):*")
+        for e in executed_list:
+            order_id = e.get("order_id", "N/A")
+            oid_short = f"`{order_id[:8]}...`" if order_id != "N/A" else "N/A"
+            lines.append(f"• *{e['side'].upper()} {e['asset']}*: margin `${e['margin']:.2f}` @ `${e.get('price', 0):.4f}` (Order ID: {oid_short})")
+
+    lines.append(f"\n_Fee taker 0.09%/sisi | Max lev 2x | Proteksi Auto TP/SL_")
     return "\n".join(lines)
 
 
-def scan_with_research(client: WaltClient) -> dict:
-    """Daily scan + Dual-AI research (Qwen + Gemini) + Telegram notif."""
-    log.info("📊 Running daily scan + research...")
+def scan_with_research(
+    client: WaltClient,
+    auto_execute: Optional[bool] = None,
+    dry_run: Optional[bool] = None,
+) -> dict:
+    """Daily scan + Dual-AI research (Qwen + Gemini) + Instant Auto-Execution pada sinyal GO/HALF + Telegram notif."""
+    if auto_execute is None:
+        auto_execute = os.getenv("AUTO_EXECUTE_ON_SCAN", "true").lower() == "true"
+    if dry_run is None:
+        dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
+
+    log.info(f"📊 Running daily scan + research (auto_execute={auto_execute}, dry_run={dry_run})...")
     summary = daily_scan(client)
 
     # Research tiap stock candidate
@@ -958,12 +1005,102 @@ def scan_with_research(client: WaltClient) -> dict:
             except Exception as e:
                 log.warning(f"  ✗ research {asset} failed: {e}")
 
-    # Format & send
-    msg = format_summary_telegram(summary, researches)
+    # Eksekusi instan jika auto_execute aktif
+    executions = []
+    deployed = 0.0
+    accounts = summary.get("balance", [])
+    available = float(accounts[0]["balance_available"]) if accounts else 0.0
+    target_deploy = available * (1.0 - MIN_BUFFER_PCT)  # 15% cash buffer dijaga
+
+    if auto_execute:
+        try:
+            existing = client.list_positions(statuses=["open"])
+            existing_contracts = {p["contract_id"] for p in existing.get("positions", [])}
+        except Exception as e:
+            log.warning(f"Gagal fetch existing positions: {e}")
+            existing_contracts = set()
+
+        raw_opps = summary.get("_raw_opportunities", [])
+        for opp in raw_opps:
+            asset = opp.base_asset
+            research = researches.get(asset)
+            verdict, reason, mult = decide_go_nogo(opp, research)
+            margin = DEFAULT_MARGIN * mult
+
+            if verdict in ("GO", "HALF") and mult > 0:
+                if opp.contract_id in existing_contracts:
+                    log.info(f"  SKIP {asset}: posisi sudah aktif")
+                    executions.append({
+                        "asset": asset, "side": opp.side, "verdict": "SKIP",
+                        "reason": "posisi sudah aktif",
+                    })
+                    continue
+
+                if deployed + margin > target_deploy or (available - deployed) < 3.0:
+                    log.info(f"  SKIP {asset}: buffer saldo tercapai (${deployed:.2f}/${target_deploy:.2f})")
+                    executions.append({
+                        "asset": asset, "side": opp.side, "verdict": "SKIP",
+                        "reason": f"buffer saldo tercapai (${deployed:.2f}/${target_deploy:.2f})",
+                    })
+                    continue
+
+                if dry_run:
+                    log.info(f"  🧪 DRY_RUN {opp.side.upper()} {asset} margin ${margin}")
+                    executions.append({
+                        "asset": asset, "side": opp.side, "margin": margin,
+                        "price": getattr(opp, "live_price", 0.0),
+                        "verdict": "DRY_RUN", "reason": reason,
+                    })
+                    deployed += margin
+                    continue
+
+                try:
+                    res = open_position(client, opp, margin=margin, leverage=MAX_LEVERAGE)
+                    if res:
+                        actual_margin = res.get("actual_margin", margin) if isinstance(res, dict) else margin
+                        order_id = res.get("order", {}).get("order_id") if isinstance(res, dict) else None
+                        order_price = res.get("price") or getattr(opp, "live_price", 0.0)
+                        tp = res.get("tp")
+                        sl = res.get("sl")
+                        executions.append({
+                            "asset": asset, "side": opp.side, "margin": actual_margin,
+                            "price": order_price, "tp": tp, "sl": sl,
+                            "verdict": "EXECUTED", "reason": reason,
+                            "order_id": order_id,
+                        })
+                        deployed += actual_margin
+                        existing_contracts.add(opp.contract_id)
+                    else:
+                        executions.append({
+                            "asset": asset, "side": opp.side, "verdict": "FAILED",
+                            "reason": "risk / min size check gagal",
+                        })
+                except Exception as e:
+                    log.error(f"  ERROR {asset}: {e}")
+                    executions.append({
+                        "asset": asset, "side": opp.side, "verdict": "ERROR", "reason": str(e),
+                    })
+            else:
+                executions.append({
+                    "asset": asset, "side": opp.side, "verdict": "SKIP", "reason": reason,
+                })
+
+    # Logging eksekusi ke Google Sheet & CSV jika ada yang dieksekusi
+    executed_items = [e for e in executions if e.get("verdict") == "EXECUTED"]
+    if executed_items:
+        try:
+            from sheet_logger import log_execution
+            exec_res = log_execution(executions)
+            log.info(f"📊 Logging executions result: {exec_res}")
+        except Exception as e:
+            log.warning(f"Logging execution to sheet failed: {e}")
+
+    # Format & send Telegram
+    msg = format_summary_telegram(summary, researches, executions=executions)
     sent = send_telegram(msg)
     log.info(f"Telegram sent: {sent}")
 
-    # Logging ke Google Sheet / CSV
+    # Logging scan ke Google Sheet / CSV
     try:
         from sheet_logger import log_scan
         log_res = log_scan(summary, researches)
@@ -971,7 +1108,12 @@ def scan_with_research(client: WaltClient) -> dict:
     except Exception as e:
         log.warning(f"Logging scan to sheet failed: {e}")
 
-    return {"summary": summary, "researches": {k: v.__dict__ for k, v in researches.items()}}
+    return {
+        "summary": summary,
+        "researches": {k: v.__dict__ for k, v in researches.items()},
+        "executions": executions,
+        "deployed": deployed,
+    }
 
 
 # =============================================================================
@@ -1074,8 +1216,12 @@ def market_execute(
             if result:
                 actual_margin = result.get("actual_margin", margin) if isinstance(result, dict) else margin
                 order_id = result.get("order", {}).get("order_id") if isinstance(result, dict) else None
+                order_price = result.get("price") or getattr(opp, "live_price", 0.0)
+                tp = result.get("tp")
+                sl = result.get("sl")
                 executions.append({
                     "asset": opp.base_asset, "side": opp.side, "margin": actual_margin,
+                    "price": order_price, "tp": tp, "sl": sl,
                     "verdict": "EXECUTED", "reason": reason,
                     "order_id": order_id,
                 })
@@ -1161,7 +1307,9 @@ def main(command: str = "scan"):
         print(json.dumps(result, indent=2, default=str))
 
     elif command == "scan_with_research":
-        result = scan_with_research(client)
+        dry = os.getenv("DRY_RUN", "false").lower() == "true"
+        auto_exec = os.getenv("AUTO_EXECUTE_ON_SCAN", "true").lower() == "true"
+        result = scan_with_research(client, auto_execute=auto_exec, dry_run=dry)
         print(json.dumps(result, indent=2, default=str))
 
     elif command == "monitor":

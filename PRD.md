@@ -61,9 +61,10 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
 └────────────────────────────────────────────────────────────────────────────────────────┘
 
     GitHub Actions Scheduled Cron
-    ├─ 07:17 WIB (daily-scan.yml)
-    ├─ Tiap 4 Jam di menit 23 (risk-monitor.yml)
-    └─ 21:43 WIB Mon-Fri (market-execute.yml)
+    ├─ 07:17 WIB (daily-scan.yml — Scan & Instant Auto-Execute GO/HALF)
+    ├─ Tiap 4 Jam di menit 23 (risk-monitor.yml — 4-Layer Risk & Trailing)
+    ├─ 21:43 WIB Mon-Fri (market-execute.yml — US Market Open Execution)
+    └─ Tiap 8 Jam (crypto-execute.yml — Crypto Bluechip Execution)
                    │
                    ▼
      ┌───────────────────────────┐

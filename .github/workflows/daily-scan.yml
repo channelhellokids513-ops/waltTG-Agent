@@ -1,11 +1,20 @@
-name: Daily Walt Perps Funding Scan
+name: Daily Walt Perps Funding Scan & Auto-Execute
 
 on:
   schedule:
     # 07:17 WIB = 00:17 UTC (menghindari antrean padat midnight 23:00-24:00 UTC)
     # Jadwal didaftarkan ulang oleh akun pemilik repo (2026-11-16)
     - cron: '17 0 * * *'
-  workflow_dispatch:  # manual trigger button
+  workflow_dispatch:
+    inputs:
+      auto_execute:
+        description: "Auto-execute GO/HALF signals (true/false)"
+        required: false
+        default: "true"
+      dry_run:
+        description: "Dry run (simulate without real order)"
+        required: false
+        default: "false"
 
 jobs:
   scan:
@@ -21,7 +30,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run daily scan
+      - name: Run daily scan and auto-execute
         env:
           WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}
           WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
@@ -35,6 +44,8 @@ jobs:
           GOOGLE_SHEET_WEBHOOK_URL: ${{ secrets.GOOGLE_SHEET_WEBHOOK_URL }}
           GH_PAT: ${{ secrets.GH_PAT || secrets.GH_PATH || secrets.GITHUB_PAT || secrets.PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          AUTO_EXECUTE_ON_SCAN: ${{ github.event.inputs.auto_execute || vars.AUTO_EXECUTE_ON_SCAN || 'true' }}
+          DRY_RUN: ${{ github.event.inputs.dry_run || vars.DRY_RUN || 'false' }}
         run: |
           set -o pipefail
           python walt_bot.py scan_with_research 2>&1 | tee scan_output.log
@@ -50,7 +61,7 @@ jobs:
       - name: Publish Summary
         if: always()
         run: |
-          echo "## 📊 Hasil Eksekusi Bot" >> $GITHUB_STEP_SUMMARY
+          echo "## 📊 Hasil Scan & Auto-Execute Bot" >> $GITHUB_STEP_SUMMARY
           echo '```text' >> $GITHUB_STEP_SUMMARY
           if [ -f scan_output.log ]; then
             cat scan_output.log >> $GITHUB_STEP_SUMMARY
