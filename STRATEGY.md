@@ -270,7 +270,7 @@ Sistem beroperasi dengan arsitektur hibrida: cron internal GitHub Actions diduku
 | [daily-scan.yml](file:///.github/workflows/daily-scan.yml) | **07:17 & 19:17 WIB** (2x Sehari) | `17 0,12 * * *` | `walt-daily-scan` | Master Scan seluruh kontrak, ranking peluang funding harian, riset sentimen Swarm AI (Qwen+Gemini), eksekusi instan sinyal GO/HALF, simpan database ke Google Sheet. |
 | [risk-monitor.yml](file:///.github/workflows/risk-monitor.yml) | **Tiap 1 Jam di menit 23** | `23 * * * *` | `walt-risk-monitor` | Evaluasi 4 lapis risiko, geser SL breakeven di +0.60% (Zero-Risk), trailing stop tier 1–4, dan *emergency close* jika funding berbalik. |
 | [market-execute.yml](file:///.github/workflows/market-execute.yml) | **Tiap 2 Jam di menit 43** (24/7) | `43 */2 * * *` | `walt-market-execute` | Eksekusi cepat posisi Saham US & Komoditas 24/7. Mengutamakan riset tervalidasi dari Google Sheet (hemat API) dengan proteksi *anti-duplicate*. |
-| [crypto-execute.yml](file:///.github/workflows/crypto-execute.yml) | **Tiap 2 Jam di menit 11** (24/7) | `11 */2 * * *` | *Cron / Manual Toggle* | Eksekusi cepat posisi Crypto Bluechip (10 Tier-1) menangkap funding carry & perputaran modal cepat. |
+| [crypto-execute.yml](file:///.github/workflows/crypto-execute.yml) | **Tiap 2 Jam di menit 11** (24/7) | `11 */2 * * *` | `walt-crypto-execute` | Eksekusi cepat posisi Crypto Bluechip (10 Tier-1) menangkap funding carry & perputaran modal cepat. |
 
 ### 7.2 Otomasi Rotasi Token OAuth (`token_manager.py`)
 - Akses ke Walt API menggunakan protokol OAuth 2.0 PKCE dengan Bearer token yang memiliki masa berlaku terbatas.
