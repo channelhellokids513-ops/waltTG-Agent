@@ -60,27 +60,28 @@ Analisis sentimen berita, katalis earnings, dan momentum makro dilakukan oleh 4 
   - `HALF` (Half size $1.25 – $1.50 margin jika katalis risiko P5 $\ge 0.70$)
   - `SKIP` (Batalkan jika melawan sentimen / earnings $\le 7$ hari)
 
-### 2. Dynamic Take Profit (TP) per Asset Class (Target Tipis & High Turnover)
-Mengunci keuntungan kecil secara berulang dan mempercepat perputaran modal:
-- **ETF / Saham Kalem (SPY, US100, AAPL):** TP +2.5%, SL 3.0%
-- **Crypto Bluechip (BTC, ETH, SOL):** TP +2.5%, SL 3.5% (cepat amankan sebelum dump)
-- **Komoditas (XAU, XAG, BRENTOIL):** TP +3.0%, SL 3.5%
-- **Saham Volatil (NVDA, TSLA, MSTR, CRCL, dll):** TP +3.5%, SL 4.0%
-- **Windfall Rule:** Jika keuntungan harga $\ge 2.5\times$ funding harian, TP diturunkan lebih awal untuk mengunci profit multi-hari dalam hitungan jam.
+### 2. Dynamic Take Profit (TP) per Asset Class (Ultra-Fast Scalp & High Turnover)
+Mengunci keuntungan kecil secara berulang untuk mempercepat perputaran modal $15 agar segera cair kembali:
+- **Crypto Tier-1 (BTC, ETH, SOL, BNB, XRP, AVAX, SUI, LINK, NEAR, AAVE):** TP +1.0%, SL 2.5% (cepat cair sebelum dump)
+- **ETF / Saham Kalem (SPY, US100, AAPL):** TP +1.0%, SL 2.5%
+- **Komoditas (XAU, XAG, BRENTOIL):** TP +1.2%, SL 3.0%
+- **Saham Volatil (NVDA, TSLA, MSTR, CRCL, SNDK, VVV, dll):** TP +1.2%, SL 3.0%
+- **Windfall Rule:** Jika keuntungan harga $\ge 2\times$ funding harian (>=0.8%), TP dimajukan lebih awal untuk mengunci profit multi-hari dalam hitungan jam.
 
-### 3. Tangga Trailing Stop & Early Breakeven (Agresif & Tipis — 4 Tiers)
-- **Tier 1 (Profit $\ge +0.8\%$):** Lock SL otomatis ke `Entry + 0.25%` (**Zero-Risk:** modal dan fee taker terkunci aman sejak dini!).
-- **Tier 2 (Profit $\ge +1.5\%$):** Lock SL ke `Entry + 0.80%` (Kunci cuan awal).
-- **Tier 3 (Profit $\ge +2.5\%$):** Lock SL ke `Entry + 1.50%` (Kunci cuan menengah).
-- **Tier 4 (Profit $\ge +3.5\%$):** Trailing stop super rapat **0.8%** di bawah running price.
+### 3. Tangga Trailing Stop & Early Breakeven (Ultra-Fast Scalp — 4 Tiers)
+- **Tier 1 (Profit $\ge +0.6\%$):** Lock SL otomatis ke `Entry + 0.20%` (**Zero-Risk:** modal dan fee taker 0.18% terkunci aman sejak dini!).
+- **Tier 2 (Profit $\ge +1.0\%$):** Lock SL ke `Entry + 0.50%` (Kunci cuan awal).
+- **Tier 3 (Profit $\ge +1.5\%$):** Lock SL ke `Entry + 1.00%` (Kunci cuan menengah).
+- **Tier 4 (Profit $\ge +2.0\%$):** Trailing stop super rapat **0.5%** di bawah running price.
 
 ### 4. Contract Minimum Order Size Enforcement (`min_size_base`)
 Mengatasi limit bursa Walt pada aset berharga tinggi (seperti `NVDA` atau `MSTR`):
 - Menghitung syarat bursa: $\text{Derived Size} = (\text{margin} \times \text{leverage} / \text{price}) \ge \text{min\_size\_base}$.
 - Jika order `HALF` menghasilkan margin di bawah batas kontrak, bot otomatis meng-clamp margin ke batas minimum (contoh: dari $1.25 ke $1.79 untuk NVDA) selama masih dalam batas toleransi risiko portofolio.
 
-### 5. Strict Altcoin Exclusion (Permanent Blacklist)
-- **GRAM & Memecoin Liar Dilarang Keras:** Universe crypto dibatasi ketat hanya pada aset bluechip likuiditas tinggi (`BTC`, `ETH`, `SOL`) dengan filter volume 24 jam $> \$1.000.000$.
+### 5. Tier-1 Crypto Whitelist & Strict Memecoin Blacklist
+- **Crypto Tier-1 Whitelist:** Aset dengan kapitalisasi pasar besar dan likuiditas solid (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `AVAX`, `SUI`, `LINK`, `NEAR`, `AAVE`) dengan filter volume 24 jam $> \$1.000.000$.
+- **Memecoin & Koin Micin Dilarang Keras:** Koin meme volatil (`PEPE`, `DOGE`, `SHIB`, `WIF`, `FARTCOIN`, `POPCAT`, `TRUMP`) di-blacklist total untuk mencegah risiko likuidasi liar dan slippage ekstrim.
 
 ### 6. Zero-Maintenance OAuth Token Auto-Sync
 - Walt OAuth token kadaluarsa secara berkala dan dirotasi oleh bursa.

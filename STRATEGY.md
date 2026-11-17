@@ -197,24 +197,24 @@ Manajemen risiko berjalan otomatis tiap 4 jam melalui workflow `risk-monitor.yml
 
 ### Penjelasan Detil Tiap Lapis:
 
-1. **Lapis 1 (Dynamic Baseline TP/SL):**  
-   Target TP dan SL dibuat lebih tipis agar turnover modal tinggi dan sering tersentuh:
-   - ETF / Indeks (SPY, US100, AAPL): TP +2.5%, SL 3.0%
-   - Crypto Bluechip (BTC, ETH, SOL): TP +2.5%, SL 3.5% (cepat amankan sebelum dump)
-   - Komoditas (XAU, XAG, BRENTOIL): TP +3.0%, SL 3.5%
-   - Saham Volatil (NVDA, TSLA, MSTR, CRCL): TP +3.5%, SL 4.0%
-   - *Windfall Rule:* Jika keuntungan harga $\ge 2.5\times$ funding harian, TP disesuaikan lebih cepat agar cuan segera terkunci.
+1. **Lapis 1 (Dynamic Baseline TP/SL — Ultra-Fast Scalp & High Turnover):**  
+   Target TP dan SL dibuat ultra-tipis agar perputaran modal $15 sangat tinggi dan segera cair:
+   - Crypto Tier-1 (BTC, ETH, SOL, BNB, XRP, AVAX, SUI, LINK, NEAR, AAVE): TP +1.0%, SL 2.5%
+   - ETF / Indeks (SPY, US100, AAPL): TP +1.0%, SL 2.5%
+   - Komoditas (XAU, XAG, BRENTOIL): TP +1.2%, SL 3.0%
+   - Saham Volatil (NVDA, TSLA, MSTR, CRCL, SNDK, VVV): TP +1.2%, SL 3.0%
+   - *Windfall Rule:* Jika keuntungan harga $\ge 2\times$ funding harian (>=0.8%), TP dimajukan lebih cepat agar cuan segera terkunci.
 2. **Lapis 2 (Dinamika Funding Rate — Prioritas Utama):**  
    - Jika arah funding berbalik (*funding flip sign*), misal posisi SHORT namun funding rate berubah menjadi negatif (artinya posisi kita yang harus membayar pasar), **posisi seketika ditutup pasar**. Thesis awal dinyatakan batal.  
    - Jika funding rate meluruh tajam hingga `< 0.1%/hari`, stop loss otomatis dipindahkan ke harga entry (*breakeven*).
 3. **Lapis 3 (Volatilitas & Momentum Harga):**  
-   - Jika posisi merugi > 2.5% dari entry price, SL diperketat menjadi 3.5% untuk memangkas potensi drawdown lebih lanjut.
-4. **Lapis 4 (Trailing Stop & Early Breakeven Lock — Tipis & Responsif):**  
+   - Jika posisi merugi > 2.0% dari entry price, SL diperketat menjadi 2.5% untuk memangkas potensi drawdown lebih lanjut.
+4. **Lapis 4 (Trailing Stop & Early Breakeven Lock — Ultra-Fast Scalp):**  
    Mencegah posisi yang sempat hijau berbalik menjadi rugi:
-   - **Tier 1 (Profit $\ge +0.8\%$):** Geser SL otomatis ke **Entry + 0.25%** (Zero-Risk: kunci modal dan cover fee sejak dini!).
-   - **Tier 2 (Profit $\ge +1.5\%$):** Geser SL ke **Entry + 0.80%** (Kunci Cuan Awal 0.8%).
-   - **Tier 3 (Profit $\ge +2.5\%$):** Geser SL ke **Entry + 1.50%** (Kunci Cuan Menengah 1.5%).
-   - **Tier 4 (Profit $\ge +3.5\%$):** Pasang trailing stop super rapat **0.8%** di bawah harga running.
+   - **Tier 1 (Profit $\ge +0.6\%$):** Geser SL otomatis ke **Entry + 0.20%** (Zero-Risk: kunci modal dan cover fee 0.18% sejak dini!).
+   - **Tier 2 (Profit $\ge +1.0\%$):** Geser SL ke **Entry + 0.50%** (Kunci Cuan Awal 0.5%).
+   - **Tier 3 (Profit $\ge +1.5\%$):** Geser SL ke **Entry + 1.00%** (Kunci Cuan Menengah 1.0%).
+   - **Tier 4 (Profit $\ge +2.0\%$):** Pasang trailing stop super rapat **0.5%** di bawah harga running.
 
 ---
 

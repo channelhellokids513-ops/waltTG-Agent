@@ -44,7 +44,11 @@ ALLOWED_STOCKS = {
     "ANTHROPIC",
 }
 ALLOWED_COMMODITIES = {"XAU", "XAG", "BRENTOIL"}
-ALLOWED_CRYPTO = {"BTC", "ETH", "SOL"}
+ALLOWED_CRYPTO = {
+    "BTC", "ETH", "SOL",            # Bluechip
+    "BNB", "XRP", "AVAX",           # Tier-1 Large Cap
+    "SUI", "LINK", "NEAR", "AAVE",  # High-Liquidity Ecosystem Leaders
+}
 ALLOWED_ASSETS = ALLOWED_STOCKS | ALLOWED_COMMODITIES | ALLOWED_CRYPTO
 
 # Position sizing
@@ -60,44 +64,44 @@ MIN_FUNDING_DAILY = 0.005   # 0.5%/hari
 # Target income
 MONTHLY_TARGET = 100.0      # USDC
 
-# Risk management parameters (Adaptive per Asset Class — Tipis, Cepat Cuan & High Turnover)
-DEFAULT_SL_PCT = 0.040       # 4.0% default SL (sebelumnya 5.0%)
-DEFAULT_TP_PCT = 0.035       # 3.5% default TP (sebelumnya 5.0%)
+# Risk management parameters (Ultra-Fast Capital Turnover — Cuan Kilat & Modal $15 Cepat Bebas)
+DEFAULT_SL_PCT = 0.030       # 3.0% default SL (ketat & batasi drawdown)
+DEFAULT_TP_PCT = 0.012       # 1.2% default TP (cepat hit & modal kembali cair)
 
-# Tangga Trailing Stop & Early Breakeven (Agresif, Tipis & Responsif)
+# Tangga Trailing Stop & Early Breakeven (Ultra-Fast Scalp & Zero-Risk Lock)
 TRAILING_TIERS = [
     # (profit_threshold, action_or_trailing_pct)
-    # Tier 1: Profit >= +0.8% -> Lock Breakeven + 0.25% (Fee-cover / Zero-Risk)
-    (0.008, "lock_0025"),
-    # Tier 2: Profit >= +1.5% -> Lock Cuan Awal + 0.8%
-    (0.015, "lock_008"),
-    # Tier 3: Profit >= +2.5% -> Lock Cuan Menengah + 1.5%
-    (0.025, "lock_015"),
-    # Tier 4: Profit >= +3.5% -> Trailing Super Rapat 0.8% di bawah running price
-    (0.035, 0.008),
+    # Tier 1: Profit >= +0.6% -> Lock Breakeven + 0.20% (Fee-cover / Zero-Risk)
+    (0.006, "lock_0020"),
+    # Tier 2: Profit >= +1.0% -> Lock Cuan Awal + 0.50%
+    (0.010, "lock_0050"),
+    # Tier 3: Profit >= +1.5% -> Lock Cuan Menengah + 1.00%
+    (0.015, "lock_0100"),
+    # Tier 4: Profit >= +2.0% -> Trailing Super Rapat 0.5% di bawah running price
+    (0.020, 0.005),
 ]
 
 
 def get_asset_baseline_tpsl_pct(asset: Optional[str] = None) -> tuple[float, float]:
     """
     Return (tp_pct, sl_pct) disesuaikan dengan profil volatilitas aset:
-    - Target tipis & realistis agar sering kena TP, turnover cepat, dan modal terus berputar:
-    - ETF / Saham Kalem (SPY, US100, AAPL): TP +2.5%, SL 3.0%
-    - Crypto Bluechip (BTC, ETH, SOL): TP +2.5%, SL 3.5% (ambil cuan kilat)
-    - Komoditas (XAU, XAG, BRENTOIL): TP +3.0%, SL 3.5%
-    - Saham Volatil (NVDA, TSLA, MSTR, CRCL, dll): TP +3.5%, SL 4.0%
+    - Target tipis & kilat agar sering kena TP, turnover cepat, dan modal $15 terus berputar:
+    - Crypto Tier-1 (BTC, ETH, SOL, BNB, XRP, AVAX, SUI, LINK, NEAR, AAVE): TP +1.0%, SL 2.5%
+    - ETF / Saham Kalem (SPY, US100, AAPL): TP +1.0%, SL 2.5%
+    - Komoditas (XAU, XAG, BRENTOIL): TP +1.2%, SL 3.0%
+    - Saham Volatil (NVDA, TSLA, MSTR, CRCL, SNDK, VVV, dll): TP +1.2%, SL 3.0%
     """
     if not asset:
-        return 0.035, 0.040
+        return 0.012, 0.030
     asset_up = asset.upper()
     if asset_up in {"SPY", "US100", "AAPL"}:
-        return 0.025, 0.030
+        return 0.010, 0.025
     elif asset_up in ALLOWED_CRYPTO:
-        return 0.025, 0.035
+        return 0.010, 0.025
     elif asset_up in ALLOWED_COMMODITIES:
-        return 0.030, 0.035
+        return 0.012, 0.030
     else:
-        return 0.035, 0.040
+        return 0.012, 0.030
 
 # Logging
 logging.basicConfig(
@@ -524,14 +528,14 @@ def compute_baseline_tpsl(
 ) -> tuple[float, float]:
     """
     Return (tp, sl) dinamis disesuaikan dengan profil volatilitas aset & windfall funding:
-    - Target tipis & terukur (+2.5% s/d +3.5%) agar sering hit TP & modal terus berputar
-    - Windfall Take Profit: Jika 2.5x funding harian realistis (>= 2.0%), TP dimajukan
+    - Target ultra-tipis & terukur (+1.0% s/d +1.2%) agar cepat hit TP & modal $15 terus berputar
+    - Windfall Take Profit: Jika 2x funding harian realistis (>= 0.8%), TP dimajukan
     """
     tp_pct, sl_pct = get_asset_baseline_tpsl_pct(asset)
 
-    if abs(funding_daily) >= 0.008:
-        windfall_tp = round(abs(funding_daily) * 2.5, 3)
-        if 0.020 <= windfall_tp < tp_pct:
+    if abs(funding_daily) >= 0.005:
+        windfall_tp = round(abs(funding_daily) * 2.0, 3)
+        if 0.008 <= windfall_tp < tp_pct:
             tp_pct = windfall_tp
 
     if side == "long":
@@ -708,8 +712,8 @@ def evaluate_and_apply_position_risk(
     # B. Kandidat dari Proteksi Volatilitas (Lapis 3)
     move = abs((pos.current_price - pos.entry_price) / pos.entry_price)
     profitable = pos.profit_pct_price > 0
-    if move > 0.025 and not profitable:
-        l3_sl = round(pos.entry_price * 0.965 if pos.side == "long" else pos.entry_price * 1.035, 4)
+    if move > 0.020 and not profitable:
+        l3_sl = round(pos.entry_price * 0.975 if pos.side == "long" else pos.entry_price * 1.025, 4)
         if _sl_is_better(pos.side, l3_sl, candidate_sl) and _sl_is_improvement(pos, l3_sl):
             candidate_sl = l3_sl
             sl_reason = "L3 Volatility Cut"
@@ -730,15 +734,15 @@ def evaluate_and_apply_position_risk(
                 active_tier = (threshold, action)
         if active_tier:
             threshold, action = active_tier
-            if action == "lock_0025":
-                l4_sl = pos.entry_price * 1.0025 if pos.side == "long" else pos.entry_price * 0.9975
-                tier_desc = f"L4 Zero-Risk +0.25% (Profit {profit*100:+.2f}%)"
-            elif action == "lock_008":
-                l4_sl = pos.entry_price * 1.008 if pos.side == "long" else pos.entry_price * 0.992
-                tier_desc = f"L4 Lock Cuan +0.80% (Profit {profit*100:+.2f}%)"
-            elif action == "lock_015":
-                l4_sl = pos.entry_price * 1.015 if pos.side == "long" else pos.entry_price * 0.985
-                tier_desc = f"L4 Lock Cuan +1.50% (Profit {profit*100:+.2f}%)"
+            if action in ("lock_0020", "lock_0025"):
+                l4_sl = pos.entry_price * 1.0020 if pos.side == "long" else pos.entry_price * 0.9980
+                tier_desc = f"L4 Zero-Risk +0.20% (Profit {profit*100:+.2f}%)"
+            elif action in ("lock_0050", "lock_008"):
+                l4_sl = pos.entry_price * 1.0050 if pos.side == "long" else pos.entry_price * 0.9950
+                tier_desc = f"L4 Lock Cuan +0.50% (Profit {profit*100:+.2f}%)"
+            elif action in ("lock_0100", "lock_015"):
+                l4_sl = pos.entry_price * 1.0100 if pos.side == "long" else pos.entry_price * 0.9900
+                tier_desc = f"L4 Lock Cuan +1.00% (Profit {profit*100:+.2f}%)"
             elif isinstance(action, (int, float)):
                 trailing_pct = action
                 l4_sl = pos.current_price * (1 - trailing_pct) if pos.side == "long" else pos.current_price * (1 + trailing_pct)
@@ -819,8 +823,8 @@ def apply_layer3_volatility(client: WaltClient, pos: Position) -> Optional[dict]
     """Lapis 3: Proteksi pergerakan harga negatif (wrapper kompatibilitas)."""
     move = abs((pos.current_price - pos.entry_price) / pos.entry_price)
     profitable = pos.profit_pct_price > 0
-    if move > 0.025 and not profitable:
-        new_sl = round(pos.entry_price * 0.965 if pos.side == "long" else pos.entry_price * 1.035, 4)
+    if move > 0.020 and not profitable:
+        new_sl = round(pos.entry_price * 0.975 if pos.side == "long" else pos.entry_price * 1.025, 4)
         if _sl_is_improvement(pos, new_sl):
             preview = client.preview_auto_close(pos.contract_id, sl=new_sl)
             if preview.get("ok"):
@@ -840,12 +844,12 @@ def apply_layer4_trailing(client: WaltClient, pos: Position) -> Optional[dict]:
     if active_tier is None:
         return None
     threshold, action = active_tier
-    if action == "lock_0025":
-        new_sl = pos.entry_price * 1.0025 if pos.side == "long" else pos.entry_price * 0.9975
-    elif action == "lock_008":
-        new_sl = pos.entry_price * 1.008 if pos.side == "long" else pos.entry_price * 0.992
-    elif action == "lock_015":
-        new_sl = pos.entry_price * 1.015 if pos.side == "long" else pos.entry_price * 0.985
+    if action in ("lock_0020", "lock_0025"):
+        new_sl = pos.entry_price * 1.0020 if pos.side == "long" else pos.entry_price * 0.9980
+    elif action in ("lock_0050", "lock_008"):
+        new_sl = pos.entry_price * 1.0050 if pos.side == "long" else pos.entry_price * 0.9950
+    elif action in ("lock_0100", "lock_015"):
+        new_sl = pos.entry_price * 1.0100 if pos.side == "long" else pos.entry_price * 0.9900
     elif isinstance(action, (int, float)):
         trailing_pct = action
         new_sl = pos.current_price * (1 - trailing_pct) if pos.side == "long" else pos.current_price * (1 + trailing_pct)
