@@ -60,43 +60,44 @@ MIN_FUNDING_DAILY = 0.005   # 0.5%/hari
 # Target income
 MONTHLY_TARGET = 100.0      # USDC
 
-# Risk management parameters (Adaptive per Asset Class)
-DEFAULT_SL_PCT = 0.05       # 5% default SL
-DEFAULT_TP_PCT = 0.05       # 5% default TP (bukan 15% kaku)
+# Risk management parameters (Adaptive per Asset Class — Tipis, Cepat Cuan & High Turnover)
+DEFAULT_SL_PCT = 0.040       # 4.0% default SL (sebelumnya 5.0%)
+DEFAULT_TP_PCT = 0.035       # 3.5% default TP (sebelumnya 5.0%)
 
-# Tangga Trailing Stop & Early Breakeven (Agresif & Rapat)
+# Tangga Trailing Stop & Early Breakeven (Agresif, Tipis & Responsif)
 TRAILING_TIERS = [
     # (profit_threshold, action_or_trailing_pct)
-    # Tier 1: Profit >= +1.5% -> Lock Breakeven + 0.3% (Fee-cover / Zero-Risk)
-    (0.015, "lock_003"),
-    # Tier 2: Profit >= +2.5% -> Lock Cuan Awal + 1.2%
-    (0.025, "lock_012"),
-    # Tier 3: Profit >= +4.0% -> Trailing 1.5%
-    (0.040, 0.015),
-    # Tier 4: Profit >= +6.0% -> Trailing 1.0%
-    (0.060, 0.010),
+    # Tier 1: Profit >= +0.8% -> Lock Breakeven + 0.25% (Fee-cover / Zero-Risk)
+    (0.008, "lock_0025"),
+    # Tier 2: Profit >= +1.5% -> Lock Cuan Awal + 0.8%
+    (0.015, "lock_008"),
+    # Tier 3: Profit >= +2.5% -> Lock Cuan Menengah + 1.5%
+    (0.025, "lock_015"),
+    # Tier 4: Profit >= +3.5% -> Trailing Super Rapat 0.8% di bawah running price
+    (0.035, 0.008),
 ]
 
 
 def get_asset_baseline_tpsl_pct(asset: Optional[str] = None) -> tuple[float, float]:
     """
     Return (tp_pct, sl_pct) disesuaikan dengan profil volatilitas aset:
-    - ETF / Saham Kalem (SPY, US100, AAPL): TP +3.5%, SL 4.0%
-    - Crypto Bluechip (BTC, ETH, SOL): TP +3.5%, SL 4.5% (cepat amankan sebelum dump)
-    - Komoditas (XAU, XAG, BRENTOIL): TP +4.0%, SL 4.5%
-    - Saham Volatil (NVDA, TSLA, MSTR, CRCL, dll): TP +5.0%, SL 5.0%
+    - Target tipis & realistis agar sering kena TP, turnover cepat, dan modal terus berputar:
+    - ETF / Saham Kalem (SPY, US100, AAPL): TP +2.5%, SL 3.0%
+    - Crypto Bluechip (BTC, ETH, SOL): TP +2.5%, SL 3.5% (ambil cuan kilat)
+    - Komoditas (XAU, XAG, BRENTOIL): TP +3.0%, SL 3.5%
+    - Saham Volatil (NVDA, TSLA, MSTR, CRCL, dll): TP +3.5%, SL 4.0%
     """
     if not asset:
-        return 0.050, 0.050
+        return 0.035, 0.040
     asset_up = asset.upper()
     if asset_up in {"SPY", "US100", "AAPL"}:
-        return 0.035, 0.040
+        return 0.025, 0.030
     elif asset_up in ALLOWED_CRYPTO:
-        return 0.035, 0.045
+        return 0.025, 0.035
     elif asset_up in ALLOWED_COMMODITIES:
-        return 0.040, 0.045
+        return 0.030, 0.035
     else:
-        return 0.050, 0.050
+        return 0.035, 0.040
 
 # Logging
 logging.basicConfig(
@@ -523,17 +524,14 @@ def compute_baseline_tpsl(
 ) -> tuple[float, float]:
     """
     Return (tp, sl) dinamis disesuaikan dengan profil volatilitas aset & windfall funding:
-    - ETF / Saham Kalem: TP +3.5%, SL 4.0%
-    - Crypto Bluechip (BTC, ETH, SOL): TP +3.5%, SL 4.5% (cepat amankan sebelum dump)
-    - Komoditas: TP +4.0%, SL 4.5%
-    - Saham Volatil: TP +5.0%, SL 5.0%
-    - Windfall Take Profit: Jika 3x funding harian realistis (>= 2.5%), TP disesuaikan
+    - Target tipis & terukur (+2.5% s/d +3.5%) agar sering hit TP & modal terus berputar
+    - Windfall Take Profit: Jika 2.5x funding harian realistis (>= 2.0%), TP dimajukan
     """
     tp_pct, sl_pct = get_asset_baseline_tpsl_pct(asset)
 
     if abs(funding_daily) >= 0.008:
-        windfall_tp = round(abs(funding_daily) * 3.0, 3)
-        if 0.025 <= windfall_tp < tp_pct:
+        windfall_tp = round(abs(funding_daily) * 2.5, 3)
+        if 0.020 <= windfall_tp < tp_pct:
             tp_pct = windfall_tp
 
     if side == "long":
@@ -628,13 +626,29 @@ def open_position(
 # =============================================================================
 
 def apply_layer1_baseline(client: WaltClient, pos: Position) -> Optional[dict]:
-    """Lapis 1: Set Dynamic TP/SL baseline kalau belum ada."""
-    if pos.tp and pos.sl:
+    """Lapis 1: Set Dynamic TP/SL baseline atau perketat TP jika target baru lebih dekat/realistis."""
+    target_tp, target_sl = compute_baseline_tpsl(pos.side, pos.entry_price, asset=pos.base_asset)
+
+    new_tp = None
+    if not pos.tp:
+        new_tp = target_tp
+    else:
+        # Perketat TP jika target baru lebih dekat ke entry (lebih cepat & realistis tersentuh)
+        if pos.side == "long" and target_tp < pos.tp:
+            new_tp = target_tp
+        elif pos.side == "short" and target_tp > pos.tp:
+            new_tp = target_tp
+
+    new_sl = None
+    if not pos.sl:
+        new_sl = target_sl
+    elif _sl_is_improvement(pos, target_sl):
+        new_sl = target_sl
+
+    if new_tp is None and new_sl is None:
         return None
-    tp, sl = compute_baseline_tpsl(pos.side, pos.entry_price, asset=pos.base_asset)
-    new_tp = tp if not pos.tp else None
-    new_sl = sl if not pos.sl else None
-    log.info(f"[L1] {pos.base_asset}: set dynamic baseline TP={new_tp}, SL={new_sl}")
+
+    log.info(f"[L1] {pos.base_asset}: update dynamic baseline TP={new_tp} (was {pos.tp}), SL={new_sl} (was {pos.sl})")
     preview = client.preview_auto_close(pos.contract_id, tp=new_tp, sl=new_sl)
     if preview.get("ok"):
         return client.execute(preview["confirmationToken"])
@@ -670,14 +684,14 @@ def apply_layer3_volatility(client: WaltClient, pos: Position) -> Optional[dict]
     move = abs((pos.current_price - pos.entry_price) / pos.entry_price)
     profitable = pos.profit_pct_price > 0
 
-    if move > 0.03 and not profitable:
-        # Loss >3%: perketat SL ke entry ± 4% untuk batasi drawdown
+    if move > 0.025 and not profitable:
+        # Loss >2.5%: perketat SL ke entry ± 3.5% untuk batasi drawdown
         if pos.side == "long":
-            new_sl = pos.entry_price * 0.96
+            new_sl = pos.entry_price * 0.965
         else:
-            new_sl = pos.entry_price * 1.04
+            new_sl = pos.entry_price * 1.035
         if _sl_is_improvement(pos, new_sl):
-            log.info(f"[L3] {pos.base_asset}: loss >3% → SL diperketat ${new_sl:.4f}")
+            log.info(f"[L3] {pos.base_asset}: loss >2.5% → SL diperketat ${new_sl:.4f}")
             preview = client.preview_auto_close(pos.contract_id, sl=round(new_sl, 4))
             if preview.get("ok"):
                 return client.execute(preview["confirmationToken"])
@@ -685,7 +699,7 @@ def apply_layer3_volatility(client: WaltClient, pos: Position) -> Optional[dict]
 
 
 def apply_layer4_trailing(client: WaltClient, pos: Position) -> Optional[dict]:
-    """Lapis 4: Trailing stop progresif & Early Breakeven Lock."""
+    """Lapis 4: Trailing stop progresif & Early Breakeven Lock (Rapat & Tipis)."""
     profit = pos.profit_pct_price  # fraction, bisa negatif
     if profit < TRAILING_TIERS[0][0]:
         return None
@@ -700,12 +714,15 @@ def apply_layer4_trailing(client: WaltClient, pos: Position) -> Optional[dict]:
         return None
 
     threshold, action = active_tier
-    if action == "lock_003":
-        # Tier 1 (+1.5% profit): Kunci Breakeven + 0.3% (Fee-cover / Zero-Risk)
-        new_sl = pos.entry_price * 1.003 if pos.side == "long" else pos.entry_price * 0.997
-    elif action == "lock_012":
-        # Tier 2 (+2.5% profit): Kunci Cuan Awal + 1.2%
-        new_sl = pos.entry_price * 1.012 if pos.side == "long" else pos.entry_price * 0.988
+    if action == "lock_0025":
+        # Tier 1 (+0.8% profit): Kunci Breakeven + 0.25% (Fee-cover / Zero-Risk)
+        new_sl = pos.entry_price * 1.0025 if pos.side == "long" else pos.entry_price * 0.9975
+    elif action == "lock_008":
+        # Tier 2 (+1.5% profit): Kunci Cuan Awal + 0.8%
+        new_sl = pos.entry_price * 1.008 if pos.side == "long" else pos.entry_price * 0.992
+    elif action == "lock_015":
+        # Tier 3 (+2.5% profit): Kunci Cuan Menengah + 1.5%
+        new_sl = pos.entry_price * 1.015 if pos.side == "long" else pos.entry_price * 0.985
     elif isinstance(action, (int, float)):
         trailing_pct = action
         if pos.side == "long":

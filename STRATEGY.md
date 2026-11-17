@@ -101,12 +101,12 @@ Walt mewajibkan pola 2-tahap dengan *time-limited confirmation token*:
 5. **Fallback TP/SL Otomatis:** Jika bursa menolak order awal karena batasan parameter TP/SL di luar toleransi slippage kontrak, bot mengeksekusi order terbuka tanpa `autoClose`, kemudian mengatur TP/SL secara terpisah via `perps_prepare_auto_close_set`.
 
 ### 4.3 Parameter TP/SL Baseline Dinamis per Kelas Aset
-Menghindari target TP kaku yang sering berbalik sebelum tersentuh (seperti pengalaman kasus token volatile):
-- **ETF / Saham Kalem (SPY, US100, AAPL):** TP +3.5%, SL 4.0%
-- **Crypto Bluechip (BTC, ETH, SOL):** TP +3.5%, SL 4.5% (cepat amankan sebelum dump)
-- **Komoditas Tradisional (XAU, XAG, BRENTOIL):** TP +4.0%, SL 4.5%
-- **Saham Volatil (NVDA, TSLA, MSTR, CRCL, dll):** TP +5.0%, SL 5.0%
-- **Windfall Rule:** Jika keuntungan harga mencapai $\ge 3\times$ funding rate harian, TP diturunkan lebih awal agar akumulasi funding multi-hari segera terkunci tanpa risiko pembalikan harga.
+Menghindari target TP kaku yang sering berbalik sebelum tersentuh (target tipis & high turnover):
+- **ETF / Saham Kalem (SPY, US100, AAPL):** TP +2.5%, SL 3.0%
+- **Crypto Bluechip (BTC, ETH, SOL):** TP +2.5%, SL 3.5% (cepat amankan sebelum dump)
+- **Komoditas Tradisional (XAU, XAG, BRENTOIL):** TP +3.0%, SL 3.5%
+- **Saham Volatil (NVDA, TSLA, MSTR, CRCL, dll):** TP +3.5%, SL 4.0%
+- **Windfall Rule:** Jika keuntungan harga mencapai $\ge 2.5\times$ funding rate harian, TP diturunkan lebih awal agar akumulasi funding multi-hari segera terkunci tanpa risiko pembalikan harga.
 
 ---
 
@@ -198,23 +198,23 @@ Manajemen risiko berjalan otomatis tiap 4 jam melalui workflow `risk-monitor.yml
 ### Penjelasan Detil Tiap Lapis:
 
 1. **Lapis 1 (Dynamic Baseline TP/SL):**  
-   Target TP dan SL tidak disamaratakan 15%, melainkan disesuaikan dengan volatilitas aset:
-   - ETF / Indeks (SPY, US100, AAPL): TP +3.5%, SL 4.0%
-   - Crypto Bluechip (BTC, ETH, SOL): TP +3.5%, SL 4.5% (cepat amankan sebelum dump)
-   - Komoditas (XAU, XAG, BRENTOIL): TP +4.0%, SL 4.5%
-   - Saham Volatil (NVDA, TSLA, MSTR, CRCL): TP +5.0%, SL 5.0%
-   - *Windfall Rule:* Jika keuntungan harga $\ge 3\times$ funding harian, TP disesuaikan lebih cepat agar cuan segera terkunci.
+   Target TP dan SL dibuat lebih tipis agar turnover modal tinggi dan sering tersentuh:
+   - ETF / Indeks (SPY, US100, AAPL): TP +2.5%, SL 3.0%
+   - Crypto Bluechip (BTC, ETH, SOL): TP +2.5%, SL 3.5% (cepat amankan sebelum dump)
+   - Komoditas (XAU, XAG, BRENTOIL): TP +3.0%, SL 3.5%
+   - Saham Volatil (NVDA, TSLA, MSTR, CRCL): TP +3.5%, SL 4.0%
+   - *Windfall Rule:* Jika keuntungan harga $\ge 2.5\times$ funding harian, TP disesuaikan lebih cepat agar cuan segera terkunci.
 2. **Lapis 2 (Dinamika Funding Rate — Prioritas Utama):**  
    - Jika arah funding berbalik (*funding flip sign*), misal posisi SHORT namun funding rate berubah menjadi negatif (artinya posisi kita yang harus membayar pasar), **posisi seketika ditutup pasar**. Thesis awal dinyatakan batal.  
    - Jika funding rate meluruh tajam hingga `< 0.1%/hari`, stop loss otomatis dipindahkan ke harga entry (*breakeven*).
 3. **Lapis 3 (Volatilitas & Momentum Harga):**  
-   - Jika posisi merugi > 3% dari entry price, SL diperketat dari 5% menjadi 4% untuk memangkas potensi drawdown lebih lanjut.
-4. **Lapis 4 (Trailing Stop & Early Breakeven Lock):**  
+   - Jika posisi merugi > 2.5% dari entry price, SL diperketat menjadi 3.5% untuk memangkas potensi drawdown lebih lanjut.
+4. **Lapis 4 (Trailing Stop & Early Breakeven Lock — Tipis & Responsif):**  
    Mencegah posisi yang sempat hijau berbalik menjadi rugi:
-   - **Tier 1 (Profit $\ge +1.5\%$):** Geser SL otomatis ke **Entry + 0.3%** (Zero-Risk: kunci modal dan cover fee).
-   - **Tier 2 (Profit $\ge +2.5\%$):** Geser SL ke **Entry + 1.2%** (Kunci Cuan Minimal 1.2%).
-   - **Tier 3 (Profit $\ge +4.0\%$):** Pasang trailing stop ketat **1.5%** di bawah harga running.
-   - **Tier 4 (Profit $\ge +6.0\%$):** Pasang trailing stop sangat ketat **1.0%** di bawah harga running.
+   - **Tier 1 (Profit $\ge +0.8\%$):** Geser SL otomatis ke **Entry + 0.25%** (Zero-Risk: kunci modal dan cover fee sejak dini!).
+   - **Tier 2 (Profit $\ge +1.5\%$):** Geser SL ke **Entry + 0.80%** (Kunci Cuan Awal 0.8%).
+   - **Tier 3 (Profit $\ge +2.5\%$):** Geser SL ke **Entry + 1.50%** (Kunci Cuan Menengah 1.5%).
+   - **Tier 4 (Profit $\ge +3.5\%$):** Pasang trailing stop super rapat **0.8%** di bawah harga running.
 
 ---
 

@@ -60,19 +60,19 @@ Analisis sentimen berita, katalis earnings, dan momentum makro dilakukan oleh 4 
   - `HALF` (Half size $1.25 – $1.50 margin jika katalis risiko P5 $\ge 0.70$)
   - `SKIP` (Batalkan jika melawan sentimen / earnings $\le 7$ hari)
 
-### 2. Dynamic Take Profit (TP) per Asset Class & Windfall Rule
-Menghindari target TP kaku yang sering berbalik sebelum tersentuh:
-- **ETF / Saham Kalem (SPY, US100, AAPL):** TP +3.5%, SL 4.0%
-- **Crypto Bluechip (BTC, ETH, SOL):** TP +3.5%, SL 4.5% (cepat amankan sebelum dump)
-- **Komoditas (XAU, XAG, BRENTOIL):** TP +4.0%, SL 4.5%
-- **Saham Volatil (NVDA, TSLA, MSTR, CRCL):** TP +5.0%, SL 5.0%
-- **Windfall Rule:** Jika keuntungan harga $\ge 3\times$ funding harian, TP diturunkan lebih awal untuk mengunci profit multi-hari dalam hitungan jam.
+### 2. Dynamic Take Profit (TP) per Asset Class (Target Tipis & High Turnover)
+Mengunci keuntungan kecil secara berulang dan mempercepat perputaran modal:
+- **ETF / Saham Kalem (SPY, US100, AAPL):** TP +2.5%, SL 3.0%
+- **Crypto Bluechip (BTC, ETH, SOL):** TP +2.5%, SL 3.5% (cepat amankan sebelum dump)
+- **Komoditas (XAU, XAG, BRENTOIL):** TP +3.0%, SL 3.5%
+- **Saham Volatil (NVDA, TSLA, MSTR, CRCL, dll):** TP +3.5%, SL 4.0%
+- **Windfall Rule:** Jika keuntungan harga $\ge 2.5\times$ funding harian, TP diturunkan lebih awal untuk mengunci profit multi-hari dalam hitungan jam.
 
-### 3. Tangga Trailing Stop & Early Breakeven (4 Tiers)
-- **Tier 1 (Profit $\ge +1.5\%$):** Lock SL otomatis ke `Entry + 0.3%` (**Zero-Risk:** modal dan fee trading terkunci aman).
-- **Tier 2 (Profit $\ge +2.5\%$):** Lock SL ke `Entry + 1.2%` (Kunci cuan minimal).
-- **Tier 3 (Profit $\ge +4.0\%$):** Trailing stop ketat **1.5%** di bawah running price.
-- **Tier 4 (Profit $\ge +6.0\%$):** Trailing stop super ketat **1.0%** di bawah running price.
+### 3. Tangga Trailing Stop & Early Breakeven (Agresif & Tipis — 4 Tiers)
+- **Tier 1 (Profit $\ge +0.8\%$):** Lock SL otomatis ke `Entry + 0.25%` (**Zero-Risk:** modal dan fee taker terkunci aman sejak dini!).
+- **Tier 2 (Profit $\ge +1.5\%$):** Lock SL ke `Entry + 0.80%` (Kunci cuan awal).
+- **Tier 3 (Profit $\ge +2.5\%$):** Lock SL ke `Entry + 1.50%` (Kunci cuan menengah).
+- **Tier 4 (Profit $\ge +3.5\%$):** Trailing stop super rapat **0.8%** di bawah running price.
 
 ### 4. Contract Minimum Order Size Enforcement (`min_size_base`)
 Mengatasi limit bursa Walt pada aset berharga tinggi (seperti `NVDA` atau `MSTR`):

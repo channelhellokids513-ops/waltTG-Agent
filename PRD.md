@@ -112,8 +112,8 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
    - Menerapkan **4 Lapis Proteksi Risiko**:
      - Lapis 1: Baseline Dynamic TP/SL.
      - Lapis 2: Funding Integrity (*emergency close* jika funding flip sign, breakeven jika funding meluruh tajam <0.1%/hari).
-     - Lapis 3: Volatility tightening (SL diperketat ke 4% jika loss > 3%).
-     - Lapis 4: **Tangga Trailing Stop 4-Tiers** (+1.5% zero-risk lock ke Entry+0.3%, +2.5% lock cuan 1.2%, +4% trailing 1.5%, +6% trailing 1.0%).
+     - Lapis 3: Volatility tightening (SL diperketat ke 3.5% jika loss > 2.5%).
+     - Lapis 4: **Tangga Trailing Stop 4-Tiers Tipis** (+0.8% zero-risk lock ke Entry+0.25%, +1.5% lock cuan 0.8%, +2.5% lock cuan 1.5%, +3.5% trailing 0.8%).
 3. **Market Execute (`market-execute.yml` — 14:43 & 21:43 WIB Setiap Hari 24/7 / 07:43 & 14:43 UTC):**
    - Berjalan 24/7 (Senin–Minggu tanpa jeda) memanfaatkan likuiditas perpetual synthetic Walt.
    - Membuka posisi terukur pada saham US (NVDA, MSTR, PLTR, TSLA) atau komoditas (XAU, XAG, BRENTOIL).
@@ -122,7 +122,7 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
 4. **Crypto Execute (`crypto-execute.yml` — Tiap 8 Jam / 07:11, 15:11, 23:11 WIB):**
    - Modul mandiri untuk capture yield crypto bluechip (`BTC`, `ETH`, `SOL`).
    - Strict altcoin exclusion: token spekulatif dan memecoin (seperti GRAM) di-blacklist permanen.
-   - Dynamic TP/SL: TP +3.5%, SL 4.5% (cepat amankan sebelum dump).
+   - Dynamic TP/SL: TP +2.5%, SL 3.5% (ambil cuan kilat & turnover cepat).
    - Dapat diaktifkan atau dinonaktifkan secara independen tanpa memengaruhi bot saham.
 
 ### 3.4 Langkah Penerapan Segera (Fase 1 Action Plan)
