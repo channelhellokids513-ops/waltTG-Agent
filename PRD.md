@@ -63,7 +63,7 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
     GitHub Actions Scheduled Cron
     ├─ 07:17 WIB (daily-scan.yml — Scan & Instant Auto-Execute GO/HALF)
     ├─ Tiap 1 Jam di menit 23 (risk-monitor.yml — 4-Layer Risk & Trailing)
-    ├─ 21:43 WIB Mon-Fri (market-execute.yml — US Market Open Execution)
+    ├─ 14:43 & 21:43 WIB (market-execute.yml — 24/7 Saham US & Komoditas)
     └─ Tiap 8 Jam (crypto-execute.yml — Crypto Bluechip Execution)
                    │
                    ▼
@@ -114,8 +114,8 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
      - Lapis 2: Funding Integrity (*emergency close* jika funding flip sign, breakeven jika funding meluruh tajam <0.1%/hari).
      - Lapis 3: Volatility tightening (SL diperketat ke 4% jika loss > 3%).
      - Lapis 4: **Tangga Trailing Stop 4-Tiers** (+1.5% zero-risk lock ke Entry+0.3%, +2.5% lock cuan 1.2%, +4% trailing 1.5%, +6% trailing 1.0%).
-3. **Market Execute (`market-execute.yml` — 21:43 WIB Senin–Jumat / 14:43 UTC via `walt-market-execute` Scheduler):**
-   - Bertepatan dengan likuiditas tinggi pembukaan pasar saham AS (US Market Open).
+3. **Market Execute (`market-execute.yml` — 14:43 & 21:43 WIB Setiap Hari 24/7 / 07:43 & 14:43 UTC):**
+   - Berjalan 24/7 (Senin–Minggu tanpa jeda) memanfaatkan likuiditas perpetual synthetic Walt.
    - Membuka posisi terukur pada saham US (NVDA, MSTR, PLTR, TSLA) atau komoditas (XAU, XAG, BRENTOIL).
    - Parameter ketat: Leverage maksimal 2x, alokasi margin $2.50 – $3.00 USDC per posisi, buffer modal wajib 15%.
    - **Order Size Clamping:** Otomatis menyesuaikan margin jika derived size di bawah `min_size_base` bursa Walt (contoh: NVDA $1.79).
@@ -945,7 +945,7 @@ interface TradeRecordDocument {
 | **F1-02** | Automated Token Refresh | `token_manager.py` memperbarui Bearer token secara otomatis sebelum tiap eksekusi. | **P0 (Segera)** |
 | **F1-03** | Token Rotation Alert | Mengirim alert darurat ke Telegram jika Walt me-rotate refresh token. | **P0 (Segera)** |
 | **F1-04** | AI Sentiment Research | Pemanggilan Qwen-Plus (`llm_research.py`) untuk memvalidasi sentimen aset top funding. | **P0 (Segera)** |
-| **F1-05** | US Market Execution | Eksekusi otomatis 21:40 WIB Senin–Jumat (`market-execute.yml`) pada saham/komoditas. | **P0 (Segera)** |
+| **F1-05** | 24/7 Market Execution | Eksekusi otomatis 14:43 & 21:43 WIB Setiap Hari 24/7 (`market-execute.yml`) pada saham/komoditas. | **P0 (Segera)** |
 | **F1-06** | Continuous Risk Monitor | Eksekusi tiap 1 jam (`risk-monitor.yml`) untuk memantau margin ratio & funding capture. | **P0 (Segera)** |
 | **F1-07** | Owner Telegram Alert | Rangkuman scan, konfirmasi order, dan log PnL dikirim langsung ke `TELEGRAM_CHAT_ID`. | **P0 (Segera)** |
 | **F1-08** | Order Fallback Handling | Fallback otomatis jika order autoClose ditolak parameter exchange (buka dulu, set SL terpisah). | **P0 (Segera)** |

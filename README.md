@@ -23,7 +23,7 @@ Autonomous delta-neutral & directional funding rate arbitrage trading system unt
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │               GOOGLE CLOUD SCHEDULER (Jakarta asia-southeast2)        │
-│    • walt-market-execute (21:43 WIB Mon-Fri)                           │
+│    • walt-market-execute (14:43 & 21:43 WIB Setiap Hari 24/7)          │
 │    • walt-daily-scan     (07:17 WIB Daily)                             │
 │    • walt-risk-monitor   (Tiap 1 Jam di menit 23 WIB)                  │
 └───────────────────────────────────┬────────────────────────────────────┘
@@ -93,7 +93,7 @@ Mengatasi limit bursa Walt pada aset berharga tinggi (seperti `NVDA` atau `MSTR`
 | Komponen / Workflow | Jadwal Cloud Scheduler (WIB) | Jadwal Cron GitHub (UTC) | Deskripsi |
 |---|---|---|---|
 | [`daily-scan.yml`](.github/workflows/daily-scan.yml) | **07:17 WIB** (Daily) | `17 0 * * *` | Scan seluruh kontrak, ranking peluang funding harian, riset Swarm AI, **eksekusi instan order bersinyal GO/HALF** ke Walt Perps, kirim push notif Telegram & simpan ke Google Sheet. |
-| [`market-execute.yml`](.github/workflows/market-execute.yml) | **21:43 WIB** (Senin–Jumat) | `43 13 * * 1-5` / `43 14 * * 1-5` | Eksekusi order pembukaan posisi saham US & komoditas tepat saat likuiditas tinggi Wall Street open (dengan proteksi *anti-duplicate*). |
+| [`market-execute.yml`](.github/workflows/market-execute.yml) | **14:43 & 21:43 WIB** (Setiap Hari 24/7) | `43 7,14 * * *` | Eksekusi order saham US & komoditas secara kontinu 24/7 (dengan proteksi *anti-duplicate*). |
 | [`crypto-execute.yml`](.github/workflows/crypto-execute.yml) | *Manual / Cron Independen* | `11 0,8,16 * * *` | Eksekusi posisi Crypto Bluechip (BTC, ETH, SOL) tiap 8 jam siklus funding. Dapat dimatikan/dinyalakan mandiri. |
 | [`risk-monitor.yml`](.github/workflows/risk-monitor.yml) | **Tiap 1 Jam di menit 23** | `23 * * * *` | Evaluasi 4 lapis risiko, geser SL ke breakeven, pasang trailing stop, dan emergency close jika arah funding berbalik (*flip sign*). |
 
