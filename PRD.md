@@ -62,7 +62,7 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
 
     GitHub Actions Scheduled Cron
     ├─ 07:17 WIB (daily-scan.yml — Scan & Instant Auto-Execute GO/HALF)
-    ├─ Tiap 4 Jam di menit 23 (risk-monitor.yml — 4-Layer Risk & Trailing)
+    ├─ Tiap 1 Jam di menit 23 (risk-monitor.yml — 4-Layer Risk & Trailing)
     ├─ 21:43 WIB Mon-Fri (market-execute.yml — US Market Open Execution)
     └─ Tiap 8 Jam (crypto-execute.yml — Crypto Bluechip Execution)
                    │
@@ -106,7 +106,7 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
    - Menghitung *annualized funding rate* untuk SHORT (funding positif tinggi) dan LONG (funding negatif ekstrim).
    - Memanggil Swarm AI (`llm_research.py` — Qwen + Gemini 4-voter) untuk menganalisis sentimen berita & makro aset pilihan.
    - Mengirimkan rangkuman terstruktur peluang terbaik langsung ke Telegram Owner & Google Sheets.
-2. **Risk Monitor (`risk-monitor.yml` — Tiap 4 Jam di menit 23 WIB via `walt-risk-monitor` Scheduler):**
+2. **Risk Monitor (`risk-monitor.yml` — Tiap 1 Jam di menit 23 WIB):**
    - Mengecek seluruh posisi aktif Owner secara otomatis.
    - Menghitung akumulasi funding rate yang sudah diperoleh.
    - Menerapkan **4 Lapis Proteksi Risiko**:
@@ -946,7 +946,7 @@ interface TradeRecordDocument {
 | **F1-03** | Token Rotation Alert | Mengirim alert darurat ke Telegram jika Walt me-rotate refresh token. | **P0 (Segera)** |
 | **F1-04** | AI Sentiment Research | Pemanggilan Qwen-Plus (`llm_research.py`) untuk memvalidasi sentimen aset top funding. | **P0 (Segera)** |
 | **F1-05** | US Market Execution | Eksekusi otomatis 21:40 WIB Senin–Jumat (`market-execute.yml`) pada saham/komoditas. | **P0 (Segera)** |
-| **F1-06** | Continuous Risk Monitor | Eksekusi tiap 4 jam (`risk-monitor.yml`) untuk memantau margin ratio & funding capture. | **P0 (Segera)** |
+| **F1-06** | Continuous Risk Monitor | Eksekusi tiap 1 jam (`risk-monitor.yml`) untuk memantau margin ratio & funding capture. | **P0 (Segera)** |
 | **F1-07** | Owner Telegram Alert | Rangkuman scan, konfirmasi order, dan log PnL dikirim langsung ke `TELEGRAM_CHAT_ID`. | **P0 (Segera)** |
 | **F1-08** | Order Fallback Handling | Fallback otomatis jika order autoClose ditolak parameter exchange (buka dulu, set SL terpisah). | **P0 (Segera)** |
 

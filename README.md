@@ -25,7 +25,7 @@ Autonomous delta-neutral & directional funding rate arbitrage trading system unt
 │               GOOGLE CLOUD SCHEDULER (Jakarta asia-southeast2)        │
 │    • walt-market-execute (21:43 WIB Mon-Fri)                           │
 │    • walt-daily-scan     (07:17 WIB Daily)                             │
-│    • walt-risk-monitor   (Tiap 4 Jam di menit 23 WIB)                  │
+│    • walt-risk-monitor   (Tiap 1 Jam di menit 23 WIB)                  │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │ (Exact-second HTTP POST trigger)
                                     ▼
@@ -95,7 +95,7 @@ Mengatasi limit bursa Walt pada aset berharga tinggi (seperti `NVDA` atau `MSTR`
 | [`daily-scan.yml`](.github/workflows/daily-scan.yml) | **07:17 WIB** (Daily) | `17 0 * * *` | Scan seluruh kontrak, ranking peluang funding harian, riset Swarm AI, **eksekusi instan order bersinyal GO/HALF** ke Walt Perps, kirim push notif Telegram & simpan ke Google Sheet. |
 | [`market-execute.yml`](.github/workflows/market-execute.yml) | **21:43 WIB** (Senin–Jumat) | `43 13 * * 1-5` / `43 14 * * 1-5` | Eksekusi order pembukaan posisi saham US & komoditas tepat saat likuiditas tinggi Wall Street open (dengan proteksi *anti-duplicate*). |
 | [`crypto-execute.yml`](.github/workflows/crypto-execute.yml) | *Manual / Cron Independen* | `11 0,8,16 * * *` | Eksekusi posisi Crypto Bluechip (BTC, ETH, SOL) tiap 8 jam siklus funding. Dapat dimatikan/dinyalakan mandiri. |
-| [`risk-monitor.yml`](.github/workflows/risk-monitor.yml) | **Tiap 4 Jam di menit 23** (`03:23`, `07:23`, `11:23`, `15:23`, `19:23`, `23:23` WIB) | `23 */4 * * *` | Evaluasi 4 lapis risiko, geser SL ke breakeven, pasang trailing stop, dan emergency close jika arah funding berbalik (*flip sign*). |
+| [`risk-monitor.yml`](.github/workflows/risk-monitor.yml) | **Tiap 1 Jam di menit 23** | `23 * * * *` | Evaluasi 4 lapis risiko, geser SL ke breakeven, pasang trailing stop, dan emergency close jika arah funding berbalik (*flip sign*). |
 
 ---
 
