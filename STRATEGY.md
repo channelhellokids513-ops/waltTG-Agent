@@ -227,11 +227,11 @@ Sistem beroperasi 100% secara otonom di cloud GitHub Actions runners dengan nol 
 │                        LIVE DEPLOYMENT ARCHITECTURE                                    │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 
-    GitHub Cloud Scheduler (cron triggers)
-    ├── daily-scan.yml      (07:17 WIB / 00:17 UTC)   → Scan 127 kontrak + Swarm AI + Notif
-    ├── risk-monitor.yml    (Tiap 4 jam di menit 23)   → Evaluasi 4-lapis risiko & Early Breakeven
-    ├── market-execute.yml  (21:43 WIB Mon-Fri)        → Eksekusi saham saat US market open
-    └── crypto-execute.yml  (Tiap 8 jam di menit 11)   → Eksekusi Crypto Bluechip (On/Off Toggle)
+    GitHub & Google Cloud Scheduler (Precision Triggers)
+    ├── daily-scan.yml      (07:17 & 19:17 WIB / 2x sehari) → Master Scan 127 kontrak + Swarm AI + Sheet
+    ├── risk-monitor.yml    (Tiap 1 jam di menit 23 WIB)     → Evaluasi 4-lapis risiko & Early Breakeven (+0.6%)
+    ├── market-execute.yml  (Tiap 2 jam di menit 43 WIB)     → Eksekusi Saham US & Komoditas (Prioritas Sheet Cache)
+    └── crypto-execute.yml  (Tiap 2 jam di menit 11 WIB)     → Eksekusi Crypto Tier-1 Scalp Turn-over (24/7)
                    │
                    ▼
      ┌───────────────────────────┐
@@ -261,25 +261,16 @@ Sistem beroperasi 100% secara otonom di cloud GitHub Actions runners dengan nol 
      └───────────────────────────┘
 ```
 
-### 7.1 Jadwal Workflow GitHub Actions
-
-| Workflow File | Jadwal Cron (UTC) | Waktu Lokal (WIB) | Fungsi Utama |
-|---|---|---|---|
-| [daily-scan.yml](file:///.github/workflows/daily-scan.yml) | `17 0 * * *` | **07:17 WIB Tiap Hari** | Pemindaian seluruh kontrak, ranking peluang funding harian, riset sentimen Swarm AI (Qwen+Gemini), eksekusi instan sinyal GO/HALF, dan notif Telegram. |
-| [risk-monitor.yml](file:///.github/workflows/risk-monitor.yml) | `23 * * * *` | **Tiap 1 Jam di menit 23** | Evaluasi 4 lapis risiko pada semua posisi terbuka, update trailing stop tier 1–4, dan *emergency close* jika funding berbalik. |
-| [market-execute.yml](file:///.github/workflows/market-execute.yml) | `43 7,14 * * *` | **14:43 & 21:43 WIB Setiap Hari** | Eksekusi order pembukaan posisi saham US & komoditas secara kontinu 24/7 (dengan proteksi *anti-duplicate*). |
-| [crypto-execute.yml](file:///.github/workflows/crypto-execute.yml) | `11 0,8,16 * * *` | **Tiap 8 Jam (07:11, 15:11, 23:11 WIB)** | Eksekusi order posisi Crypto Bluechip (BTC, ETH, SOL) dengan Dynamic TP/SL (dapat dimatikan/dinyalakan mandiri). |
-
 ### 7.1 Jadwal Workflow & Google Cloud Scheduler Bridge
 
 Sistem beroperasi dengan arsitektur hibrida: cron internal GitHub Actions didukung oleh **Google Cloud Scheduler Bridge** (Region `asia-southeast2` Jakarta, Project `gen-lang-client-0705791867`) yang menembak REST API `workflow_dispatch` dengan akurasi detik waktu Indonesia Barat (WIB):
 
 | Workflow File | Jadwal Scheduler (WIB) | Jadwal Cron (UTC) | Target Cloud Scheduler | Fungsi Utama |
 |---|---|---|---|---|
-| [daily-scan.yml](file:///.github/workflows/daily-scan.yml) | **07:17 WIB** Tiap Hari | `17 0 * * *` | `walt-daily-scan` | Pemindaian seluruh kontrak, ranking peluang funding harian, riset sentimen Swarm AI (Qwen+Gemini), eksekusi instan sinyal GO/HALF, dan notif Telegram/Sheet. |
-| [risk-monitor.yml](file:///.github/workflows/risk-monitor.yml) | **Tiap 1 Jam di menit 23** | `23 * * * *` | `walt-risk-monitor` | Evaluasi 4 lapis risiko, geser SL breakeven, trailing stop tier 1–4, dan *emergency close* jika funding berbalik. |
-| [market-execute.yml](file:///.github/workflows/market-execute.yml) | **14:43 & 21:43 WIB** Setiap Hari | `43 7,14 * * *` | `walt-market-execute` | Eksekusi order pembukaan posisi saham US & komoditas 24/7 (dengan proteksi *anti-duplicate*). |
-| [crypto-execute.yml](file:///.github/workflows/crypto-execute.yml) | **Tiap 8 Jam** (`07:11`, `15:11`, `23:11` WIB) | `11 0,8,16 * * *` | *Cron / Manual Toggle* | Eksekusi posisi Crypto Bluechip (BTC, ETH, SOL) dengan Dynamic TP/SL (dapat dimatikan/dinyalakan mandiri). |
+| [daily-scan.yml](file:///.github/workflows/daily-scan.yml) | **07:17 & 19:17 WIB** (2x Sehari) | `17 0,12 * * *` | `walt-daily-scan` | Master Scan seluruh kontrak, ranking peluang funding harian, riset sentimen Swarm AI (Qwen+Gemini), eksekusi instan sinyal GO/HALF, simpan database ke Google Sheet. |
+| [risk-monitor.yml](file:///.github/workflows/risk-monitor.yml) | **Tiap 1 Jam di menit 23** | `23 * * * *` | `walt-risk-monitor` | Evaluasi 4 lapis risiko, geser SL breakeven di +0.60% (Zero-Risk), trailing stop tier 1–4, dan *emergency close* jika funding berbalik. |
+| [market-execute.yml](file:///.github/workflows/market-execute.yml) | **Tiap 2 Jam di menit 43** (24/7) | `43 */2 * * *` | `walt-market-execute` | Eksekusi cepat posisi Saham US & Komoditas 24/7. Mengutamakan riset tervalidasi dari Google Sheet (hemat API) dengan proteksi *anti-duplicate*. |
+| [crypto-execute.yml](file:///.github/workflows/crypto-execute.yml) | **Tiap 2 Jam di menit 11** (24/7) | `11 */2 * * *` | *Cron / Manual Toggle* | Eksekusi cepat posisi Crypto Bluechip (10 Tier-1) menangkap funding carry & perputaran modal cepat. |
 
 ### 7.2 Otomasi Rotasi Token OAuth (`token_manager.py`)
 - Akses ke Walt API menggunakan protokol OAuth 2.0 PKCE dengan Bearer token yang memiliki masa berlaku terbatas.

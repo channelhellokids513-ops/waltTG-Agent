@@ -213,3 +213,113 @@ def log_execution(executions: list[dict], filepath: str = "logs/executions_histo
             log.warning(f"Gagal kirim eksekusi ke Google Sheets Webhook: {e}")
 
     return {"executions_count": len(rows), "csv_logged": True}
+
+
+def fetch_latest_research_from_sheet(
+    webhook_url: Optional[str] = None,
+    csv_path: str = "logs/scan_history.csv"
+) -> dict[str, Any]:
+    """
+    Mengambil ringkasan riset terbaru per aset dari:
+    1. Google Sheets Webhook via GET request (online/terpusat)
+    2. File CSV audit lokal (offline fallback)
+    
+    Mengembalikan dict[asset, Research] yang siap digunakan untuk decide_go_nogo.
+    """
+    from llm_research import Research
+
+    url = _normalize_webhook_url(webhook_url or os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", DEFAULT_WEBHOOK_URL))
+    if url:
+        try:
+            r = httpx.get(url, follow_redirects=True, timeout=12.0)
+            if r.status_code == 200:
+                res = r.json()
+                if isinstance(res, dict) and res.get("status") == "success":
+                    data = res.get("data", {})
+                    researches: dict[str, Research] = {}
+                    for asset, item in data.items():
+                        score = 0.0
+                        try:
+                            raw_score = str(item.get("swarm_score", "0")).replace("+", "")
+                            score = float(raw_score) if raw_score and raw_score != "—" else 0.0
+                        except Exception:
+                            score = 0.0
+                        
+                        sent = str(item.get("sentiment") or "unknown").lower()
+                        if sent not in ("bullish", "bearish", "neutral", "unknown"):
+                            sent = "unknown"
+                        
+                        p1_to_p7 = {}
+                        for p_key in ("p1_polarity", "p4_momentum", "p5_catalysts", "p6_contrarian"):
+                            val = item.get(p_key)
+                            if val is not None and str(val) != "—":
+                                try:
+                                    clean_k = "P1_sentiment_polarity" if p_key == "p1_polarity" else (
+                                        "P4_momentum_direction" if p_key == "p4_momentum" else (
+                                            "P5_risk_catalysts" if p_key == "p5_catalysts" else "P6_contrarian_check"
+                                        )
+                                    )
+                                    p1_to_p7[clean_k] = float(str(val).replace("+", ""))
+                                except Exception:
+                                    pass
+
+                        researches[asset] = Research(
+                            ticker=asset,
+                            days_to_earnings=None,
+                            news_sentiment=sent,
+                            narrative=str(item.get("narrative") or item.get("reason") or ""),
+                            confidence=0.80 if score != 0.0 else 0.50,
+                            fetched_at=str(item.get("timestamp") or ""),
+                            consensus=str(item.get("consensus") or "SINGLE_MODEL"),
+                            final_score=score,
+                            overall_consensus_level=str(item.get("consensus") or "SINGLE_MODEL"),
+                            vendor_alignment=str(item.get("vendor_alignment") or "both_agree"),
+                            p1_to_p7_scores=p1_to_p7,
+                        )
+                    if researches:
+                        log.info(f"✓ Berhasil memuat {len(researches)} data riset dari Google Sheets Webhook ({list(researches.keys())})")
+                        return researches
+        except Exception as e:
+            log.warning(f"Gagal mengambil riset dari Google Sheets Webhook: {e}")
+
+    # Fallback ke CSV lokal jika ada
+    if os.path.exists(csv_path):
+        try:
+            with open(csv_path, mode="r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                researches = {}
+                for row in reader:
+                    asset = row.get("asset", "").strip().upper()
+                    if not asset:
+                        continue
+                    score = 0.0
+                    try:
+                        raw = row.get("swarm_score", "0").replace("+", "")
+                        score = float(raw) if raw and raw != "—" else 0.0
+                    except Exception:
+                        score = 0.0
+                    
+                    sent = (row.get("sentiment") or "unknown").lower()
+                    if sent not in ("bullish", "bearish", "neutral", "unknown"):
+                        sent = "unknown"
+
+                    researches[asset] = Research(
+                        ticker=asset,
+                        days_to_earnings=None,
+                        news_sentiment=sent,
+                        narrative=row.get("narrative") or row.get("reason") or "",
+                        confidence=0.80 if score != 0.0 else 0.50,
+                        fetched_at=row.get("timestamp_utc", ""),
+                        consensus=row.get("consensus", "SINGLE_MODEL"),
+                        final_score=score,
+                        overall_consensus_level=row.get("consensus", "SINGLE_MODEL"),
+                        vendor_alignment=row.get("vendor_alignment", "both_agree"),
+                    )
+                if researches:
+                    log.info(f"✓ Berhasil memuat {len(researches)} data riset dari file CSV lokal ({list(researches.keys())})")
+                    return researches
+        except Exception as e:
+            log.warning(f"Gagal membaca riset dari CSV lokal: {e}")
+
+    return {}
+

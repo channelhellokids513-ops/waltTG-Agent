@@ -2,9 +2,9 @@ name: Walt Crypto Execute (Tier-1 Large Cap & Bluechip)
 
 on:
   schedule:
-    # Tiap 8 jam di menit prima 11 UTC: 00:11, 08:11, 16:11 UTC
-    # (WIB: 07:11, 15:11, 23:11 WIB — sinkron dengan siklus 8 jam funding crypto)
-    - cron: '11 0,8,16 * * *'
+    # Berjalan setiap 2 jam di menit ke-11 UTC:
+    # (WIB: 08:11, 10:11, 12:11, 14:11, 16:11, 18:11, 20:11, 22:11, 00:11, 02:11, 04:11, 06:11 WIB)
+    - cron: '11 */2 * * *'
   workflow_dispatch:
     inputs:
       dry_run:

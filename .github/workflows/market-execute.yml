@@ -2,10 +2,9 @@ name: Walt Market Execute (24/7 Saham US & Komoditas)
 
 on:
   schedule:
-    # Berjalan 24/7 (Senin-Minggu tanpa hari libur)
-    # 07:43 UTC = 14:43 WIB (Sesi Siang)
-    # 14:43 UTC = 21:43 WIB (Sesi Malam)
-    - cron: '43 7,14 * * *'
+    # Berjalan setiap 2 jam di menit ke-43 UTC (24/7 Saham US & Komoditas):
+    # (WIB: 08:43, 10:43, 12:43, 14:43, 16:43, 18:43, 20:43, 22:43, 00:43, 02:43, 04:43, 06:43 WIB)
+    - cron: '43 */2 * * *'
   workflow_dispatch:
     inputs:
       dry_run:

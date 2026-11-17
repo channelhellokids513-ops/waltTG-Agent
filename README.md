@@ -93,10 +93,10 @@ Mengatasi limit bursa Walt pada aset berharga tinggi (seperti `NVDA` atau `MSTR`
 
 | Komponen / Workflow | Jadwal Cloud Scheduler (WIB) | Jadwal Cron GitHub (UTC) | Deskripsi |
 |---|---|---|---|
-| [`daily-scan.yml`](.github/workflows/daily-scan.yml) | **07:17 WIB** (Daily) | `17 0 * * *` | Scan seluruh kontrak, ranking peluang funding harian, riset Swarm AI, **eksekusi instan order bersinyal GO/HALF** ke Walt Perps, kirim push notif Telegram & simpan ke Google Sheet. |
-| [`market-execute.yml`](.github/workflows/market-execute.yml) | **14:43 & 21:43 WIB** (Setiap Hari 24/7) | `43 7,14 * * *` | Eksekusi order saham US & komoditas secara kontinu 24/7 (dengan proteksi *anti-duplicate*). |
-| [`crypto-execute.yml`](.github/workflows/crypto-execute.yml) | *Manual / Cron Independen* | `11 0,8,16 * * *` | Eksekusi posisi Crypto Bluechip (BTC, ETH, SOL) tiap 8 jam siklus funding. Dapat dimatikan/dinyalakan mandiri. |
-| [`risk-monitor.yml`](.github/workflows/risk-monitor.yml) | **Tiap 1 Jam di menit 23** | `23 * * * *` | Evaluasi 4 lapis risiko, geser SL ke breakeven, pasang trailing stop, dan emergency close jika arah funding berbalik (*flip sign*). |
+| [`daily-scan.yml`](.github/workflows/daily-scan.yml) | **07:17 & 19:17 WIB** (2x Sehari) | `17 0,12 * * *` | Master Scan seluruh kontrak, ranking peluang funding, riset Swarm AI mendalam (Qwen+Gemini P1-P7), **eksekusi instan order GO/HALF**, simpan database ke Google Sheet & notif Telegram. |
+| [`market-execute.yml`](.github/workflows/market-execute.yml) | **Tiap 2 Jam di menit 43** (24/7) | `43 */2 * * *` | Eksekusi cepat Saham US & Komoditas 24/7. Mengutamakan data riset tervalidasi dari Google Sheet (hemat API) dengan proteksi *anti-duplicate*. |
+| [`crypto-execute.yml`](.github/workflows/crypto-execute.yml) | **Tiap 2 Jam di menit 11** (24/7) | `11 */2 * * *` | Eksekusi cepat Crypto Bluechip (10 Tier-1: BTC, ETH, SOL, BNB, XRP, AVAX, SUI, LINK, NEAR, AAVE) menangkap funding carry & turn-over modal cepat. |
+| [`risk-monitor.yml`](.github/workflows/risk-monitor.yml) | **Tiap 1 Jam di menit 23** | `23 * * * *` | Evaluasi 4 lapis risiko atomik, kunci Breakeven di +0.60% (Zero-Risk), Take Profit tipis (+1.0% s.d. +1.2%), dan trailing stop rapat. |
 
 ---
 

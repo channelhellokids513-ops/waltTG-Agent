@@ -1271,7 +1271,10 @@ def market_execute(
     contracts_data = client.list_contracts()
     opps = rank_opportunities(contracts_data["contracts"], allowed_assets=target_universe)
 
-    # Research saham (hanya yang masuk shortlist 5 teratas)
+    # Research saham: Utamakan hasil penelitian dari Spreadsheet/CSV terlebih dahulu (hemat API & cepat)
+    from sheet_logger import fetch_latest_research_from_sheet
+    cached_researches = fetch_latest_research_from_sheet()
+
     qwen = QwenClient() if os.getenv("DASHSCOPE_API_KEY") else None
     gemini = (
         GeminiClient()
@@ -1280,11 +1283,17 @@ def market_execute(
     )
     researches: dict[str, Research] = {}
     for opp in opps[:5]:
-        if opp.base_asset in ALLOWED_STOCKS and (qwen or gemini):
-            try:
-                researches[opp.base_asset] = research_stock(opp.base_asset, qwen=qwen, gemini=gemini)
-            except Exception as e:
-                log.warning(f"research {opp.base_asset}: {e}")
+        if opp.base_asset in ALLOWED_STOCKS:
+            if opp.base_asset in cached_researches:
+                cached = cached_researches[opp.base_asset]
+                log.info(f"  ✓ Pakai riset spreadsheet {opp.base_asset}: skor {cached.final_score:+.2f}, sentimen {cached.news_sentiment}")
+                researches[opp.base_asset] = cached
+            elif qwen or gemini:
+                try:
+                    log.info(f"  🔍 Riset on-the-fly untuk {opp.base_asset} (belum ada di spreadsheet)...")
+                    researches[opp.base_asset] = research_stock(opp.base_asset, qwen=qwen, gemini=gemini)
+                except Exception as e:
+                    log.warning(f"research {opp.base_asset}: {e}")
 
     # Decide + execute
     executions = []

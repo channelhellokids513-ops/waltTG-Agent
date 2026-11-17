@@ -50,5 +50,64 @@ function doPost(e) {
 }
 
 function doGet(e) {
-  return ContentService.createTextOutput("Walt Perps Sheet Logger Webhook is active!");
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName("Daily_Scans");
+    if (!sheet) {
+      return ContentService.createTextOutput(JSON.stringify({
+        status: "empty",
+        message: "Sheet Daily_Scans belum dibuat",
+        data: {}
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+    
+    var data = sheet.getDataRange().getValues();
+    if (data.length <= 1) {
+      return ContentService.createTextOutput(JSON.stringify({
+        status: "empty",
+        message: "Data masih kosong",
+        data: {}
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+    
+    // Map riset terbaru per ticker (baris paling bawah adalah yang paling baru)
+    var latest = {};
+    for (var i = 1; i < data.length; i++) {
+      var row = data[i];
+      var asset = String(row[3] || "").trim().toUpperCase();
+      if (!asset) continue;
+      
+      latest[asset] = {
+        timestamp: row[0],
+        asset: asset,
+        side: String(row[4] || "").toLowerCase(),
+        funding_daily_pct: row[5],
+        price: row[6],
+        swarm_score: row[7],
+        sentiment: String(row[8] || "").toLowerCase(),
+        consensus: row[9],
+        vendor_alignment: row[10],
+        p1_polarity: row[11],
+        p4_momentum: row[12],
+        p5_catalysts: row[13],
+        p6_contrarian: row[14],
+        verdict: String(row[15] || "").toUpperCase(),
+        margin: row[16],
+        reason: row[17],
+        narrative: row[18]
+      };
+    }
+    
+    return ContentService.createTextOutput(JSON.stringify({
+      status: "success",
+      count: Object.keys(latest).length,
+      data: latest
+    })).setMimeType(ContentService.MimeType.JSON);
+    
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({
+      status: "error",
+      message: err.toString()
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
 }

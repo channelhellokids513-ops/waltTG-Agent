@@ -2,9 +2,9 @@ name: Daily Walt Perps Funding Scan & Auto-Execute
 
 on:
   schedule:
-    # 07:17 WIB = 00:17 UTC (menghindari antrean padat midnight 23:00-24:00 UTC)
-    # Jadwal didaftarkan ulang oleh akun pemilik repo (2026-11-16)
-    - cron: '17 0 * * *'
+    # Master Scan 2x sehari: 00:17 UTC (07:17 WIB) & 12:17 UTC (19:17 WIB)
+    # Menghasilkan riset Swarm AI mendalam dan memperbarui database spreadsheet
+    - cron: '17 0,12 * * *'
   workflow_dispatch:
     inputs:
       auto_execute:
