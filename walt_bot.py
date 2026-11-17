@@ -625,129 +625,20 @@ def open_position(
 # RISK MONITOR — 4 LAPIS
 # =============================================================================
 
-def apply_layer1_baseline(client: WaltClient, pos: Position) -> Optional[dict]:
-    """Lapis 1: Set Dynamic TP/SL baseline atau perketat TP jika target baru lebih dekat/realistis."""
-    target_tp, target_sl = compute_baseline_tpsl(pos.side, pos.entry_price, asset=pos.base_asset)
-
-    new_tp = None
-    if not pos.tp:
-        new_tp = target_tp
+def _sl_is_better(side: str, new_sl: float, old_sl: Optional[float]) -> bool:
+    """Cek apakah new_sl memberikan proteksi risiko yang lebih baik dibanding old_sl."""
+    if old_sl is None:
+        return True
+    if side == "long":
+        # LONG: SL lebih tinggi = proteksi modal / kunci cuan lebih besar
+        return new_sl > old_sl
     else:
-        # Perketat TP jika target baru lebih dekat ke entry (lebih cepat & realistis tersentuh)
-        if pos.side == "long" and target_tp < pos.tp:
-            new_tp = target_tp
-        elif pos.side == "short" and target_tp > pos.tp:
-            new_tp = target_tp
-
-    new_sl = None
-    if not pos.sl:
-        new_sl = target_sl
-    elif _sl_is_improvement(pos, target_sl):
-        new_sl = target_sl
-
-    if new_tp is None and new_sl is None:
-        return None
-
-    log.info(f"[L1] {pos.base_asset}: update dynamic baseline TP={new_tp} (was {pos.tp}), SL={new_sl} (was {pos.sl})")
-    preview = client.preview_auto_close(pos.contract_id, tp=new_tp, sl=new_sl)
-    if preview.get("ok"):
-        return client.execute(preview["confirmationToken"])
-    return None
+        # SHORT: SL lebih rendah = proteksi modal / kunci cuan lebih besar
+        return new_sl < old_sl
 
 
-def apply_layer2_funding(
-    client: WaltClient, pos: Position, current_funding_daily: float
-) -> Optional[dict]:
-    """Lapis 2: Dinamis berdasarkan funding sekarang."""
-    # Funding flip sign → close
-    if (pos.side == "long" and current_funding_daily > 0) or \
-       (pos.side == "short" and current_funding_daily < 0):
-        log.warning(f"[L2] {pos.base_asset}: funding flip sign → tutup posisi")
-        preview = client.preview_close(pos.contract_id)
-        if preview.get("ok"):
-            return client.execute(preview["confirmationToken"])
-        return None
-
-    # Funding hampir hilang → SL ke breakeven
-    if abs(current_funding_daily) < 0.001:  # 0.1%/hari
-        new_sl = pos.entry_price
-        if _sl_is_improvement(pos, new_sl):
-            log.info(f"[L2] {pos.base_asset}: funding <0.1% → SL ke breakeven ${new_sl}")
-            preview = client.preview_auto_close(pos.contract_id, sl=new_sl)
-            if preview.get("ok"):
-                return client.execute(preview["confirmationToken"])
-    return None
-
-
-def apply_layer3_volatility(client: WaltClient, pos: Position) -> Optional[dict]:
-    """Lapis 3: Proteksi pergerakan harga negatif."""
-    move = abs((pos.current_price - pos.entry_price) / pos.entry_price)
-    profitable = pos.profit_pct_price > 0
-
-    if move > 0.025 and not profitable:
-        # Loss >2.5%: perketat SL ke entry ± 3.5% untuk batasi drawdown
-        if pos.side == "long":
-            new_sl = pos.entry_price * 0.965
-        else:
-            new_sl = pos.entry_price * 1.035
-        if _sl_is_improvement(pos, new_sl):
-            log.info(f"[L3] {pos.base_asset}: loss >2.5% → SL diperketat ${new_sl:.4f}")
-            preview = client.preview_auto_close(pos.contract_id, sl=round(new_sl, 4))
-            if preview.get("ok"):
-                return client.execute(preview["confirmationToken"])
-    return None
-
-
-def apply_layer4_trailing(client: WaltClient, pos: Position) -> Optional[dict]:
-    """Lapis 4: Trailing stop progresif & Early Breakeven Lock (Rapat & Tipis)."""
-    profit = pos.profit_pct_price  # fraction, bisa negatif
-    if profit < TRAILING_TIERS[0][0]:
-        return None
-
-    # Cari tier tertinggi yang sudah dicapai
-    active_tier = None
-    for threshold, action in TRAILING_TIERS:
-        if profit >= threshold:
-            active_tier = (threshold, action)
-
-    if active_tier is None:
-        return None
-
-    threshold, action = active_tier
-    if action == "lock_0025":
-        # Tier 1 (+0.8% profit): Kunci Breakeven + 0.25% (Fee-cover / Zero-Risk)
-        new_sl = pos.entry_price * 1.0025 if pos.side == "long" else pos.entry_price * 0.9975
-    elif action == "lock_008":
-        # Tier 2 (+1.5% profit): Kunci Cuan Awal + 0.8%
-        new_sl = pos.entry_price * 1.008 if pos.side == "long" else pos.entry_price * 0.992
-    elif action == "lock_015":
-        # Tier 3 (+2.5% profit): Kunci Cuan Menengah + 1.5%
-        new_sl = pos.entry_price * 1.015 if pos.side == "long" else pos.entry_price * 0.985
-    elif isinstance(action, (int, float)):
-        trailing_pct = action
-        if pos.side == "long":
-            new_sl = pos.current_price * (1 - trailing_pct)
-        else:
-            new_sl = pos.current_price * (1 + trailing_pct)
-    else:
-        new_sl = pos.entry_price
-
-    new_sl = round(new_sl, 4)
-    if not _sl_is_improvement(pos, new_sl, buffer=0.001):
-        return None
-
-    log.info(
-        f"[L4] {pos.base_asset}: profit {profit*100:.2f}% ≥ {threshold*100:.1f}% "
-        f"→ SL dikunci ke ${new_sl}"
-    )
-    preview = client.preview_auto_close(pos.contract_id, sl=new_sl)
-    if preview.get("ok"):
-        return client.execute(preview["confirmationToken"])
-    return None
-
-
-def _sl_is_improvement(pos: Position, new_sl: float, buffer: float = 0.001) -> bool:
-    """SL hanya bergerak ke arah menguntungkan + melewati buffer."""
+def _sl_is_improvement(pos: Position, new_sl: float, buffer: float = 0.0005) -> bool:
+    """SL hanya bergerak ke arah menguntungkan + melewati buffer dibanding pos.sl saat ini."""
     if pos.sl is None:
         return True
     if pos.side == "long":
@@ -758,10 +649,221 @@ def _sl_is_improvement(pos: Position, new_sl: float, buffer: float = 0.001) -> b
         return new_sl < pos.sl * (1 - buffer)
 
 
+def evaluate_and_apply_position_risk(
+    client: WaltClient,
+    pos: Position,
+    current_funding_daily: float,
+) -> Optional[dict]:
+    """
+    Evaluasi 4 Lapis Risiko Terpadu & Eksekusi Atomik Tunggal:
+    1. Lapis 2 (Funding Flip Sign): Jika funding berbalik arah negatif → TUTUP POSISI SEGERA.
+    2. TP Dinamis: Ambil target TP baseline/windfall, perketat jika target baru lebih dekat ke entry.
+    3. SL Dinamis: Komparasikan kandidat SL dari:
+       - Baseline (Lapis 1)
+       - Volatilitas/Drawdown >2.5% (Lapis 3)
+       - Funding rendah <0.1%/hari (Lapis 2)
+       - Progressive Trailing Stop / Early Zero-Risk Lock (Lapis 4)
+       Pilih SL yang paling aman & menguntungkan (strictly better).
+    4. Eksekusi Atomik: Kirim SATU request auto_close_set ke exchange untuk menghindari
+       error 'auto_close_already_pending'.
+    """
+    # --- 1. Lapis 2: Funding Flip Sign → Tutup Posisi Segera ---
+    if (pos.side == "long" and current_funding_daily > 0) or \
+       (pos.side == "short" and current_funding_daily < 0):
+        log.warning(f"[L2] {pos.base_asset}: funding flip sign → tutup posisi riil")
+        preview = client.preview_close(pos.contract_id)
+        if preview.get("ok"):
+            res = client.execute(preview["confirmationToken"])
+            return {"action": "CLOSE", "detail": "Funding Flip Sign → Close Posisi", "result": res}
+        return None
+
+    # --- 2. Evaluasi Target TP (Lapis 1 Baseline & Windfall) ---
+    target_tp, target_sl = compute_baseline_tpsl(
+        pos.side, pos.entry_price, asset=pos.base_asset, funding_daily=current_funding_daily
+    )
+
+    new_tp = None
+    tp_reason = None
+    if not pos.tp:
+        new_tp = target_tp
+        tp_reason = "L1 Initial"
+    else:
+        # Perketat TP jika target baru lebih dekat ke entry (lebih cepat tercapai)
+        if pos.side == "long" and target_tp < pos.tp * 0.999:
+            new_tp = target_tp
+            tp_reason = "L1 Tighten"
+        elif pos.side == "short" and target_tp > pos.tp * 1.001:
+            new_tp = target_tp
+            tp_reason = "L1 Tighten"
+
+    # --- 3. Evaluasi Target SL (Komparasi L1, L3, L2, L4) ---
+    candidate_sl = None
+    sl_reason = None
+
+    # A. Kandidat dari Baseline (Lapis 1)
+    if not pos.sl or _sl_is_improvement(pos, target_sl):
+        candidate_sl = target_sl
+        sl_reason = "L1 Baseline"
+
+    # B. Kandidat dari Proteksi Volatilitas (Lapis 3)
+    move = abs((pos.current_price - pos.entry_price) / pos.entry_price)
+    profitable = pos.profit_pct_price > 0
+    if move > 0.025 and not profitable:
+        l3_sl = round(pos.entry_price * 0.965 if pos.side == "long" else pos.entry_price * 1.035, 4)
+        if _sl_is_better(pos.side, l3_sl, candidate_sl) and _sl_is_improvement(pos, l3_sl):
+            candidate_sl = l3_sl
+            sl_reason = "L3 Volatility Cut"
+
+    # C. Kandidat dari Funding Lemah <0.1% (Lapis 2)
+    if abs(current_funding_daily) < 0.001:
+        l2_sl = round(pos.entry_price, 4)
+        if _sl_is_better(pos.side, l2_sl, candidate_sl) and _sl_is_improvement(pos, l2_sl):
+            candidate_sl = l2_sl
+            sl_reason = "L2 Breakeven"
+
+    # D. Kandidat dari Trailing Stop & Early Breakeven Lock (Lapis 4)
+    profit = pos.profit_pct_price
+    if profit >= TRAILING_TIERS[0][0]:
+        active_tier = None
+        for threshold, action in TRAILING_TIERS:
+            if profit >= threshold:
+                active_tier = (threshold, action)
+        if active_tier:
+            threshold, action = active_tier
+            if action == "lock_0025":
+                l4_sl = pos.entry_price * 1.0025 if pos.side == "long" else pos.entry_price * 0.9975
+                tier_desc = f"L4 Zero-Risk +0.25% (Profit {profit*100:+.2f}%)"
+            elif action == "lock_008":
+                l4_sl = pos.entry_price * 1.008 if pos.side == "long" else pos.entry_price * 0.992
+                tier_desc = f"L4 Lock Cuan +0.80% (Profit {profit*100:+.2f}%)"
+            elif action == "lock_015":
+                l4_sl = pos.entry_price * 1.015 if pos.side == "long" else pos.entry_price * 0.985
+                tier_desc = f"L4 Lock Cuan +1.50% (Profit {profit*100:+.2f}%)"
+            elif isinstance(action, (int, float)):
+                trailing_pct = action
+                l4_sl = pos.current_price * (1 - trailing_pct) if pos.side == "long" else pos.current_price * (1 + trailing_pct)
+                tier_desc = f"L4 Trailing {trailing_pct*100:.1f}% (Profit {profit*100:+.2f}%)"
+            else:
+                l4_sl = pos.entry_price
+                tier_desc = "L4 Breakeven"
+
+            l4_sl = round(l4_sl, 4)
+            if _sl_is_better(pos.side, l4_sl, candidate_sl) and _sl_is_improvement(pos, l4_sl):
+                candidate_sl = l4_sl
+                sl_reason = tier_desc
+
+    # Pastikan candidate_sl adalah improvement nyata dibanding pos.sl saat ini
+    final_sl = candidate_sl if (candidate_sl is not None and _sl_is_improvement(pos, candidate_sl)) else None
+    final_tp = new_tp
+
+    if final_tp is None and final_sl is None:
+        return None
+
+    # --- 4. Eksekusi Atomik Tunggal ---
+    details = []
+    if final_tp is not None:
+        details.append(f"TP ${final_tp:.4f} ({tp_reason})")
+    if final_sl is not None:
+        details.append(f"SL ${final_sl:.4f} ({sl_reason})")
+    detail_str = " | ".join(details)
+    log.info(f"🛡️ [ATOMIC RISK] {pos.base_asset}: {detail_str}")
+
+    preview = client.preview_auto_close(pos.contract_id, tp=final_tp, sl=final_sl)
+    if preview.get("ok"):
+        res = client.execute(preview["confirmationToken"])
+        return {
+            "action": "UPDATE_AUTO_CLOSE",
+            "detail": detail_str,
+            "tp": final_tp,
+            "sl": final_sl,
+            "result": res,
+        }
+    else:
+        log.warning(f"⚠️ [ATOMIC RISK] {pos.base_asset}: preview auto close gagal: {preview}")
+        return {"action": "FAILED", "detail": f"Preview failed: {preview.get('code')}", "result": preview}
+
+
+def apply_layer1_baseline(client: WaltClient, pos: Position) -> Optional[dict]:
+    """Lapis 1: Set Dynamic TP/SL baseline (wrapper kompatibilitas)."""
+    target_tp, target_sl = compute_baseline_tpsl(pos.side, pos.entry_price, asset=pos.base_asset)
+    new_tp = target_tp if not pos.tp else None
+    new_sl = target_sl if not pos.sl or _sl_is_improvement(pos, target_sl) else None
+    if new_tp is None and new_sl is None:
+        return None
+    preview = client.preview_auto_close(pos.contract_id, tp=new_tp, sl=new_sl)
+    if preview.get("ok"):
+        return client.execute(preview["confirmationToken"])
+    return None
+
+
+def apply_layer2_funding(
+    client: WaltClient, pos: Position, current_funding_daily: float
+) -> Optional[dict]:
+    """Lapis 2: Dinamis berdasarkan funding sekarang (wrapper kompatibilitas)."""
+    if (pos.side == "long" and current_funding_daily > 0) or \
+       (pos.side == "short" and current_funding_daily < 0):
+        preview = client.preview_close(pos.contract_id)
+        if preview.get("ok"):
+            return client.execute(preview["confirmationToken"])
+        return None
+    if abs(current_funding_daily) < 0.001:
+        new_sl = pos.entry_price
+        if _sl_is_improvement(pos, new_sl):
+            preview = client.preview_auto_close(pos.contract_id, sl=new_sl)
+            if preview.get("ok"):
+                return client.execute(preview["confirmationToken"])
+    return None
+
+
+def apply_layer3_volatility(client: WaltClient, pos: Position) -> Optional[dict]:
+    """Lapis 3: Proteksi pergerakan harga negatif (wrapper kompatibilitas)."""
+    move = abs((pos.current_price - pos.entry_price) / pos.entry_price)
+    profitable = pos.profit_pct_price > 0
+    if move > 0.025 and not profitable:
+        new_sl = round(pos.entry_price * 0.965 if pos.side == "long" else pos.entry_price * 1.035, 4)
+        if _sl_is_improvement(pos, new_sl):
+            preview = client.preview_auto_close(pos.contract_id, sl=new_sl)
+            if preview.get("ok"):
+                return client.execute(preview["confirmationToken"])
+    return None
+
+
+def apply_layer4_trailing(client: WaltClient, pos: Position) -> Optional[dict]:
+    """Lapis 4: Trailing stop progresif (wrapper kompatibilitas)."""
+    profit = pos.profit_pct_price
+    if profit < TRAILING_TIERS[0][0]:
+        return None
+    active_tier = None
+    for threshold, action in TRAILING_TIERS:
+        if profit >= threshold:
+            active_tier = (threshold, action)
+    if active_tier is None:
+        return None
+    threshold, action = active_tier
+    if action == "lock_0025":
+        new_sl = pos.entry_price * 1.0025 if pos.side == "long" else pos.entry_price * 0.9975
+    elif action == "lock_008":
+        new_sl = pos.entry_price * 1.008 if pos.side == "long" else pos.entry_price * 0.992
+    elif action == "lock_015":
+        new_sl = pos.entry_price * 1.015 if pos.side == "long" else pos.entry_price * 0.985
+    elif isinstance(action, (int, float)):
+        trailing_pct = action
+        new_sl = pos.current_price * (1 - trailing_pct) if pos.side == "long" else pos.current_price * (1 + trailing_pct)
+    else:
+        new_sl = pos.entry_price
+    new_sl = round(new_sl, 4)
+    if not _sl_is_improvement(pos, new_sl, buffer=0.0005):
+        return None
+    preview = client.preview_auto_close(pos.contract_id, sl=new_sl)
+    if preview.get("ok"):
+        return client.execute(preview["confirmationToken"])
+    return None
+
+
 def risk_monitor_run(client: WaltClient) -> dict:
     """
-    Dispatcher utama risk monitor — jalan tiap 4 jam dari scheduled task.
-    Return: summary aksi yang dilakukan.
+    Dispatcher utama risk monitor — jalan tiap 1 jam dari scheduled task.
+    Evaluasi terpadu secara atomik untuk setiap posisi aktif.
     """
     positions_data = client.list_positions(statuses=["open"])
     contracts_data = client.list_contracts()
@@ -800,22 +902,17 @@ def risk_monitor_run(client: WaltClient) -> dict:
         )
         current_funding_daily = float(contract["funding_rate_hourly"]) * 24
 
-        # Apply lapis secara berurutan; stop kalau ada close (Lapis 2)
-        for fn, args in [
-            (apply_layer2_funding, (client, pos, current_funding_daily)),  # prioritas tinggi
-            (apply_layer1_baseline, (client, pos)),
-            (apply_layer4_trailing, (client, pos)),
-            (apply_layer3_volatility, (client, pos)),
-        ]:
-            try:
-                result = fn(*args)
-                if result:
-                    actions.append({"asset": pos.base_asset, "layer": fn.__name__, "result": result})
-                    # Jika Lapis 2 close, re-fetch position (akan hilang)
-                    if fn == apply_layer2_funding and "funding_rate" in str(result):
-                        break
-            except Exception as e:
-                log.error(f"{pos.base_asset} {fn.__name__} error: {e}")
+        try:
+            res = evaluate_and_apply_position_risk(client, pos, current_funding_daily)
+            if res and res.get("action") != "FAILED":
+                actions.append({
+                    "asset": pos.base_asset,
+                    "action": res.get("action"),
+                    "detail": res.get("detail"),
+                    "result": res,
+                })
+        except Exception as e:
+            log.error(f"{pos.base_asset} evaluate_and_apply_position_risk error: {e}")
 
     return {
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -1333,9 +1430,10 @@ def main(command: str = "scan"):
         result = risk_monitor_run(client)
         # Send Telegram kalau ada aksi
         if result.get("actions"):
-            msg = f"*🛡️ Walt Risk Monitor*\n{len(result['actions'])} aksi dilakukan:\n"
+            msg = f"*🛡️ Walt Risk Monitor*\n{len(result['actions'])} proteksi risiko diperbarui:\n"
             for a in result["actions"]:
-                msg += f"• {a['asset']} — {a['layer']}\n"
+                info = a.get("detail") or a.get("layer") or a.get("action")
+                msg += f"• *{a['asset']}* — {info}\n"
             send_telegram(msg)
         print(json.dumps(result, indent=2, default=str))
 
