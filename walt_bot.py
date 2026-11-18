@@ -59,6 +59,37 @@ MIN_BUFFER_PCT = 0.15       # 15% dari saldo tidak boleh dipakai (cash buffer)
 SAFE_HAVEN_ASSETS = {"BTC", "ETH", "SPY", "QQQ", "XAU", "AAPL"}
 
 
+def get_total_equity(balance_data: Any, positions: Any = None) -> float:
+    """
+    Hitung total ekuitas = balance_available + jumlah margin_quote dari posisi open.
+    Mendukung input balance_data berupa dict {'accounts': [...]}, list accounts, atau float.
+    """
+    available = 0.0
+    if isinstance(balance_data, (int, float)):
+        available = float(balance_data)
+    elif isinstance(balance_data, dict):
+        accounts = balance_data.get("accounts", [])
+        if accounts:
+            available = float(accounts[0].get("balance_available", 0.0))
+        elif "balance_available" in balance_data:
+            available = float(balance_data.get("balance_available", 0.0))
+    elif isinstance(balance_data, list) and balance_data:
+        available = float(balance_data[0].get("balance_available", 0.0))
+
+    pos_list = []
+    if isinstance(positions, dict):
+        pos_list = positions.get("positions", [])
+    elif isinstance(positions, list):
+        pos_list = positions
+
+    open_margin = sum(
+        float(p.get("margin_quote", p.get("margin", 0.0)) or 0.0)
+        for p in pos_list
+        if isinstance(p, dict) and str(p.get("status", "open")).lower() in ("open", "active")
+    )
+    return round(available + open_margin, 6)
+
+
 def get_dynamic_max_slots(available_balance: float) -> int:
     """
     Hitung batas maksimal slot posisi aktif secara elastis berdasarkan ekuitas:
@@ -84,6 +115,7 @@ def calculate_dynamic_margin(
     opp: Optional[Any] = None,
     research: Optional[Any] = None,
     verdict_mult: float = 1.0,
+    total_equity: Optional[float] = None,
 ) -> float:
     """
     Kalkulasi ukuran margin per posisi berbasis Auto-Compounding & Conviction Sizing:
@@ -108,8 +140,9 @@ def calculate_dynamic_margin(
        - Single Position Hard Ceiling: Maksimal 15% dari total ekuitas (atau floor $2.50).
        - Floor: $2.50 USDC minimum order bursa.
     """
+    equity = total_equity if (total_equity is not None and total_equity > 0) else available_balance
     if max_slots is None:
-        max_slots = get_dynamic_max_slots(available_balance)
+        max_slots = get_dynamic_max_slots(equity)
 
     remaining_slots = max(1, max_slots - active_slots)
     deployable = available_balance * (1.0 - MIN_BUFFER_PCT)
@@ -145,8 +178,8 @@ def calculate_dynamic_margin(
 
     sized_margin = base_margin * mult
 
-    # Single position risk ceiling: max 15% dari available balance (tetap izinkan floor $2.50)
-    single_position_cap = max(DEFAULT_MARGIN, round(available_balance * 0.15, 2))
+    # Single position risk ceiling: max 15% dari total ekuitas (tetap izinkan floor $2.50)
+    single_position_cap = max(DEFAULT_MARGIN, round(equity * 0.15, 2))
     final_margin = min(sized_margin, single_position_cap)
 
     return max(DEFAULT_MARGIN, round(final_margin, 2))
@@ -1143,9 +1176,8 @@ def daily_scan(client: WaltClient) -> dict:
     contracts = client.list_contracts()
 
     opps = rank_opportunities(contracts["contracts"])
-    accounts = balance.get("accounts", [])
-    available = float(accounts[0].get("balance_available", 0.0)) if accounts else 0.0
-    scan_limit = max(5, get_dynamic_max_slots(available))
+    total_equity = get_total_equity(balance, positions)
+    scan_limit = max(5, get_dynamic_max_slots(total_equity))
     top_candidates = opps[:scan_limit]
 
     # Fetch live price untuk top candidates
@@ -1170,6 +1202,7 @@ def daily_scan(client: WaltClient) -> dict:
     return {
         "ts": datetime.now(timezone.utc).isoformat(),
         "balance": balance.get("accounts", []),
+        "total_equity": total_equity,
         "positions_count": len(positions.get("positions", [])),
         "funding_earned": total_funding,
         "target": MONTHLY_TARGET,
@@ -1340,6 +1373,7 @@ def scan_with_research(
     target_deploy = available * (1.0 - MIN_BUFFER_PCT)  # 15% cash buffer dijaga
 
     if auto_execute:
+        existing = {"positions": []}
         try:
             existing = client.list_positions(statuses=["open"])
             existing_contracts = {
@@ -1351,10 +1385,11 @@ def scan_with_research(
             log.warning(f"Gagal fetch existing positions: {e}")
             existing_contracts = set()
 
+        total_equity = get_total_equity(accounts, existing)
         active_slot_count = len(existing_contracts)
-        max_slots = get_dynamic_max_slots(available)
+        max_slots = get_dynamic_max_slots(total_equity)
         log.info(
-            f"Dynamic Elastic Slot & Conviction Sizing: Available ${available:.2f} | "
+            f"Dynamic Elastic Slot & Conviction Sizing: Equity ${total_equity:.2f} (Available ${available:.2f}) | "
             f"Posisi Aktif {active_slot_count}/{max_slots} | Max Allowed Slots: {max_slots}"
         )
 
@@ -1391,6 +1426,7 @@ def scan_with_research(
                     opp=opp,
                     research=research,
                     verdict_mult=mult,
+                    total_equity=total_equity,
                 )
 
                 resolved = resolve_order_margin(client, opp, margin=margin, leverage=MAX_LEVERAGE)
@@ -1523,8 +1559,28 @@ def market_execute(
     contracts_data = client.list_contracts()
     opps = rank_opportunities(contracts_data["contracts"], allowed_assets=target_universe)
 
-    # Dynamic Slot Elasticity
-    max_slots = get_dynamic_max_slots(available)
+    # Verifikasi posisi yang benar-benar aktif (statuses=["open"]) secara defensif
+    open_contract_ids = set()
+    position_check_failed = False
+    existing = {"positions": []}
+    try:
+        existing = client.list_positions(statuses=["open"])
+        open_contract_ids = {
+            p["contract_id"]
+            for p in existing.get("positions", [])
+            if str(p.get("status", "open")).lower() in ("open", "active")
+        }
+        log.info(
+            f"Open positions verified: "
+            f"{[(p.get('contract_base_asset', p.get('contract_id')), p.get('status', 'open')) for p in existing.get('positions', [])]}"
+        )
+    except Exception as exc:
+        log.warning(f"Pemeriksaan posisi awal gagal: {exc}; lewati pembukaan demi keamanan")
+        position_check_failed = True
+
+    # Dynamic Slot Elasticity berbasis Total Ekuitas (available + margin open positions)
+    total_equity = get_total_equity(balance_data, existing)
+    max_slots = get_dynamic_max_slots(total_equity)
 
     # Research saham: Utamakan hasil penelitian dari Spreadsheet/CSV terlebih dahulu (hemat API & cepat)
     from sheet_logger import fetch_latest_research_from_sheet
@@ -1558,29 +1614,11 @@ def market_execute(
     # Decide + execute
     executions = []
     deployed = 0.0
-    target_deploy = available * (1.0 - MIN_BUFFER_PCT)  # 15% cash buffer dijaga konsisten
-
-    # Verifikasi posisi yang benar-benar aktif (statuses=["open"]) secara defensif
-    open_contract_ids = set()
-    position_check_failed = False
-    try:
-        existing = client.list_positions(statuses=["open"])
-        open_contract_ids = {
-            p["contract_id"]
-            for p in existing.get("positions", [])
-            if str(p.get("status", "open")).lower() in ("open", "active")
-        }
-        log.info(
-            f"Open positions verified: "
-            f"{[(p.get('contract_base_asset', p.get('contract_id')), p.get('status', 'open')) for p in existing.get('positions', [])]}"
-        )
-    except Exception as exc:
-        log.warning(f"Pemeriksaan posisi awal gagal: {exc}; lewati pembukaan demi keamanan")
-        position_check_failed = True
+    target_deploy = available * (1.0 - MIN_BUFFER_PCT)  # 15% cash buffer dijaga konsisten dari available
 
     active_slot_count = len(open_contract_ids)
     log.info(
-        f"Dynamic Elastic Slot & Conviction Sizing: Available ${available:.2f} | "
+        f"Dynamic Elastic Slot & Conviction Sizing: Equity ${total_equity:.2f} (Available ${available:.2f}) | "
         f"Posisi Aktif {active_slot_count}/{max_slots} | Max Allowed Slots: {max_slots}"
     )
 
@@ -1627,6 +1665,7 @@ def market_execute(
             opp=opp,
             research=research,
             verdict_mult=mult,
+            total_equity=total_equity,
         )
 
         resolved = resolve_order_margin(client, opp, margin=margin, leverage=MAX_LEVERAGE)
