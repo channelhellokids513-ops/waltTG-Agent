@@ -1414,7 +1414,7 @@ def scan_with_research(
                 if opp.contract_id in existing_contracts:
                     log.info(f"  SKIP {asset}: posisi sudah aktif")
                     executions.append({
-                        "asset": asset, "side": opp.side, "verdict": "SKIP",
+                        "asset": asset, "side": opp.side, "leverage": MAX_LEVERAGE, "verdict": "SKIP",
                         "reason": "posisi sudah aktif",
                     })
                     continue
@@ -1432,7 +1432,7 @@ def scan_with_research(
                 resolved = resolve_order_margin(client, opp, margin=margin, leverage=MAX_LEVERAGE)
                 if resolved is None:
                     executions.append({
-                        "asset": asset, "side": opp.side, "verdict": "FAILED",
+                        "asset": asset, "side": opp.side, "leverage": MAX_LEVERAGE, "verdict": "FAILED",
                         "reason": "risk / min size check gagal",
                     })
                     continue
@@ -1442,7 +1442,7 @@ def scan_with_research(
                 if deployed + margin > target_deploy or (available - deployed) < 3.0:
                     log.info(f"  SKIP {asset}: buffer saldo tercapai (${deployed:.2f}/${target_deploy:.2f})")
                     executions.append({
-                        "asset": asset, "side": opp.side, "verdict": "SKIP",
+                        "asset": asset, "side": opp.side, "leverage": MAX_LEVERAGE, "verdict": "SKIP",
                         "reason": f"buffer saldo tercapai (${deployed:.2f}/${target_deploy:.2f})",
                     })
                     break
@@ -1450,7 +1450,7 @@ def scan_with_research(
                 if dry_run:
                     log.info(f"  🧪 DRY_RUN {opp.side.upper()} {asset} margin ${margin:.2f}")
                     executions.append({
-                        "asset": asset, "side": opp.side, "margin": margin,
+                        "asset": asset, "side": opp.side, "leverage": MAX_LEVERAGE, "margin": margin,
                         "price": getattr(opp, "live_price", 0.0),
                         "verdict": "DRY_RUN", "reason": reason,
                     })
@@ -1468,7 +1468,7 @@ def scan_with_research(
                         tp = res.get("tp")
                         sl = res.get("sl")
                         executions.append({
-                            "asset": asset, "side": opp.side, "margin": actual_margin,
+                            "asset": asset, "side": opp.side, "leverage": MAX_LEVERAGE, "margin": actual_margin,
                             "price": order_price, "tp": tp, "sl": sl,
                             "verdict": "EXECUTED", "reason": reason,
                             "order_id": order_id,
@@ -1478,17 +1478,17 @@ def scan_with_research(
                         active_slot_count += 1
                     else:
                         executions.append({
-                            "asset": asset, "side": opp.side, "verdict": "FAILED",
+                            "asset": asset, "side": opp.side, "leverage": MAX_LEVERAGE, "verdict": "FAILED",
                             "reason": "risk / min size check gagal",
                         })
                 except Exception as e:
                     log.error(f"  ERROR {asset}: {e}")
                     executions.append({
-                        "asset": asset, "side": opp.side, "verdict": "ERROR", "reason": str(e),
+                        "asset": asset, "side": opp.side, "leverage": MAX_LEVERAGE, "verdict": "ERROR", "reason": str(e),
                     })
             else:
                 executions.append({
-                    "asset": asset, "side": opp.side, "verdict": "SKIP", "reason": reason,
+                    "asset": asset, "side": opp.side, "leverage": MAX_LEVERAGE, "verdict": "SKIP", "reason": reason,
                 })
 
     # Logging eksekusi ke Google Sheet & CSV jika ada yang dieksekusi
@@ -1633,7 +1633,7 @@ def market_execute(
         if verdict == "SKIP" or mult <= 0:
             log.info(f"  SKIP {opp.base_asset}: {reason}")
             executions.append({
-                "asset": opp.base_asset, "verdict": "SKIP", "reason": reason,
+                "asset": opp.base_asset, "side": opp.side, "leverage": MAX_LEVERAGE, "verdict": "SKIP", "reason": reason,
             })
             continue
 
@@ -1643,6 +1643,7 @@ def market_execute(
             executions.append({
                 "asset": opp.base_asset,
                 "side": opp.side,
+                "leverage": MAX_LEVERAGE,
                 "verdict": "SKIP",
                 "reason": "gagal memverifikasi posisi terbuka",
             })
@@ -1653,6 +1654,7 @@ def market_execute(
             executions.append({
                 "asset": opp.base_asset,
                 "side": opp.side,
+                "leverage": MAX_LEVERAGE,
                 "verdict": "SKIP",
                 "reason": "posisi sudah aktif",
             })
@@ -1672,7 +1674,7 @@ def market_execute(
         if resolved is None:
             log.warning(f"  FAILED {opp.base_asset}: min size / risk check gagal")
             executions.append({
-                "asset": opp.base_asset, "side": opp.side, "verdict": "FAILED",
+                "asset": opp.base_asset, "side": opp.side, "leverage": MAX_LEVERAGE, "verdict": "FAILED",
                 "reason": f"risk check / min size check gagal (verdict={verdict})",
             })
             continue
@@ -1686,7 +1688,8 @@ def market_execute(
         log.info(f"  {verdict} {opp.side.upper()} {opp.base_asset} margin ${margin:.2f} (mult {mult:.2f}) — {reason}")
         if dry_run:
             executions.append({
-                "asset": opp.base_asset, "side": opp.side, "margin": margin,
+                "asset": opp.base_asset, "side": opp.side, "leverage": MAX_LEVERAGE, "margin": margin,
+                "price": getattr(opp, "live_price", 0.0),
                 "verdict": "DRY_RUN", "reason": reason,
             })
             deployed += margin
@@ -1705,7 +1708,7 @@ def market_execute(
                 tp = result.get("tp")
                 sl = result.get("sl")
                 executions.append({
-                    "asset": opp.base_asset, "side": opp.side, "margin": actual_margin,
+                    "asset": opp.base_asset, "side": opp.side, "leverage": MAX_LEVERAGE, "margin": actual_margin,
                     "price": order_price, "tp": tp, "sl": sl,
                     "verdict": "EXECUTED", "reason": reason,
                     "order_id": order_id,
@@ -1714,13 +1717,13 @@ def market_execute(
             else:
                 log.warning(f"  FAILED {opp.base_asset}: preview / risk check gagal")
                 executions.append({
-                    "asset": opp.base_asset, "verdict": "FAILED",
+                    "asset": opp.base_asset, "side": opp.side, "leverage": MAX_LEVERAGE, "verdict": "FAILED",
                     "reason": f"risk check / min size check gagal (verdict={verdict})",
                 })
         except Exception as e:
             log.error(f"  ERROR {opp.base_asset}: {e}")
             executions.append({
-                "asset": opp.base_asset, "verdict": "ERROR", "reason": str(e),
+                "asset": opp.base_asset, "side": opp.side, "leverage": MAX_LEVERAGE, "verdict": "ERROR", "reason": str(e),
             })
 
     # Report

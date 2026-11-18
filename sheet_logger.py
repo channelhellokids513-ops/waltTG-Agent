@@ -174,29 +174,35 @@ def log_scan(summary: dict, researches: dict[str, Any]) -> dict:
 
 
 def log_execution(executions: list[dict], filepath: str = "logs/executions_history.csv") -> dict:
-    """Catat eksekusi order ke CSV lokal dan Google Sheet (Executions_Log)."""
+    """
+    Catat eksekusi order ke CSV lokal dan Google Sheet (Executions_Log).
+    Catatan: baris di sheet sebelum fix ini bergeser 2 kolom karena skema lama belum menyertakan kolom Order Type dan Leverage.
+    """
     _ensure_dir(filepath)
     file_exists = os.path.exists(filepath)
 
     headers = [
-        "timestamp_utc", "asset", "side", "verdict", "margin", "entry_price",
-        "tp", "sl", "order_id", "reason"
+        "Timestamp (UTC)", "Asset", "Sisi", "Order Type", "Leverage", "Margin ($)",
+        "Entry Price ($)", "TP ($)", "SL ($)", "Order ID", "Status", "Keterangan"
     ]
 
     ts = datetime.now(timezone.utc).isoformat()
     rows = []
     for ex in executions:
+        side_str = str(ex.get("side", "") or "").upper()
         rows.append([
             ts,
             ex.get("asset", ""),
-            ex.get("side", "").upper(),
-            ex.get("verdict", ""),
+            side_str,
+            "MARKET",
+            ex.get("leverage", 2),
             ex.get("margin", 0.0),
             ex.get("price", 0.0),
             ex.get("tp", ""),
             ex.get("sl", ""),
             ex.get("order_id", ""),
-            ex.get("reason", "")
+            ex.get("verdict", ""),
+            ex.get("reason", ""),
         ])
 
     with open(filepath, "a", newline="", encoding="utf-8") as f:
