@@ -154,6 +154,7 @@ def calculate_dynamic_margin(
 # Filter likuiditas
 MIN_VOL_24H = 1_000_000     # $1M
 MIN_FUNDING_DAILY = 0.005   # 0.5%/hari
+FUNDING_FLIP_CLOSE_THRESHOLD = 0.001  # 0.1%/hari hysteresis untuk tutup posisi saat funding flip
 
 # Target income
 MONTHLY_TARGET = 100.0      # USDC
@@ -807,14 +808,25 @@ def evaluate_and_apply_position_risk(
     4. Eksekusi Atomik: Kirim SATU request auto_close_set ke exchange untuk menghindari
        error 'auto_close_already_pending'.
     """
-    # --- 1. Lapis 2: Funding Flip Sign → Tutup Posisi Segera ---
-    if (pos.side == "long" and current_funding_daily > 0) or \
-       (pos.side == "short" and current_funding_daily < 0):
-        log.warning(f"[L2] {pos.base_asset}: funding flip sign → tutup posisi riil")
+    # --- 1. Lapis 2: Funding Flip Sign (dengan Hysteresis) → Tutup Posisi Segera ---
+    funding_flipped = (
+        (pos.side == "long" and current_funding_daily > 0)
+        or (pos.side == "short" and current_funding_daily < 0)
+    )
+    if funding_flipped and abs(current_funding_daily) >= FUNDING_FLIP_CLOSE_THRESHOLD:
+        log.warning(
+            f"[L2] {pos.base_asset}: funding flip sign ({current_funding_daily*100:+.3f}%/hari >= "
+            f"{FUNDING_FLIP_CLOSE_THRESHOLD*100:.2f}%) → tutup posisi riil"
+        )
         preview = client.preview_close(pos.contract_id)
-        if preview.get("ok"):
+        if preview and preview.get("ok"):
             res = client.execute(preview["confirmationToken"])
-            return {"action": "CLOSE", "detail": "Funding Flip Sign → Close Posisi", "result": res}
+            return {
+                "action": "CLOSE",
+                "detail": "Funding Flip Sign → Close Posisi",
+                "reason": "Funding Flip Sign",
+                "result": res,
+            }
         return None
 
     # --- 2. Evaluasi Target TP (Lapis 1 Baseline & Windfall) ---
@@ -845,8 +857,8 @@ def evaluate_and_apply_position_risk(
         candidate_sl = target_sl
         sl_reason = "L1 Baseline"
 
-    # B. Kandidat dari Funding Lemah <0.1% (Lapis 2)
-    if abs(current_funding_daily) < 0.001:
+    # B. Kandidat dari Funding Lemah / Flip di bawah threshold <0.1% (Lapis 2)
+    if abs(current_funding_daily) < FUNDING_FLIP_CLOSE_THRESHOLD:
         l2_sl = round(pos.entry_price, 4)
         l2_valid_side = (
             (pos.side == "long" and l2_sl < pos.current_price)
@@ -985,18 +997,21 @@ def apply_layer1_baseline(client: WaltClient, pos: Position) -> Optional[dict]:
 def apply_layer2_funding(
     client: WaltClient, pos: Position, current_funding_daily: float
 ) -> Optional[dict]:
-    """Lapis 2: Dinamis berdasarkan funding sekarang (wrapper kompatibilitas)."""
-    if (pos.side == "long" and current_funding_daily > 0) or \
-       (pos.side == "short" and current_funding_daily < 0):
+    """Lapis 2: Dinamis berdasarkan funding sekarang dengan hysteresis (wrapper kompatibilitas)."""
+    funding_flipped = (
+        (pos.side == "long" and current_funding_daily > 0)
+        or (pos.side == "short" and current_funding_daily < 0)
+    )
+    if funding_flipped and abs(current_funding_daily) >= FUNDING_FLIP_CLOSE_THRESHOLD:
         preview = client.preview_close(pos.contract_id)
-        if preview.get("ok"):
+        if preview and preview.get("ok"):
             return client.execute(preview["confirmationToken"])
         return None
-    if abs(current_funding_daily) < 0.001:
+    if abs(current_funding_daily) < FUNDING_FLIP_CLOSE_THRESHOLD:
         new_sl = pos.entry_price
         if _sl_is_improvement(pos, new_sl):
             preview = client.preview_auto_close(pos.contract_id, sl=new_sl)
-            if preview.get("ok"):
+            if preview and preview.get("ok"):
                 return client.execute(preview["confirmationToken"])
     return None
 
