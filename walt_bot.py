@@ -1144,7 +1144,11 @@ def scan_with_research(
     if auto_execute:
         try:
             existing = client.list_positions(statuses=["open"])
-            existing_contracts = {p["contract_id"] for p in existing.get("positions", [])}
+            existing_contracts = {
+                p["contract_id"]
+                for p in existing.get("positions", [])
+                if str(p.get("status", "open")).lower() in ("open", "active")
+            }
         except Exception as e:
             log.warning(f"Gagal fetch existing positions: {e}")
             existing_contracts = set()
@@ -1311,6 +1315,24 @@ def market_execute(
     deployed = 0.0
     target_deploy = available * 0.80  # sisakan 20% buffer
 
+    # Verifikasi posisi yang benar-benar aktif (statuses=["open"]) secara defensif
+    open_contract_ids = set()
+    position_check_failed = False
+    try:
+        existing = client.list_positions(statuses=["open"])
+        open_contract_ids = {
+            p["contract_id"]
+            for p in existing.get("positions", [])
+            if str(p.get("status", "open")).lower() in ("open", "active")
+        }
+        log.info(
+            f"Open positions verified: "
+            f"{[(p.get('contract_base_asset', p.get('contract_id')), p.get('status', 'open')) for p in existing.get('positions', [])]}"
+        )
+    except Exception as exc:
+        log.warning(f"Pemeriksaan posisi awal gagal: {exc}; lewati pembukaan demi keamanan")
+        position_check_failed = True
+
     for opp in opps[:5]:
         if deployed >= target_deploy:
             break
@@ -1328,17 +1350,26 @@ def market_execute(
             log.info(f"  SKIP {opp.base_asset}: budget habis")
             continue
 
-        # Cek apakah sudah ada posisi di kontrak ini
-        try:
-            existing = client.list_positions()
-            if any(p["contract_id"] == opp.contract_id for p in existing.get("positions", [])):
-                log.info(f"  SKIP {opp.base_asset}: posisi sudah ada")
-                executions.append({
-                    "asset": opp.base_asset, "verdict": "SKIP", "reason": "posisi sudah ada",
-                })
-                continue
-        except Exception:
-            pass
+        # Cek apakah sudah ada posisi aktif di kontrak ini (Fail-Safe & Anti-Duplicate)
+        if position_check_failed:
+            log.warning(f"  SKIP {opp.base_asset}: gagal memverifikasi posisi terbuka")
+            executions.append({
+                "asset": opp.base_asset,
+                "side": opp.side,
+                "verdict": "SKIP",
+                "reason": "gagal memverifikasi posisi terbuka",
+            })
+            continue
+
+        if opp.contract_id in open_contract_ids:
+            log.info(f"  SKIP {opp.base_asset}: posisi sudah ada")
+            executions.append({
+                "asset": opp.base_asset,
+                "side": opp.side,
+                "verdict": "SKIP",
+                "reason": "posisi sudah aktif",
+            })
+            continue
 
         log.info(f"  {verdict} {opp.side.upper()} {opp.base_asset} margin ${margin} — {reason}")
         if dry_run:
@@ -1347,11 +1378,13 @@ def market_execute(
                 "verdict": "DRY_RUN", "reason": reason,
             })
             deployed += margin
+            open_contract_ids.add(opp.contract_id)
             continue
 
         try:
             result = open_position(client, opp, margin=margin, leverage=MAX_LEVERAGE)
             if result:
+                open_contract_ids.add(opp.contract_id)
                 actual_margin = result.get("actual_margin", margin) if isinstance(result, dict) else margin
                 order_id = result.get("order", {}).get("order_id") if isinstance(result, dict) else None
                 order_price = result.get("price") or getattr(opp, "live_price", 0.0)
