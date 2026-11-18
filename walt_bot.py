@@ -651,13 +651,16 @@ def compute_baseline_tpsl(
     return tp, sl
 
 
-def open_position(
+def resolve_order_margin(
     client: WaltClient,
     opp: Opportunity,
     margin: float = DEFAULT_MARGIN,
     leverage: int = MAX_LEVERAGE,
-) -> Optional[dict]:
-    """Preview → execute buka posisi dengan Dynamic TP/SL dan minimum order size enforcement."""
+) -> Optional[tuple[float, float]]:
+    """
+    Ambil harga terkini & sesuaikan margin dengan batas minimum order exchange (min_size_base).
+    Mengembalikan (final_margin, price) atau None jika harga tidak valid / melampaui batas risiko.
+    """
     market_id = f"{opp.base_asset}-USD-PERP"
     rate_resp = client.latest_rate(market_id)
     price = float(rate_resp["rate"])
@@ -685,6 +688,21 @@ def open_position(
             )
             margin = min_margin_req
 
+    return margin, price
+
+
+def open_position(
+    client: WaltClient,
+    opp: Opportunity,
+    margin: float = DEFAULT_MARGIN,
+    leverage: int = MAX_LEVERAGE,
+) -> Optional[dict]:
+    """Preview → execute buka posisi dengan Dynamic TP/SL dan minimum order size enforcement."""
+    resolved = resolve_order_margin(client, opp, margin, leverage)
+    if resolved is None:
+        return None
+    margin, price = resolved
+
     tp, sl = compute_baseline_tpsl(opp.side, price, asset=opp.base_asset, funding_daily=opp.funding_daily)
 
     # Coba preview dengan TP/SL
@@ -698,29 +716,50 @@ def open_position(
             opp.contract_id, opp.side, leverage, margin, price
         )
 
-    if not preview.get("ok"):
-        risk_detail = preview.get("risk", {})
+    if not preview or not preview.get("ok"):
+        risk_detail = preview.get("risk", {}) if isinstance(preview, dict) else preview
         log.error(f"{opp.base_asset}: risk check gagal: {risk_detail}")
         return None
 
     token = preview["confirmationToken"]
-    result = client.execute(token)
+    try:
+        result = client.execute(token)
+    except Exception as e:
+        log.error(f"{opp.base_asset}: execute(token) gagal: {e}")
+        return None
+
+    if not result or (
+        isinstance(result, dict)
+        and (result.get("ok") is False or "error" in result or result.get("status") == "failed")
+    ):
+        log.error(f"{opp.base_asset}: execute(token) mengembalikan kegagalan: {result}")
+        return None
+
     order_id = result.get("order", {}).get("order_id") if isinstance(result, dict) else None
     log.info(
         f"✅ {opp.side.upper()} {opp.base_asset} opened: margin ${margin} @ ${price:.4f}, "
         f"TP ${tp}, SL ${sl}, order_id={order_id}"
     )
 
-    # Jika preview berhasil tanpa TP/SL, set terpisah
+    # Jika preview berhasil tanpa TP/SL, set terpisah dengan retry maksimal 3x
     if "autoClose" not in preview.get("action", {}).get("request", {}):
-        time.sleep(3)
-        try:
-            ac_preview = client.preview_auto_close(opp.contract_id, tp=tp, sl=sl)
-            if ac_preview.get("ok"):
-                client.execute(ac_preview["confirmationToken"])
-                log.info(f"   TP/SL set terpisah: TP=${tp}, SL=${sl}")
-        except Exception as e:
-            log.warning(f"   Gagal set TP/SL terpisah: {e}")
+        ac_ok = False
+        for attempt in range(1, 4):
+            time.sleep(3)
+            try:
+                ac_preview = client.preview_auto_close(opp.contract_id, tp=tp, sl=sl)
+                if ac_preview and ac_preview.get("ok"):
+                    ac_res = client.execute(ac_preview["confirmationToken"])
+                    if ac_res and not (isinstance(ac_res, dict) and ac_res.get("ok") is False):
+                        log.info(f"   TP/SL set terpisah (attempt {attempt}): TP=${tp}, SL=${sl}")
+                        ac_ok = True
+                        break
+                log.warning(f"   Attempt {attempt}/3 set TP/SL terpisah belum berhasil: {ac_preview}")
+            except Exception as e:
+                log.warning(f"   Gagal set TP/SL terpisah (attempt {attempt}/3): {e}")
+        if not ac_ok:
+            log.error(f"⚠️ POSISI TANPA SL: {opp.base_asset}")
+            send_telegram(f"⚠️ POSISI TANPA SL: {opp.base_asset}")
 
     if isinstance(result, dict):
         result["actual_margin"] = margin
@@ -1295,6 +1334,16 @@ def scan_with_research(
                     verdict_mult=mult,
                 )
 
+                resolved = resolve_order_margin(client, opp, margin=margin, leverage=MAX_LEVERAGE)
+                if resolved is None:
+                    executions.append({
+                        "asset": asset, "side": opp.side, "verdict": "FAILED",
+                        "reason": "risk / min size check gagal",
+                    })
+                    continue
+                margin, resolved_price = resolved
+                setattr(opp, "live_price", resolved_price)
+
                 if deployed + margin > target_deploy or (available - deployed) < 3.0:
                     log.info(f"  SKIP {asset}: buffer saldo tercapai (${deployed:.2f}/${target_deploy:.2f})")
                     executions.append({
@@ -1486,19 +1535,6 @@ def market_execute(
             })
             continue
 
-        margin = calculate_dynamic_margin(
-            available_balance=available,
-            active_slots=active_slot_count,
-            max_slots=max_slots,
-            opp=opp,
-            research=research,
-            verdict_mult=mult,
-        )
-
-        if deployed + margin > target_deploy or (available - deployed) < 3.0:
-            log.info(f"  SKIP {opp.base_asset}: buffer saldo tercapai (${deployed:.2f}/${target_deploy:.2f})")
-            continue
-
         # Cek apakah sudah ada posisi aktif di kontrak ini (Fail-Safe & Anti-Duplicate)
         if position_check_failed:
             log.warning(f"  SKIP {opp.base_asset}: gagal memverifikasi posisi terbuka")
@@ -1518,6 +1554,30 @@ def market_execute(
                 "verdict": "SKIP",
                 "reason": "posisi sudah aktif",
             })
+            continue
+
+        margin = calculate_dynamic_margin(
+            available_balance=available,
+            active_slots=active_slot_count,
+            max_slots=max_slots,
+            opp=opp,
+            research=research,
+            verdict_mult=mult,
+        )
+
+        resolved = resolve_order_margin(client, opp, margin=margin, leverage=MAX_LEVERAGE)
+        if resolved is None:
+            log.warning(f"  FAILED {opp.base_asset}: min size / risk check gagal")
+            executions.append({
+                "asset": opp.base_asset, "side": opp.side, "verdict": "FAILED",
+                "reason": f"risk check / min size check gagal (verdict={verdict})",
+            })
+            continue
+        margin, resolved_price = resolved
+        setattr(opp, "live_price", resolved_price)
+
+        if deployed + margin > target_deploy or (available - deployed) < 3.0:
+            log.info(f"  SKIP {opp.base_asset}: buffer saldo tercapai (${deployed:.2f}/${target_deploy:.2f})")
             continue
 
         log.info(f"  {verdict} {opp.side.upper()} {opp.base_asset} margin ${margin:.2f} (mult {mult:.2f}) — {reason}")
