@@ -162,17 +162,10 @@ MONTHLY_TARGET = 100.0      # USDC
 DEFAULT_SL_PCT = 0.010       # 1.0% default SL (ketat & batasi drawdown)
 DEFAULT_TP_PCT = 0.012       # 1.2% default TP (cepat hit & modal kembali cair)
 
-# Tangga Trailing Stop & Early Breakeven (Ultra-Fast Scalp & Zero-Risk Lock)
+# Tangga Trailing Stop & Early Breakeven (Selaras dengan TP 0.8% - 1.2%)
 TRAILING_TIERS = [
-    # (profit_threshold, action_or_trailing_pct)
-    # Tier 1: Profit >= +0.6% -> Lock Breakeven + 0.20% (Fee-cover / Zero-Risk)
-    (0.006, "lock_0020"),
-    # Tier 2: Profit >= +1.0% -> Lock Cuan Awal + 0.50%
-    (0.010, "lock_0050"),
-    # Tier 3: Profit >= +1.5% -> Lock Cuan Menengah + 1.00%
-    (0.015, "lock_0100"),
-    # Tier 4: Profit >= +2.0% -> Trailing Super Rapat 0.5% di bawah running price
-    (0.020, 0.005),
+    (0.004, "lock_0010"),   # profit >= +0.4% → SL di entry +0.10% (zero-risk setelah fee)
+    (0.006, "lock_0030"),   # profit >= +0.6% → SL di entry +0.30%
 ]
 
 
@@ -868,7 +861,15 @@ def evaluate_and_apply_position_risk(
                 active_tier = (threshold, action)
         if active_tier:
             threshold, action = active_tier
-            if action in ("lock_0020", "lock_0025"):
+            # Cabang aktif baru (selaras dengan TP 0.8% - 1.2%): LONG di atas entry, SHORT di bawah entry
+            if action == "lock_0010":
+                l4_sl = pos.entry_price * 1.0010 if pos.side == "long" else pos.entry_price * 0.9990
+                tier_desc = f"L4 Zero-Risk +0.10% (Profit {profit*100:+.2f}%)"
+            elif action == "lock_0030":
+                l4_sl = pos.entry_price * 1.0030 if pos.side == "long" else pos.entry_price * 0.9970
+                tier_desc = f"L4 Lock Cuan +0.30% (Profit {profit*100:+.2f}%)"
+            # Cabang lama dipertahankan untuk kompatibilitas mundur
+            elif action in ("lock_0020", "lock_0025"):
                 l4_sl = pos.entry_price * 1.0020 if pos.side == "long" else pos.entry_price * 0.9980
                 tier_desc = f"L4 Zero-Risk +0.20% (Profit {profit*100:+.2f}%)"
             elif action in ("lock_0050", "lock_008"):
@@ -970,7 +971,13 @@ def apply_layer4_trailing(client: WaltClient, pos: Position) -> Optional[dict]:
     if active_tier is None:
         return None
     threshold, action = active_tier
-    if action in ("lock_0020", "lock_0025"):
+    # Cabang aktif baru: LONG di atas entry, SHORT di bawah entry
+    if action == "lock_0010":
+        new_sl = pos.entry_price * 1.0010 if pos.side == "long" else pos.entry_price * 0.9990
+    elif action == "lock_0030":
+        new_sl = pos.entry_price * 1.0030 if pos.side == "long" else pos.entry_price * 0.9970
+    # Cabang lama dipertahankan untuk kompatibilitas mundur
+    elif action in ("lock_0020", "lock_0025"):
         new_sl = pos.entry_price * 1.0020 if pos.side == "long" else pos.entry_price * 0.9980
     elif action in ("lock_0050", "lock_008"):
         new_sl = pos.entry_price * 1.0050 if pos.side == "long" else pos.entry_price * 0.9950
