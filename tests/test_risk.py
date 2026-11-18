@@ -386,3 +386,59 @@ def test_log_execution_writes_exact_12_columns(tmp_path, monkeypatch):
     ]
     assert rows[2][1:4] == ["LIT", "LONG", "MARKET"]
     assert rows[2][10:12] == ["SKIP", "bearish news"]
+
+
+# -----------------------------------------------------------------------------
+# 9. Dynamic Adaptive Risk Monitor Cadence (5 menit vs 10 menit / 6x-12x per jam)
+# -----------------------------------------------------------------------------
+
+def test_dynamic_monitor_cadence_rules():
+    from walt_bot import decide_dynamic_monitor_cadence
+
+    # 1. 0 posisi aktif -> Smart Idle Mode
+    sub, delay, reason = decide_dynamic_monitor_cadence([])
+    assert sub is False
+    assert delay == 0
+    assert "Idle" in reason
+
+    # 2. >= 3 posisi aktif -> selalu mode 5 menit (12x/jam)
+    p1 = _make_pos(side="long", entry=100.0, current=100.05, tp=100.75, sl=99.0, asset="NVDA")
+    p2 = _make_pos(side="long", entry=100.0, current=100.05, tp=100.60, sl=99.0, asset="BTC")
+    p3 = _make_pos(side="short", entry=100.0, current=99.95, tp=99.35, sl=101.0, asset="XAU")
+    p2.contract_id = 2
+    p3.contract_id = 3
+    sub3, delay3, reason3 = decide_dynamic_monitor_cadence([p1, p2, p3], {1: "GO", 2: "GO", 3: "GO"})
+    assert sub3 is True
+    assert 240 <= delay3 <= 295
+    assert "Multi-Position" in reason3
+
+    # 3. Kategori HALF (walaupun hanya 1 posisi & harga tenang) -> selalu mode 5 menit
+    sub_half, delay_half, reason_half = decide_dynamic_monitor_cadence([p1], {1: "HALF"})
+    assert sub_half is True
+    assert 240 <= delay_half <= 295
+    assert "HALF" in reason_half
+
+    # 4. Dekat TP / Trailing (profit >= +0.15%) pada posisi GO -> mode 5 menit
+    p_near_tp = _make_pos(side="long", entry=100.0, current=100.20, tp=100.75, sl=99.0, asset="NVDA")
+    sub_tp, delay_tp, reason_tp = decide_dynamic_monitor_cadence([p_near_tp], {1: "GO"})
+    assert sub_tp is True
+    assert "Proximity TP" in reason_tp
+
+    # 5. Dekat SL (loss <= -0.50%) pada posisi GO -> mode 5 menit
+    p_near_sl = _make_pos(side="long", entry=100.0, current=99.45, tp=100.75, sl=99.0, asset="NVDA")
+    sub_sl, delay_sl, reason_sl = decide_dynamic_monitor_cadence([p_near_sl], {1: "GO"})
+    assert sub_sl is True
+    assert "Proximity SL" in reason_sl
+
+    # 6. Kategori GO tenang (< 3 posisi): bergantung pada random (35% 5m, 65% 10m)
+    rng_normal = SimpleNamespace(random=lambda: 0.80, randint=lambda a, b: 270)
+    sub_go_10, delay_go_10, reason_go_10 = decide_dynamic_monitor_cadence([p1], {1: "GO"}, rng=rng_normal)
+    assert sub_go_10 is False
+    assert delay_go_10 == 0
+    assert "10 menit" in reason_go_10
+
+    rng_spot = SimpleNamespace(random=lambda: 0.15, randint=lambda a, b: 270)
+    sub_go_5, delay_go_5, reason_go_5 = decide_dynamic_monitor_cadence([p1], {1: "GO"}, rng=rng_spot)
+    assert sub_go_5 is True
+    assert delay_go_5 == 270
+    assert "Random 5-min" in reason_go_5

@@ -16,8 +16,10 @@ Target: $100/bulan dari funding income
 from __future__ import annotations
 
 import os
+import csv
 import time
 import json
+import random
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1156,6 +1158,139 @@ def apply_layer4_trailing(client: WaltClient, pos: Position) -> Optional[dict]:
     return None
 
 
+def _infer_position_verdict(base_asset: str, exec_csv_path: str = "logs/executions_history.csv") -> str:
+    """
+    Infer kategori keputusan pembukaan posisi ('HALF' atau 'GO') dari riwayat eksekusi terakhir.
+    Digunakan oleh Dynamic Risk Monitor untuk menentukan frekuensi pengawasan (5 menit vs 10 menit).
+    """
+    if not base_asset or not os.path.exists(exec_csv_path):
+        return "GO"
+    try:
+        with open(exec_csv_path, "r", encoding="utf-8") as f:
+            rows = list(csv.reader(f))
+        for r in reversed(rows):
+            if len(r) >= 12 and str(r[1]).strip().upper() == base_asset.upper() and str(r[10]).strip().upper() == "EXECUTED":
+                reason_low = str(r[11]).lower()
+                if any(k in reason_low for k in ("half", "high risk catalyst", "split", "mixed", "neutral", "no research", "tidak ada berita")):
+                    return "HALF"
+                return "GO"
+    except Exception:
+        pass
+    return "GO"
+
+
+def _record_open_position_verdict(
+    contract_id: int,
+    base_asset: str,
+    side: str,
+    verdict: str,
+    margin: float,
+    entry_price: float,
+    snapshot_path: str = "logs/open_snapshot.json",
+):
+    """Catat kategori verdict ('GO' atau 'HALF') posisi yang baru dibuka ke open_snapshot.json."""
+    try:
+        os.makedirs(os.path.dirname(snapshot_path), exist_ok=True)
+        snap: dict[str, dict] = {}
+        if os.path.exists(snapshot_path):
+            with open(snapshot_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    snap = loaded
+        cid_str = str(contract_id)
+        entry = snap.get(cid_str, {})
+        entry.update({
+            "contract_id": contract_id,
+            "base_asset": base_asset,
+            "side": side,
+            "margin": margin,
+            "entry_price": entry_price,
+            "verdict": verdict if verdict in ("GO", "HALF") else "GO",
+        })
+        snap[cid_str] = entry
+        with open(snapshot_path, "w", encoding="utf-8") as f:
+            json.dump(snap, f, indent=2)
+    except Exception as e:
+        log.debug(f"Gagal mencatat verdict posisi ke open_snapshot.json: {e}")
+
+
+def decide_dynamic_monitor_cadence(
+    positions: list[Position],
+    verdicts_by_cid: Optional[dict[int, str]] = None,
+    rng: Optional[Any] = None,
+) -> tuple[bool, int, str]:
+    """
+    Tentukan secara dinamis apakah risk monitor perlu menjalankan sub-cycle ke-2 (~5 menit kemudian)
+    di dalam jendela 10 menit saat ini (sehingga frekuensi menjadi hingga 12x/jam dari normal 6x/jam):
+    1. 0 posisi aktif -> Smart Idle Mode (False, 0).
+    2. Proximity TP/SL -> Jika ada posisi yang sudah dekat TP/Trailing (profit >= +0.15% atau jarak TP <= 0.25%)
+       atau dekat SL (loss <= -0.50% atau jarak SL <= 0.35%) -> mode intensif 5 menit (True, 240-280s).
+    3. Multi-Position (>= 3 posisi aktif) -> mode intensif 5 menit / 12x per jam (True, 245-290s).
+    4. Kategori Keputusan 'HALF' -> perlu perhatian ekstra per 5 menit (True, 245-290s).
+    5. Kategori Keputusan 'GO' (< 3 posisi & jauh dari TP/SL) -> default per 10 menit, namun sesekali
+       secara random (probabilitas 35%) dicek 5 menit (True, 250-295s), lalu kembali ke 10 menit.
+    Return (should_run_subcycle, delay_seconds, reason).
+    """
+    if not positions:
+        return False, 0, "0 posisi aktif → Smart Idle Mode"
+
+    rand = rng if rng is not None else random
+    v_map = verdicts_by_cid or {}
+
+    # 1. Cek seberapa dekat dengan parameter TP / Trailing / Pinch Lock atau SL
+    for pos in positions:
+        profit = pos.profit_pct_price
+        tp_pct, sl_pct = get_asset_baseline_tpsl_pct(pos.base_asset)
+
+        if pos.tp and pos.current_price > 0:
+            dist_to_tp = abs(pos.tp - pos.current_price) / pos.current_price
+        else:
+            dist_to_tp = max(0.0, tp_pct - profit)
+
+        if pos.sl and pos.current_price > 0:
+            dist_to_sl = abs(pos.current_price - pos.sl) / pos.current_price
+        else:
+            dist_to_sl = max(0.0, sl_pct + profit)
+
+        if profit >= 0.0015 or dist_to_tp <= 0.0025:
+            delay = rand.randint(240, 280)
+            return (
+                True,
+                delay,
+                f"Proximity TP/Trailing ({pos.base_asset} profit {profit*100:+.2f}%, dist_tp {dist_to_tp*100:.2f}%)",
+            )
+
+        if profit <= -0.0050 or dist_to_sl <= 0.0035:
+            delay = rand.randint(240, 280)
+            return (
+                True,
+                delay,
+                f"Proximity SL ({pos.base_asset} {profit*100:+.2f}%, dist_sl {dist_to_sl*100:.2f}%)",
+            )
+
+    # 2. Cek jika ada >= 3 posisi aktif (skala hingga 12x dalam 60 menit)
+    if len(positions) >= 3:
+        delay = rand.randint(245, 290)
+        return True, delay, f"Multi-Position Active ({len(positions)} posisi >= 3 → mode 12x/jam)"
+
+    # 3. Cek kategori pengambilan keputusan: jika ada posisi HALF -> perhatikan tiap 5 menit
+    half_assets = [
+        p.base_asset
+        for p in positions
+        if str(v_map.get(p.contract_id, "GO")).upper() == "HALF"
+    ]
+    if half_assets:
+        delay = rand.randint(245, 290)
+        return True, delay, f"Kategori HALF ({', '.join(half_assets)}) → pengawasan intensif 5 menit"
+
+    # 4. Kategori GO (< 3 posisi & kondisi tenang): per 10 menit, sesekali 5 menit secara random (35%)
+    if rand.random() < 0.35:
+        delay = rand.randint(250, 295)
+        return True, delay, "Kategori GO (Random 5-min spot check)"
+
+    return False, 0, "Kategori GO stabil (interval normal 10 menit)"
+
+
 def _detect_and_log_exchange_closes(
     client: WaltClient,
     active_positions: list[dict],
@@ -1185,14 +1320,18 @@ def _detect_and_log_exchange_closes(
         if str(p.get("status", "open")).lower() not in ("open", "active"):
             continue
         cid_str = str(p["contract_id"])
+        base_asset = p.get("contract_base_asset") or p.get("base_asset", "")
+        prev_verdict = prev_snapshot.get(cid_str, {}).get("verdict")
+        verdict = prev_verdict if prev_verdict in ("GO", "HALF") else _infer_position_verdict(base_asset)
         current_snapshot[cid_str] = {
             "contract_id": p["contract_id"],
-            "base_asset": p.get("contract_base_asset") or p.get("base_asset", ""),
+            "base_asset": base_asset,
             "side": p.get("side", "long"),
             "leverage": int(p.get("leverage", MAX_LEVERAGE) or MAX_LEVERAGE),
             "margin": float(p.get("margin_quote", p.get("margin", 0.0)) or 0.0),
             "entry_price": float(p.get("avg_entry_price", p.get("entry_price", 0.0)) or 0.0),
             "funding_paid": float(p.get("funding_paid_quote", p.get("funding_paid", 0.0)) or 0.0),
+            "verdict": verdict,
         }
 
     missing_cids = set(prev_snapshot.keys()) - set(current_snapshot.keys())
@@ -1298,11 +1437,15 @@ def _save_open_snapshot(snapshot: dict[str, dict], snapshot_path: str = "logs/op
         log.warning(f"Gagal menyimpan open_snapshot.json: {e}")
 
 
-def risk_monitor_run(client: WaltClient, snapshot_path: str = "logs/open_snapshot.json") -> dict:
+def _run_single_monitor_pass(
+    client: WaltClient,
+    contracts_by_id: dict[int, dict],
+    snapshot_path: str = "logs/open_snapshot.json",
+    cycle_label: str = "",
+) -> tuple[list[Position], dict[str, dict], list[dict], int]:
     """
-    Dispatcher utama risk monitor — jalan tiap 10 menit dari scheduled task.
-    Evaluasi terpadu secara atomik untuk setiap posisi aktif.
-    Dilengkapi Opsi A (Smart Fast-Exit Idle): jika 0 posisi aktif, langsung stand by tanpa beban.
+    Jalankan 1 putaran pemeriksaan risk monitor terhadap seluruh posisi terbuka.
+    Return (remaining_open_positions, current_snapshot, actions, raw_active_count).
     """
     positions_data = client.list_positions(statuses=["open"])
     active_positions = positions_data.get("positions", [])
@@ -1313,18 +1456,16 @@ def risk_monitor_run(client: WaltClient, snapshot_path: str = "logs/open_snapsho
 
     if not active_positions:
         _save_open_snapshot(current_snapshot, snapshot_path=snapshot_path)
-        log.info("💤 [SMART IDLE] 0 posisi aktif. Semua order aman/kas cair. Masuk mode tidur (fast-exit).")
-        return {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "status": "idle",
-            "positions_checked": 0,
-            "actions": closed_actions,
-        }
+        return [], current_snapshot, closed_actions, 0
 
-    contracts_data = client.list_contracts()
-    contracts_by_id = {c["contract_id"]: c for c in contracts_data["contracts"]}
+    if not contracts_by_id:
+        contracts_data = client.list_contracts()
+        for c in contracts_data.get("contracts", []):
+            contracts_by_id[c["contract_id"]] = c
 
     actions = list(closed_actions)
+    remaining_positions: list[Position] = []
+
     for p_raw in active_positions:
         cid = p_raw["contract_id"]
         contract = contracts_by_id.get(cid)
@@ -1357,25 +1498,109 @@ def risk_monitor_run(client: WaltClient, snapshot_path: str = "logs/open_snapsho
         )
         current_funding_daily = float(contract["funding_rate_hourly"]) * 24
 
+        closed_now = False
         try:
             res = evaluate_and_apply_position_risk(client, pos, current_funding_daily)
             if res and res.get("action") != "FAILED":
                 if res.get("action") == "CLOSE":
                     current_snapshot.pop(str(cid), None)
+                    closed_now = True
+                elif res.get("action") == "UPDATE_AUTO_CLOSE":
+                    if res.get("tp") is not None:
+                        pos.tp = float(res["tp"])
+                    if res.get("sl") is not None:
+                        pos.sl = float(res["sl"])
+                detail_str = res.get("detail") or ""
+                if cycle_label:
+                    detail_str = f"[{cycle_label}] {detail_str}"
                 actions.append({
                     "asset": pos.base_asset,
                     "action": res.get("action"),
-                    "detail": res.get("detail"),
+                    "detail": detail_str,
                     "result": res,
                 })
         except Exception as e:
             log.error(f"{pos.base_asset} evaluate_and_apply_position_risk error: {e}")
 
+        if not closed_now:
+            remaining_positions.append(pos)
+
     _save_open_snapshot(current_snapshot, snapshot_path=snapshot_path)
+    return remaining_positions, current_snapshot, actions, len(active_positions)
+
+
+def risk_monitor_run(
+    client: WaltClient,
+    snapshot_path: str = "logs/open_snapshot.json",
+    enable_dynamic_subcycle: Optional[bool] = None,
+    sleep_fn: Any = time.sleep,
+    rng: Optional[Any] = None,
+) -> dict:
+    """
+    Dispatcher utama risk monitor — dipicu tiap 10 menit dari scheduled task,
+    dengan kemampuan Dynamic Adaptive Cadence (5 menit vs 10 menit / 6x hingga 12x per jam):
+    - Jika 0 posisi aktif: Smart Fast-Exit Idle (<2 detik).
+    - Jika >= 3 posisi aktif, ada posisi kategori HALF, atau posisi sudah dekat TP/SL:
+      otomatis menjalankan sub-cycle ke-2 setelah jeda random ~5 menit (240-290 detik).
+    - Jika posisi kategori GO (< 3 posisi & jauh dari TP/SL): interval normal 10 menit,
+      namun sesekali (35% random) tetap menjalankan spot-check 5 menit.
+    """
+    if enable_dynamic_subcycle is None:
+        enable_dynamic_subcycle = os.getenv("DYNAMIC_MONITOR_SUBCYCLE", "true").lower() == "true"
+
+    contracts_by_id: dict[int, dict] = {}
+    remaining_positions, current_snapshot, actions, checked_count = _run_single_monitor_pass(
+        client, contracts_by_id, snapshot_path=snapshot_path
+    )
+
+    if checked_count == 0:
+        log.info("💤 [SMART IDLE] 0 posisi aktif. Semua order aman/kas cair. Masuk mode tidur (fast-exit).")
+        return {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "status": "idle",
+            "positions_checked": 0,
+            "cycles_run": 1,
+            "cadence_mode": "idle_10m",
+            "actions": actions,
+        }
+
+    verdicts_by_cid = {
+        int(cid): str(info.get("verdict", "GO")).upper()
+        for cid, info in current_snapshot.items()
+        if str(cid).isdigit()
+    }
+    should_subcycle, delay_sec, cadence_reason = decide_dynamic_monitor_cadence(
+        remaining_positions, verdicts_by_cid=verdicts_by_cid, rng=rng
+    )
+
+    cycles_run = 1
+    cadence_mode = "normal_10m"
+
+    if should_subcycle and enable_dynamic_subcycle:
+        cadence_mode = "dynamic_5m"
+        log.info(
+            f"⚡ [DYNAMIC MONITOR] Mode 5-Menit Aktif ({cadence_reason}) → "
+            f"tunggu {delay_sec}s (~{delay_sec/60:.1f} menit) untuk evaluasi sub-cycle ke-2..."
+        )
+        sleep_fn(delay_sec)
+        _, _, actions_2, checked_2 = _run_single_monitor_pass(
+            client, contracts_by_id, snapshot_path=snapshot_path, cycle_label="5m-SubCycle"
+        )
+        actions.extend(actions_2)
+        cycles_run = 2
+        log.info(
+            f"✅ [DYNAMIC MONITOR] Sub-cycle 5 menit selesai (checked={checked_2}, new_actions={len(actions_2)})."
+        )
+    else:
+        log.info(f"⏱️ [DYNAMIC MONITOR] Interval normal 10 menit ({cadence_reason}).")
 
     return {
         "ts": datetime.now(timezone.utc).isoformat(),
-        "positions_checked": len(active_positions),
+        "positions_checked": checked_count,
+        "cycles_run": cycles_run,
+        "cadence_mode": cadence_mode,
+        "cadence_reason": cadence_reason,
+        "delay_seconds": delay_sec if should_subcycle else 0,
         "actions": actions,
     }
 
@@ -1696,6 +1921,9 @@ def scan_with_research(
                             "verdict": "EXECUTED", "reason": reason,
                             "order_id": order_id,
                         })
+                        _record_open_position_verdict(
+                            opp.contract_id, asset, opp.side, verdict, actual_margin, order_price
+                        )
                         deployed += actual_margin
                         existing_contracts.add(opp.contract_id)
                         active_slot_count += 1
@@ -1938,6 +2166,9 @@ def market_execute(
                     "verdict": "EXECUTED", "reason": reason,
                     "order_id": order_id,
                 })
+                _record_open_position_verdict(
+                    opp.contract_id, opp.base_asset, opp.side, verdict, actual_margin, order_price
+                )
                 deployed += actual_margin
             else:
                 log.warning(f"  FAILED {opp.base_asset}: preview / risk check gagal")

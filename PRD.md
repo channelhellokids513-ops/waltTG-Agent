@@ -109,8 +109,11 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
    - Menghitung *annualized funding rate* untuk SHORT (funding positif tinggi) dan LONG (funding negatif ekstrim).
    - Memanggil Swarm AI (`llm_research.py` — Qwen + Gemini 4-voter) untuk menganalisis sentimen berita & makro aset pilihan.
    - Eksekusi instan order berstatus GO / HALF dan menyimpan database ke Google Sheet & notifikasi Telegram.
-2. **Risk Monitor (`risk-monitor.yml` — Tiap 10 Menit via `walt-risk-monitor` Scheduler):**
+2. **Risk Monitor (`risk-monitor.yml` — Dinamis 5–10 Menit / 6x–12x per Jam via `walt-risk-monitor` Scheduler):**
    - **Opsi A Smart Fast-Exit Idle:** Jika 0 posisi aktif dan tidak ada perubahan snapshot penutupan, proses langsung selesai (*fast-exit*) dalam <2 detik sehingga hemat kuota runner hingga 95%.
+   - **Dynamic Adaptive Cadence (5 Menit vs 10 Menit):**
+     - **Mode Intensif ~5 Menit (hingga 12x/jam):** Otomatis aktif dengan *random jitter* (240–290 detik) apabila: (a) terdapat $\ge 3$ posisi aktif, (b) terdapat posisi dengan kategori keputusan `HALF`, atau (c) harga sudah mendekati zona TP/Trailing ($\ge +0.15\%$) maupun mendekati SL ($\le -0.50\%$).
+     - **Mode Normal 10 Menit (6x/jam + Random 5-Min Spot Check):** Untuk posisi kategori `GO` yang berjumlah $< 3$ dan masih jauh dari TP/SL, monitor berjalan tiap 10 menit namun sesekali (probabilitas 35% random) tetap melakukan pengecekan 5 menit.
    - **Deteksi Penutupan Posisi (`Closed_Positions`):** Membandingkan posisi aktif dengan `logs/open_snapshot.json` (dipersist via `actions/cache`) dan mencatat setiap penutupan posisi ke sheet `Closed_Positions` serta `logs/closed_history.csv`.
    - Jika terdapat posisi aktif, bot memantau intensif tanpa jeda dan menerapkan **Proteksi Risiko Terpadu**:
      - **Lapis 1:** Wick-Catcher Baseline TP (+0.55% ETF, +0.60% Crypto, +0.65% Komoditas, +0.75% Saham + Windfall $\ge 0.45\%$) & **Uniform SL 1.0%** di semua kelas aset, dilengkapi guard validasi sisi harga dan migrasi penutupan otomatis bagi posisi lama yang melampaui rugi 1.0%.
