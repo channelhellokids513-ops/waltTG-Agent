@@ -110,12 +110,13 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
    - Memanggil Swarm AI (`llm_research.py` — Qwen + Gemini 4-voter) untuk menganalisis sentimen berita & makro aset pilihan.
    - Eksekusi instan order berstatus GO / HALF dan menyimpan database ke Google Sheet & notifikasi Telegram.
 2. **Risk Monitor (`risk-monitor.yml` — Tiap 10 Menit via `walt-risk-monitor` Scheduler):**
-   - **Opsi A Smart Fast-Exit Idle:** Jika 0 posisi aktif, proses langsung selesai (*fast-exit*) dalam <2 detik sehingga hemat kuota runner hingga 95%.
-   - Jika terdapat posisi aktif, bot memantau intensif tanpa jeda dan menerapkan **4 Lapis Proteksi Risiko**:
-     - Lapis 1: Baseline Dynamic TP/SL per Asset Class.
-     - Lapis 2: Funding Integrity (*emergency close* jika funding flip sign, breakeven jika funding meluruh tajam <0.1%/hari).
-     - Lapis 3: Volatility tightening (SL diperketat ke 2.5% jika pergerakan merugikan > 2.0%).
-     - Lapis 4: **Tangga Trailing Stop 4-Tiers Super Rapat** (+0.60% zero-risk lock ke Entry+0.20%, +1.0% lock cuan 0.50%, +1.5% lock cuan 1.0%, +2.0% trailing 0.5%).
+   - **Opsi A Smart Fast-Exit Idle:** Jika 0 posisi aktif dan tidak ada perubahan snapshot penutupan, proses langsung selesai (*fast-exit*) dalam <2 detik sehingga hemat kuota runner hingga 95%.
+   - **Deteksi Penutupan Posisi (`Closed_Positions`):** Membandingkan posisi aktif dengan `logs/open_snapshot.json` (dipersist via `actions/cache`) dan mencatat setiap penutupan posisi ke sheet `Closed_Positions` serta `logs/closed_history.csv`.
+   - Jika terdapat posisi aktif, bot memantau intensif tanpa jeda dan menerapkan **Proteksi Risiko Terpadu**:
+     - **Lapis 1:** Baseline Dynamic TP (+1.0% / +1.2% + Windfall) & **Uniform SL 1.0%** di semua kelas aset, dilengkapi guard validasi sisi harga dan migrasi penutupan otomatis bagi posisi lama yang melampaui rugi 1.0%.
+     - **Lapis 2:** Funding Integrity dengan **Hysteresis 0.1%/hari** (*emergency close* jika funding berlawanan arah $\ge 0.1\%$/hari, atau geser SL ke breakeven jika $< 0.1\%$/hari).
+     - **Lapis 3:** *Deprecated* (digantikan oleh SL baseline 1.0%).
+     - **Lapis 4:** **Trailing Tiers Selaras TP** (Profit $\ge +0.4\% \to$ lock SL di `Entry + 0.10%`; Profit $\ge +0.6\% \to$ lock SL di `Entry + 0.30%`).
 3. **Market Execute (`market-execute.yml` — Tiap 2 Jam di menit 43 WIB / `43 */2 * * *` UTC):**
    - Berjalan 24/7 memanfaatkan likuiditas perpetual synthetic Walt.
    - **Dynamic Slot Elasticity:** Kuota slot posisi beradaptasi elastis dari 5 slot (modal mikro <$30) hingga 15 slot (modal mapan).

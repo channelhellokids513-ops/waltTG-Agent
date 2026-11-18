@@ -116,13 +116,13 @@ Walt mewajibkan pola 2-tahap dengan *time-limited confirmation token*:
 4. `perps_execute_operation` — Mengirimkan `confirmationToken` (berlaku ~90 detik) untuk konfirmasi eksekusi order di bursa.
 5. **Fallback TP/SL Otomatis:** Jika bursa menolak order awal karena batasan parameter TP/SL di luar toleransi slippage kontrak, bot mengeksekusi order terbuka tanpa `autoClose`, kemudian mengatur TP/SL secara terpisah via `perps_prepare_auto_close_set`.
 
-### 4.3 Parameter TP/SL Baseline Dinamis per Kelas Aset
-Menghindari target TP kaku yang sering berbalik sebelum tersentuh (target tipis & high turnover):
-- **ETF / Saham Kalem (SPY, US100, AAPL):** TP +2.5%, SL 3.0%
-- **Crypto Bluechip (BTC, ETH, SOL):** TP +2.5%, SL 3.5% (cepat amankan sebelum dump)
-- **Komoditas Tradisional (XAU, XAG, BRENTOIL):** TP +3.0%, SL 3.5%
-- **Saham Volatil (NVDA, TSLA, MSTR, CRCL, dll):** TP +3.5%, SL 4.0%
-- **Windfall Rule:** Jika keuntungan harga mencapai $\ge 2.5\times$ funding rate harian, TP diturunkan lebih awal agar akumulasi funding multi-hari segera terkunci tanpa risiko pembalikan harga.
+### 4.3 Parameter TP/SL Baseline Dinamis per Kelas Aset (SL Seragam 1.0%)
+Menghindari target TP kaku dan membatasi risiko kerugian maksimal 1.0% pada setiap posisi:
+- **ETF / Saham Kalem (SPY, US100, AAPL):** TP +1.0%, SL 1.0%
+- **Crypto Bluechip (BTC, ETH, SOL, dll):** TP +1.0%, SL 1.0%
+- **Komoditas Tradisional (XAU, XAG, BRENTOIL):** TP +1.2%, SL 1.0%
+- **Saham Volatil (NVDA, TSLA, MSTR, CRCL, dll):** TP +1.2%, SL 1.0%
+- **Windfall Rule:** Jika $2\times$ funding rate harian berada di rentang $0.8\% \le \text{windfall} < \text{TP baseline}$, TP dimajukan lebih awal agar akumulasi funding multi-hari segera terkunci.
 
 ---
 
@@ -213,24 +213,23 @@ Manajemen risiko berjalan otomatis tiap 4 jam melalui workflow `risk-monitor.yml
 
 ### Penjelasan Detil Tiap Lapis:
 
-1. **Lapis 1 (Dynamic Baseline TP/SL — Ultra-Fast Scalp & High Turnover):**  
-   Target TP dan SL dibuat ultra-tipis agar perputaran modal $15 sangat tinggi dan segera cair:
-   - Crypto Tier-1 (BTC, ETH, SOL, BNB, XRP, AVAX, SUI, LINK, NEAR, AAVE): TP +1.0%, SL 2.5%
-   - ETF / Indeks (SPY, US100, AAPL): TP +1.0%, SL 2.5%
-   - Komoditas (XAU, XAG, BRENTOIL): TP +1.2%, SL 3.0%
-   - Saham Volatil (NVDA, TSLA, MSTR, CRCL, SNDK, VVV): TP +1.2%, SL 3.0%
+1. **Lapis 1 (Dynamic Baseline TP & Uniform 1.0% SL):**  
+   Target TP tipis (+1.0% s/d +1.2%) dipadukan dengan Stop Loss ketat **1.0%** di seluruh kelas aset:
+   - Crypto Tier-1 (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `AVAX`, `SUI`, `LINK`, `NEAR`, `AAVE`): TP +1.0%, SL 1.0%
+   - ETF / Indeks (`SPY`, `US100`, `AAPL`): TP +1.0%, SL 1.0%
+   - Komoditas (`XAU`, `XAG`, `BRENTOIL`): TP +1.2%, SL 1.0%
+   - Saham Volatil (`NVDA`, `TSLA`, `MSTR`, `CRCL`, `SNDK`, `VVV`): TP +1.2%, SL 1.0%
    - *Windfall Rule:* Jika keuntungan harga $\ge 2\times$ funding harian (>=0.8%), TP dimajukan lebih cepat agar cuan segera terkunci.
-2. **Lapis 2 (Dinamika Funding Rate — Prioritas Utama):**  
-   - Jika arah funding berbalik (*funding flip sign*), misal posisi SHORT namun funding rate berubah menjadi negatif (artinya posisi kita yang harus membayar pasar), **posisi seketika ditutup pasar**. Thesis awal dinyatakan batal.  
-   - Jika funding rate meluruh tajam hingga `< 0.1%/hari`, stop loss otomatis dipindahkan ke harga entry (*breakeven*).
-3. **Lapis 3 (Volatilitas & Momentum Harga):**  
-   - Jika posisi merugi > 2.0% dari entry price, SL diperketat menjadi 2.5% untuk memangkas potensi drawdown lebih lanjut.
-4. **Lapis 4 (Trailing Stop & Early Breakeven Lock — Ultra-Fast Scalp):**  
-   Mencegah posisi yang sempat hijau berbalik menjadi rugi:
-   - **Tier 1 (Profit $\ge +0.6\%$):** Geser SL otomatis ke **Entry + 0.20%** (Zero-Risk: kunci modal dan cover fee 0.18% sejak dini!).
-   - **Tier 2 (Profit $\ge +1.0\%$):** Geser SL ke **Entry + 0.50%** (Kunci Cuan Awal 0.5%).
-   - **Tier 3 (Profit $\ge +1.5\%$):** Geser SL ke **Entry + 1.00%** (Kunci Cuan Menengah 1.0%).
-   - **Tier 4 (Profit $\ge +2.0\%$):** Pasang trailing stop super rapat **0.5%** di bawah harga running.
+   - *Guard Sisi Salah & Migrasi:* Memvalidasi level SL/TP terhadap `current_price` sebelum mengirim `auto_close`. Posisi lama yang sudah melewati batas rugi 1.0% langsung ditutup (`SL 1% breached (migrasi)`).
+2. **Lapis 2 (Dinamika Funding Rate dengan Hysteresis 0.1%/hari):**  
+   - **Hysteresis (`FUNDING_FLIP_CLOSE_THRESHOLD = 0.001`):** Jika arah funding berbalik (*funding flip sign*) DAN `abs(funding_daily) >= 0.1%/hari`, **posisi seketika ditutup pasar**.
+   - Jika funding berbalik arah tetapi masih `< 0.1%/hari`, atau meluruh di bawah `< 0.1%/hari`, stop loss digeser ke harga entry (*breakeven*).
+3. **Lapis 3 (Volatilitas & Momentum Harga — Deprecated):**  
+   - *Deprecated*: Digantikan sepenuhnya oleh SL baseline 1.0% yang lebih ketat (tidak ada kode yang melonggarkan SL di atas 1.0%).
+4. **Lapis 4 (Trailing Stop Selaras dengan TP 0.8%–1.2%):**  
+   Karena TP minimum adalah 0.8% (windfall), tangga trailing stop diselaraskan di bawah 0.8%:
+   - **Tier 1 (Profit $\ge +0.4\%$):** Geser SL otomatis ke **Entry + 0.10%** (`lock_0010` — Zero-Risk setelah fee).
+   - **Tier 2 (Profit $\ge +0.6\%$):** Geser SL ke **Entry + 0.30%** (`lock_0030` — Kunci Cuan Bersih).
 
 ---
 
@@ -299,8 +298,12 @@ Sistem beroperasi dengan arsitektur hibrida: cron internal GitHub Actions diduku
 - **GitHub Step Summary:** Setiap eksekusi mencatat audit log terformat rapi pada antarmuka *Actions Step Summary* di repository GitHub.
 
 ### 7.4 Sinkronisasi Real-Time Google Sheets (`sheet_logger.py`)
-- Setiap hasil scan dan eksekusi order secara otomatis dikirimkan ke spreadsheet Google Sheets pribadi Owner melalui Google Apps Script Webhook (`google_apps_script.js`).
-- Spreadsheet mencatat riwayat funding accrual, PnL transaksi, status order ID, dan saldo harian secara permanen untuk audit keuangan bulanan tanpa biaya database tambahan.
+- Setiap hasil scan, eksekusi order, penutupan posisi, dan ringkasan PnL harian secara otomatis dikirimkan ke Google Sheets melalui Google Apps Script Webhook (`google_apps_script.js`):
+  - **`Daily_Scans`:** Hasil pemindaian kontrak dan skor konsensus Swarm AI P1–P7.
+  - **`Executions_Log`:** Log 12 kolom terstandarisasi untuk setiap order (`EXECUTED`, `SKIP`, `FAILED`, `ERROR`).
+  - **`Closed_Positions`:** Riwayat penutupan posisi (baik yang ditutup oleh monitor karena funding flip/breach maupun auto-close TP/SL exchange yang terdeteksi lewat diff snapshot `logs/open_snapshot.json`).
+  - **`PnL_Tracker`:** Rekapitulasi harian idempotent (1 baris per tanggal UTC) berisi total ekuitas, funding bulan berjalan, dan progres terhadap target $100/bulan.
+- Evaluasi statistik performa keseluruhan trade dapat dijalankan kapan saja melalui perintah CLI `python walt_bot.py stats`.
 
 ---
 

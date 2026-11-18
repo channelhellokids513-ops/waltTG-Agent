@@ -60,19 +60,21 @@ Analisis sentimen berita, katalis earnings, dan momentum makro dilakukan oleh 4 
   - `HALF` (Half size $1.25 – $1.50 margin jika katalis risiko P5 $\ge 0.70$)
   - `SKIP` (Batalkan jika melawan sentimen / earnings $\le 7$ hari)
 
-### 2. Dynamic Take Profit (TP) per Asset Class (Ultra-Fast Scalp & High Turnover)
-Mengunci keuntungan kecil secara berulang untuk mempercepat perputaran modal $15 agar segera cair kembali:
-- **Crypto Tier-1 (BTC, ETH, SOL, BNB, XRP, AVAX, SUI, LINK, NEAR, AAVE):** TP +1.0%, SL 2.5% (cepat cair sebelum dump)
-- **ETF / Saham Kalem (SPY, US100, AAPL):** TP +1.0%, SL 2.5%
-- **Komoditas (XAU, XAG, BRENTOIL):** TP +1.2%, SL 3.0%
-- **Saham Volatil (NVDA, TSLA, MSTR, CRCL, SNDK, VVV, dll):** TP +1.2%, SL 3.0%
+### 2. Dynamic Take Profit (TP) & Uniform 1.0% Stop Loss (SL)
+Mengunci keuntungan kecil secara berulang dengan batasan risiko ketat 1.0% di semua kelas aset:
+- **Crypto Tier-1 (BTC, ETH, SOL, BNB, XRP, AVAX, SUI, LINK, NEAR, AAVE):** TP +1.0%, SL 1.0%
+- **ETF / Saham Kalem (SPY, US100, AAPL):** TP +1.0%, SL 1.0%
+- **Komoditas (XAU, XAG, BRENTOIL):** TP +1.2%, SL 1.0%
+- **Saham Volatil (NVDA, TSLA, MSTR, CRCL, SNDK, VVV, dll):** TP +1.2%, SL 1.0%
 - **Windfall Rule:** Jika keuntungan harga $\ge 2\times$ funding harian (>=0.8%), TP dimajukan lebih awal untuk mengunci profit multi-hari dalam hitungan jam.
 
-### 3. Tangga Trailing Stop & Early Breakeven (Ultra-Fast Scalp — 4 Tiers)
-- **Tier 1 (Profit $\ge +0.6\%$):** Lock SL otomatis ke `Entry + 0.20%` (**Zero-Risk:** modal dan fee taker 0.18% terkunci aman sejak dini!).
-- **Tier 2 (Profit $\ge +1.0\%$):** Lock SL ke `Entry + 0.50%` (Kunci cuan awal).
-- **Tier 3 (Profit $\ge +1.5\%$):** Lock SL ke `Entry + 1.00%` (Kunci cuan menengah).
-- **Tier 4 (Profit $\ge +2.0\%$):** Trailing stop super rapat **0.5%** di bawah running price.
+### 3. Tangga Trailing Stop, Funding Hysteresis & Guard Sisi Salah
+- **Tier 1 (Profit $\ge +0.4\%$):** Lock SL otomatis ke `Entry + 0.10%` (**Zero-Risk:** modal dan fee terkunci aman sebelum menyentuh TP 0.8%–1.2%).
+- **Tier 2 (Profit $\ge +0.6\%$):** Lock SL ke `Entry + 0.30%` (Kunci cuan bersih).
+- **Lapis 3 (Volatility Cut):** *Deprecated* (digantikan sepenuhnya oleh SL baseline ketat 1.0%).
+- **Funding Flip Hysteresis (`0.1%/hari`):** Posisi hanya ditutup karena funding berbalik arah jika `abs(funding_daily) >= 0.1%/hari`. Jika berbalik arah tetapi `< 0.1%/hari`, SL digeser ke *breakeven* (`Entry`).
+- **Guard Sisi Salah & Migrasi Posisi Lama:** Memvalidasi SL/TP terhadap harga berjalan sebelum mengirim `auto_close` dan otomatis menutup posisi lama yang sudah melewati batas SL 1.0%.
+- **Audit Penutupan & Statistik (`Closed_Positions` & `PnL_Tracker`):** Seluruh penutupan posisi (baik oleh monitor maupun TP/SL bursa) tercatat ke sheet `Closed_Positions` (`logs/closed_history.csv`), progres harian ke `PnL_Tracker`, dan dapat dianalisis via `python walt_bot.py stats`.
 
 ### 4. Contract Minimum Order Size Enforcement (`min_size_base`)
 Mengatasi limit bursa Walt pada aset berharga tinggi (seperti `NVDA` atau `MSTR`):
