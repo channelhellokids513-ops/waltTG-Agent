@@ -1368,10 +1368,17 @@ def daily_scan(client: WaltClient) -> dict:
                 (opp.min_size_base * opp_price / MAX_LEVERAGE) * (1.0 + opp.price_slippage), 2
             )
 
-    # Income tracker
-    total_funding = sum(
-        float(p.get("funding_paid_quote", 0)) for p in positions.get("positions", [])
+    # Income tracker (akumulasi bulan berjalan: posisi closed bulan ini + posisi open saat ini)
+    open_funding = sum(
+        float(p.get("funding_paid_quote", 0) or 0.0) for p in positions.get("positions", [])
     )
+    closed_funding = 0.0
+    try:
+        from sheet_logger import get_closed_funding_current_month
+        closed_funding = get_closed_funding_current_month()
+    except Exception as e:
+        log.warning(f"Gagal mengambil closed funding bulan berjalan: {e}")
+    total_funding = round(open_funding + closed_funding, 6)
     progress_pct = (total_funding / MONTHLY_TARGET) * 100
 
     return {
@@ -1681,13 +1688,15 @@ def scan_with_research(
     sent = send_telegram(msg)
     log.info(f"Telegram sent: {sent}")
 
-    # Logging scan ke Google Sheet / CSV
+    # Logging scan & PnL_Tracker harian ke Google Sheet / CSV
     try:
-        from sheet_logger import log_scan
+        from sheet_logger import log_scan, log_pnl_tracker
         log_res = log_scan(summary, researches)
         log.info(f"📊 Logging scan result: {log_res}")
+        pnl_res = log_pnl_tracker(summary)
+        log.info(f"📈 Logging PnL_Tracker result: {pnl_res}")
     except Exception as e:
-        log.warning(f"Logging scan to sheet failed: {e}")
+        log.warning(f"Logging scan/PnL to sheet failed: {e}")
 
     return {
         "summary": summary,

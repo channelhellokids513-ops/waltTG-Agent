@@ -327,6 +327,124 @@ def log_close(
     return {"csv_logged": True, "webhook_logged": webhook_ok, "row": row}
 
 
+PNL_TRACKER_HEADERS = [
+    "Tanggal", "Total Ekuitas ($)", "Funding Earned Bulan Ini ($)",
+    "Progress (%)", "Target ($)", "Status"
+]
+
+
+def get_closed_funding_current_month(
+    month_prefix: Optional[str] = None,
+    closed_csv_path: str = "logs/closed_history.csv",
+) -> float:
+    """
+    Hitung total funding_quote dari posisi yang sudah ditutup pada bulan UTC berjalan
+    (dari sheet Closed_Positions via CSV export atau fallback ke logs/closed_history.csv).
+    """
+    if not month_prefix:
+        month_prefix = datetime.now(timezone.utc).strftime("%Y-%m")
+
+    rows = fetch_sheet_csv_rows(
+        "Closed_Positions",
+        expected_col_name="Exit Price ($)",
+        local_csv_fallback=closed_csv_path,
+    )
+    if not rows:
+        return 0.0
+
+    # Cari indeks kolom Timestamp dan Funding
+    header = [c.strip().lower() for c in rows[0]]
+    ts_idx = 0
+    funding_idx = 8
+    for i, col in enumerate(header):
+        if "timestamp" in col:
+            ts_idx = i
+        elif "funding" in col:
+            funding_idx = i
+
+    data_rows = rows[1:] if any("timestamp" in c for c in header) else rows
+    total = 0.0
+    for r in data_rows:
+        if len(r) <= max(ts_idx, funding_idx):
+            continue
+        ts_val = str(r[ts_idx]).strip()
+        if ts_val.startswith(month_prefix):
+            try:
+                raw_f = str(r[funding_idx]).replace("$", "").replace("+", "").strip()
+                total += float(raw_f) if raw_f else 0.0
+            except Exception:
+                pass
+    return round(total, 6)
+
+
+def log_pnl_tracker(summary: dict, filepath: str = "logs/pnl_tracker.csv") -> dict:
+    """
+    Catat 1 baris harian (idempotent per tanggal UTC) ke sheet 'PnL_Tracker' dan logs/pnl_tracker.csv.
+    Kolom: tanggal, total ekuitas, funding earned bulan berjalan, progress %, target, status.
+    """
+    ts = str(summary.get("ts") or datetime.now(timezone.utc).isoformat())
+    date_utc = ts[:10]
+
+    existing_rows = fetch_sheet_csv_rows(
+        "PnL_Tracker",
+        local_csv_fallback=filepath,
+    )
+    if existing_rows:
+        last_row = existing_rows[-1]
+        if last_row and str(last_row[0]).strip().startswith(date_utc):
+            log.info(f"PnL_Tracker untuk tanggal {date_utc} sudah tercatat (idempotent skip).")
+            return {"logged": False, "reason": "already_logged_today", "date": date_utc}
+
+    total_equity = float(summary.get("total_equity", 0.0) or 0.0)
+    if total_equity <= 0:
+        accounts = summary.get("balance", [])
+        if accounts:
+            total_equity = float(accounts[0].get("balance_available", 0.0) or 0.0)
+
+    funding_earned = round(float(summary.get("funding_earned", 0.0) or 0.0), 4)
+    target = round(float(summary.get("target", 100.0) or 100.0), 2)
+    progress_pct = round(float(summary.get("progress_pct", (funding_earned / target * 100) if target else 0.0)), 2)
+    status = "ON TRACK" if progress_pct >= 50 else ("BEHIND" if progress_pct >= 20 else "JAUH")
+
+    row = [
+        date_utc,
+        round(total_equity, 2),
+        funding_earned,
+        progress_pct,
+        target,
+        status,
+    ]
+
+    _ensure_dir(filepath)
+    file_exists = os.path.exists(filepath) and os.path.getsize(filepath) > 0
+    with open(filepath, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(PNL_TRACKER_HEADERS)
+        writer.writerow(row)
+
+    webhook_ok = False
+    webhook_url = _normalize_webhook_url(os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", DEFAULT_WEBHOOK_URL))
+    if webhook_url:
+        has_header = bool(
+            existing_rows
+            and any("ekuitas" in str(c).lower() or "tanggal" in str(c).lower() for c in existing_rows[0])
+        )
+        rows_to_send = [row] if (existing_rows and has_header) else ([row] if existing_rows else [PNL_TRACKER_HEADERS, row])
+        try:
+            r = httpx.post(
+                webhook_url,
+                json={"action": "log_pnl", "sheet": "PnL_Tracker", "rows": rows_to_send},
+                follow_redirects=True,
+                timeout=20.0,
+            )
+            webhook_ok = r.status_code in (200, 302)
+        except Exception as e:
+            log.warning(f"Gagal kirim PnL_Tracker ke Google Sheets Webhook: {e}")
+
+    return {"logged": True, "webhook_logged": webhook_ok, "date": date_utc, "row": row}
+
+
 def fetch_latest_research_from_sheet(
     webhook_url: Optional[str] = None,
     csv_path: str = "logs/scan_history.csv"
