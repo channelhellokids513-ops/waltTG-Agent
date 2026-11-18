@@ -116,13 +116,13 @@ Walt mewajibkan pola 2-tahap dengan *time-limited confirmation token*:
 4. `perps_execute_operation` — Mengirimkan `confirmationToken` (berlaku ~90 detik) untuk konfirmasi eksekusi order di bursa.
 5. **Fallback TP/SL Otomatis:** Jika bursa menolak order awal karena batasan parameter TP/SL di luar toleransi slippage kontrak, bot mengeksekusi order terbuka tanpa `autoClose`, kemudian mengatur TP/SL secara terpisah via `perps_prepare_auto_close_set`.
 
-### 4.3 Parameter TP/SL Baseline Dinamis per Kelas Aset (SL Seragam 1.0%)
-Menghindari target TP kaku dan membatasi risiko kerugian maksimal 1.0% pada setiap posisi:
-- **ETF / Saham Kalem (SPY, US100, AAPL):** TP +1.0%, SL 1.0%
-- **Crypto Bluechip (BTC, ETH, SOL, dll):** TP +1.0%, SL 1.0%
-- **Komoditas Tradisional (XAU, XAG, BRENTOIL):** TP +1.2%, SL 1.0%
-- **Saham Volatil (NVDA, TSLA, MSTR, CRCL, dll):** TP +1.2%, SL 1.0%
-- **Windfall Rule:** Jika $2\times$ funding rate harian berada di rentang $0.8\% \le \text{windfall} < \text{TP baseline}$, TP dimajukan lebih awal agar akumulasi funding multi-hari segera terkunci.
+### 4.3 Parameter TP/SL Baseline Dinamis per Kelas Aset (Opsi 3 Hybrid Ultimate & SL 1.0%)
+Memasang *Wick-Catcher TP* langsung di server bursa pada zona ayunan intraday yang realistis dan membatasi risiko kerugian maksimal 1.0% pada setiap posisi:
+- **ETF / Saham Kalem (SPY, US100, AAPL):** TP +0.55%, SL 1.0%
+- **Crypto Bluechip (BTC, ETH, SOL, dll):** TP +0.60%, SL 1.0%
+- **Komoditas Tradisional (XAU, XAG, BRENTOIL):** TP +0.65%, SL 1.0%
+- **Saham Volatil (NVDA, TSLA, MSTR, CRCL, dll):** TP +0.75%, SL 1.0%
+- **Windfall Rule Responsif:** Jika $1.5\times$ funding rate harian berada di rentang $0.45\% \le \text{windfall} < \text{TP baseline}$, TP dimajukan lebih awal agar segera terkunci di server bursa.
 
 ---
 
@@ -213,23 +213,24 @@ Manajemen risiko berjalan otomatis tiap 4 jam melalui workflow `risk-monitor.yml
 
 ### Penjelasan Detil Tiap Lapis:
 
-1. **Lapis 1 (Dynamic Baseline TP & Uniform 1.0% SL):**  
-   Target TP tipis (+1.0% s/d +1.2%) dipadukan dengan Stop Loss ketat **1.0%** di seluruh kelas aset:
-   - Crypto Tier-1 (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `AVAX`, `SUI`, `LINK`, `NEAR`, `AAVE`): TP +1.0%, SL 1.0%
-   - ETF / Indeks (`SPY`, `US100`, `AAPL`): TP +1.0%, SL 1.0%
-   - Komoditas (`XAU`, `XAG`, `BRENTOIL`): TP +1.2%, SL 1.0%
-   - Saham Volatil (`NVDA`, `TSLA`, `MSTR`, `CRCL`, `SNDK`, `VVV`): TP +1.2%, SL 1.0%
-   - *Windfall Rule:* Jika keuntungan harga $\ge 2\times$ funding harian (>=0.8%), TP dimajukan lebih cepat agar cuan segera terkunci.
+1. **Lapis 1 (Wick-Catcher Baseline TP & Uniform 1.0% SL):**  
+   Target TP realistis (+0.55% s/d +0.75%) dipadukan dengan Stop Loss ketat **1.0%** di seluruh kelas aset:
+   - ETF / Indeks (`SPY`, `US100`, `AAPL`): TP +0.55%, SL 1.0%
+   - Crypto Tier-1 (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `AVAX`, `SUI`, `LINK`, `NEAR`, `AAVE`): TP +0.60%, SL 1.0%
+   - Komoditas (`XAU`, `XAG`, `BRENTOIL`): TP +0.65%, SL 1.0%
+   - Saham Volatil (`NVDA`, `TSLA`, `MSTR`, `CRCL`, `SNDK`, `VVV`): TP +0.75%, SL 1.0%
+   - *Windfall Rule:* Jika $1.5\times$ funding harian berada di $0.45\% \le \text{windfall} < \text{TP baseline}$, TP dimajukan lebih cepat agar cuan segera terkunci.
    - *Guard Sisi Salah & Migrasi:* Memvalidasi level SL/TP terhadap `current_price` sebelum mengirim `auto_close`. Posisi lama yang sudah melewati batas rugi 1.0% langsung ditutup (`SL 1% breached (migrasi)`).
 2. **Lapis 2 (Dinamika Funding Rate dengan Hysteresis 0.1%/hari):**  
    - **Hysteresis (`FUNDING_FLIP_CLOSE_THRESHOLD = 0.001`):** Jika arah funding berbalik (*funding flip sign*) DAN `abs(funding_daily) >= 0.1%/hari`, **posisi seketika ditutup pasar**.
    - Jika funding berbalik arah tetapi masih `< 0.1%/hari`, atau meluruh di bawah `< 0.1%/hari`, stop loss digeser ke harga entry (*breakeven*).
 3. **Lapis 3 (Volatilitas & Momentum Harga — Deprecated):**  
    - *Deprecated*: Digantikan sepenuhnya oleh SL baseline 1.0% yang lebih ketat (tidak ada kode yang melonggarkan SL di atas 1.0%).
-4. **Lapis 4 (Trailing Stop Selaras dengan TP 0.8%–1.2%):**  
-   Karena TP minimum adalah 0.8% (windfall), tangga trailing stop diselaraskan di bawah 0.8%:
-   - **Tier 1 (Profit $\ge +0.4\%$):** Geser SL otomatis ke **Entry + 0.10%** (`lock_0010` — Zero-Risk setelah fee).
-   - **Tier 2 (Profit $\ge +0.6\%$):** Geser SL ke **Entry + 0.30%** (`lock_0030` — Kunci Cuan Bersih).
+4. **Lapis 4 (Trailing Stop, Pinch Lock, & Instant Market-TP — Opsi 3 Hybrid Ultimate):**  
+   Menjemput profit secara aktif agar posisi yang sudah naik tidak memantul balik:
+   - **Tier 1 (Profit $\ge +0.25\%$):** Geser SL otomatis ke **Entry + 0.10%** (`lock_0010` — Zero-Risk Lock dini setelah fee).
+   - **Tier 2 Pinch Lock (Profit $\ge +0.35\%$):** Geser SL ke **Entry + 0.22%** (`lock_0022`) **DAN** merapatkan TP bursa ke **Entry + 0.50%** (menjepit harga dari atas dan bawah).
+   - **Tier 3 Instant Market-TP (Profit $\ge +0.50\%$):** Langsung eksekusi *Market Close* saat monitor berjalan untuk membungkus cuan ke saldo kas.
 
 ---
 

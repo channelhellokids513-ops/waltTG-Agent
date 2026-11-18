@@ -60,17 +60,18 @@ Analisis sentimen berita, katalis earnings, dan momentum makro dilakukan oleh 4 
   - `HALF` (Half size $1.25 – $1.50 margin jika katalis risiko P5 $\ge 0.70$)
   - `SKIP` (Batalkan jika melawan sentimen / earnings $\le 7$ hari)
 
-### 2. Dynamic Take Profit (TP) & Uniform 1.0% Stop Loss (SL)
-Mengunci keuntungan kecil secara berulang dengan batasan risiko ketat 1.0% di semua kelas aset:
-- **Crypto Tier-1 (BTC, ETH, SOL, BNB, XRP, AVAX, SUI, LINK, NEAR, AAVE):** TP +1.0%, SL 1.0%
-- **ETF / Saham Kalem (SPY, US100, AAPL):** TP +1.0%, SL 1.0%
-- **Komoditas (XAU, XAG, BRENTOIL):** TP +1.2%, SL 1.0%
-- **Saham Volatil (NVDA, TSLA, MSTR, CRCL, SNDK, VVV, dll):** TP +1.2%, SL 1.0%
-- **Windfall Rule:** Jika keuntungan harga $\ge 2\times$ funding harian (>=0.8%), TP dimajukan lebih awal untuk mengunci profit multi-hari dalam hitungan jam.
+### 2. Wick-Catcher Take Profit (TP) & Uniform 1.0% Stop Loss (SL) — Opsi 3 Hybrid Ultimate
+Menangkap lonjakan *wick* harga intraday langsung di server bursa dengan batasan risiko ketat 1.0% di semua kelas aset:
+- **ETF / Saham Kalem (SPY, US100, AAPL):** TP +0.55%, SL 1.0%
+- **Crypto Tier-1 (BTC, ETH, SOL, BNB, XRP, AVAX, SUI, LINK, NEAR, AAVE):** TP +0.60%, SL 1.0%
+- **Komoditas (XAU, XAG, BRENTOIL):** TP +0.65%, SL 1.0%
+- **Saham Volatil (NVDA, TSLA, MSTR, CRCL, SNDK, VVV, dll):** TP +0.75%, SL 1.0%
+- **Windfall Rule Responsif:** Jika $1.5\times$ funding harian berada di rentang $0.45\% \le \text{windfall} < \text{TP baseline}$, TP dimajukan lebih awal agar cepat tersentuh di server bursa.
 
-### 3. Tangga Trailing Stop, Funding Hysteresis & Guard Sisi Salah
-- **Tier 1 (Profit $\ge +0.4\%$):** Lock SL otomatis ke `Entry + 0.10%` (**Zero-Risk:** modal dan fee terkunci aman sebelum menyentuh TP 0.8%–1.2%).
-- **Tier 2 (Profit $\ge +0.6\%$):** Lock SL ke `Entry + 0.30%` (Kunci cuan bersih).
+### 3. Tangga Trailing Stop, Pinch Lock, & Instant Market-TP
+- **Tier 1 (Profit $\ge +0.25\%$):** Lock SL otomatis ke `Entry + 0.10%` (**Zero-Risk Lock Dini:** modal dan fee terkunci aman begitu posisi hijau +0.25%).
+- **Tier 2 Pinch Lock (Profit $\ge +0.35\%$):** Lock SL ke `Entry + 0.22%` **DAN** merapatkan TP bursa ke `Entry + 0.50%` (menjepit harga dari atas dan bawah).
+- **Tier 3 Instant Market-TP (Profit $\ge +0.50\%$):** Jika saat monitor berjalan posisi sudah profit $\ge +0.50\%$, bot langsung mengeksekusi *Market Close* untuk mengamankan cuan tanpa menunggu 10 menit berikutnya.
 - **Lapis 3 (Volatility Cut):** *Deprecated* (digantikan sepenuhnya oleh SL baseline ketat 1.0%).
 - **Funding Flip Hysteresis (`0.1%/hari`):** Posisi hanya ditutup karena funding berbalik arah jika `abs(funding_daily) >= 0.1%/hari`. Jika berbalik arah tetapi `< 0.1%/hari`, SL digeser ke *breakeven* (`Entry`).
 - **Guard Sisi Salah & Migrasi Posisi Lama:** Memvalidasi SL/TP terhadap harga berjalan sebelum mengirim `auto_close` dan otomatis menutup posisi lama yang sudah melewati batas SL 1.0%.

@@ -192,37 +192,39 @@ FUNDING_FLIP_CLOSE_THRESHOLD = 0.001  # 0.1%/hari hysteresis untuk tutup posisi 
 # Target income
 MONTHLY_TARGET = 100.0      # USDC
 
-# Risk management parameters (Ultra-Fast Capital Turnover — Cuan Kilat & Modal $15 Cepat Bebas)
-DEFAULT_SL_PCT = 0.010       # 1.0% default SL (ketat & batasi drawdown)
-DEFAULT_TP_PCT = 0.012       # 1.2% default TP (cepat hit & modal kembali cair)
+# Risk management parameters (Opsi 3 Hybrid Ultimate: Wick-Catcher TP + Pinch Lock + Instant Market-TP)
+DEFAULT_SL_PCT = 0.010          # 1.0% default SL (ketat & batasi drawdown)
+DEFAULT_TP_PCT = 0.0075         # 0.75% default TP (realistis & mudah tersentuh wick bursa)
+INSTANT_MARKET_TP_PCT = 0.0050  # Profit >= +0.50% saat monitor jalan -> langsung Market Close ambil cuan!
+PINCH_TP_TARGET_PCT = 0.0050    # Saat Tier 2 (+0.35%) aktif, rapatkan juga TP bursa ke Entry + 0.50% (Pinch Lock)
 
-# Tangga Trailing Stop & Early Breakeven (Selaras dengan TP 0.8% - 1.2%)
+# Tangga Trailing Stop & Pinch Lock (Opsi 3 Hybrid Ultimate)
 TRAILING_TIERS = [
-    (0.004, "lock_0010"),   # profit >= +0.4% → SL di entry +0.10% (zero-risk setelah fee)
-    (0.006, "lock_0030"),   # profit >= +0.6% → SL di entry +0.30%
+    (0.0025, "lock_0010"),  # Tier 1: profit >= +0.25% → SL di entry +0.10% (zero-risk setelah fee)
+    (0.0035, "lock_0022"),  # Tier 2: profit >= +0.35% → SL di entry +0.22% & Pinch TP ke +0.50%
 ]
 
 
 def get_asset_baseline_tpsl_pct(asset: Optional[str] = None) -> tuple[float, float]:
     """
-    Return (tp_pct, sl_pct) disesuaikan dengan profil volatilitas aset:
+    Return (tp_pct, sl_pct) disesuaikan dengan profil volatilitas aset (Opsi 3 Wick-Catcher TP):
     - SL seragam 1.0% (0.010) untuk semua kelas aset guna membatasi drawdown ketat.
-    - Crypto Tier-1 (BTC, ETH, SOL, BNB, XRP, AVAX, SUI, LINK, NEAR, AAVE): TP +1.0%, SL 1.0%
-    - ETF / Saham Kalem (SPY, US100, AAPL): TP +1.0%, SL 1.0%
-    - Komoditas (XAU, XAG, BRENTOIL): TP +1.2%, SL 1.0%
-    - Saham Volatil (NVDA, TSLA, MSTR, CRCL, SNDK, VVV, dll): TP +1.2%, SL 1.0%
+    - ETF / Saham Kalem (SPY, US100, AAPL): TP +0.55%, SL 1.0%
+    - Crypto Tier-1 (BTC, ETH, SOL, BNB, XRP, AVAX, SUI, LINK, NEAR, AAVE): TP +0.60%, SL 1.0%
+    - Komoditas (XAU, XAG, BRENTOIL): TP +0.65%, SL 1.0%
+    - Saham Volatil (NVDA, TSLA, MSTR, CRCL, SNDK, VVV, dll): TP +0.75%, SL 1.0%
     """
     if not asset:
-        return 0.012, 0.010
+        return 0.0075, 0.010
     asset_up = asset.upper()
     if asset_up in {"SPY", "US100", "AAPL"}:
-        return 0.010, 0.010
+        return 0.0055, 0.010
     elif asset_up in ALLOWED_CRYPTO:
-        return 0.010, 0.010
+        return 0.0060, 0.010
     elif asset_up in ALLOWED_COMMODITIES:
-        return 0.012, 0.010
+        return 0.0065, 0.010
     else:
-        return 0.012, 0.010
+        return 0.0075, 0.010
 
 # Logging
 logging.basicConfig(
@@ -659,14 +661,14 @@ def compute_baseline_tpsl(
 ) -> tuple[float, float]:
     """
     Return (tp, sl) dinamis disesuaikan dengan profil volatilitas aset & windfall funding:
-    - Target ultra-tipis & terukur (+1.0% s/d +1.2%) agar cepat hit TP & modal $15 terus berputar
-    - Windfall Take Profit: Jika 2x funding harian realistis (>= 0.8%), TP dimajukan
+    - Wick-Catcher TP (+0.55% s/d +0.75%) agar sering tersentuh jarum harga di server bursa
+    - Windfall Take Profit: Jika 1.5x funding harian realistis (0.45% <= windfall < tp_pct), TP dimajukan
     """
     tp_pct, sl_pct = get_asset_baseline_tpsl_pct(asset)
 
-    if abs(funding_daily) >= 0.005:
-        windfall_tp = round(abs(funding_daily) * 2.0, 3)
-        if 0.008 <= windfall_tp < tp_pct:
+    if abs(funding_daily) >= 0.003:
+        windfall_tp = round(abs(funding_daily) * 1.5, 4)
+        if 0.0045 <= windfall_tp < tp_pct:
             tp_pct = windfall_tp
 
     if side == "long":
@@ -922,7 +924,7 @@ def evaluate_and_apply_position_risk(
             candidate_sl = l2_sl
             sl_reason = "L2 Breakeven"
 
-    # D. Kandidat dari Trailing Stop & Early Breakeven Lock (Lapis 4)
+    # D. Kandidat dari Trailing Stop & Pinch Lock (Lapis 4 — Opsi 3 Hybrid Ultimate)
     profit = pos.profit_pct_price
     if profit >= TRAILING_TIERS[0][0]:
         active_tier = None
@@ -931,10 +933,29 @@ def evaluate_and_apply_position_risk(
                 active_tier = (threshold, action)
         if active_tier:
             threshold, action = active_tier
-            # Cabang aktif baru (selaras dengan TP 0.8% - 1.2%): LONG di atas entry, SHORT di bawah entry
+            # Cabang aktif Opsi 3 Hybrid: LONG di atas entry, SHORT di bawah entry
             if action == "lock_0010":
                 l4_sl = pos.entry_price * 1.0010 if pos.side == "long" else pos.entry_price * 0.9990
                 tier_desc = f"L4 Zero-Risk +0.10% (Profit {profit*100:+.2f}%)"
+            elif action == "lock_0022":
+                l4_sl = pos.entry_price * 1.0022 if pos.side == "long" else pos.entry_price * 0.9978
+                tier_desc = f"L4 Pinch Lock +0.22% (Profit {profit*100:+.2f}%)"
+                # Pinch Lock TP: rapatkan TP bursa ke Entry + 0.50% agar jemput bola
+                pinch_tp = round(
+                    pos.entry_price * (1 + PINCH_TP_TARGET_PCT)
+                    if pos.side == "long"
+                    else pos.entry_price * (1 - PINCH_TP_TARGET_PCT),
+                    4,
+                )
+                curr_tp_ref = new_tp if new_tp is not None else pos.tp
+                if pos.side == "long" and pinch_tp > pos.current_price:
+                    if curr_tp_ref is None or pinch_tp < curr_tp_ref * 0.9995:
+                        new_tp = pinch_tp
+                        tp_reason = "L4 Pinch TP +0.50%"
+                elif pos.side == "short" and pinch_tp < pos.current_price:
+                    if curr_tp_ref is None or pinch_tp > curr_tp_ref * 1.0005:
+                        new_tp = pinch_tp
+                        tp_reason = "L4 Pinch TP +0.50%"
             elif action == "lock_0030":
                 l4_sl = pos.entry_price * 1.0030 if pos.side == "long" else pos.entry_price * 0.9970
                 tier_desc = f"L4 Lock Cuan +0.30% (Profit {profit*100:+.2f}%)"
@@ -965,7 +986,7 @@ def evaluate_and_apply_position_risk(
     final_sl = candidate_sl if (candidate_sl is not None and _sl_is_improvement(pos, candidate_sl)) else None
     final_tp = new_tp
 
-    # --- Guard SL/TP Sisi Salah + Migrasi Posisi Lama ---
+    # --- Guard SL/TP Sisi Salah + Migrasi Posisi Lama + Instant Market-TP ---
     # LONG : final_sl < current_price dan final_tp > current_price
     # SHORT: final_sl > current_price dan final_tp < current_price
     sl_check = final_sl if final_sl is not None else target_sl
@@ -1006,6 +1027,24 @@ def evaluate_and_apply_position_risk(
                 "action": "CLOSE",
                 "detail": "TP breached",
                 "reason": "TP breached",
+                "result": res,
+            }
+        return None
+
+    # Tier 3 Instant Market-TP: Jika saat monitor mengecek profit sudah >= +0.50%, bungkus cuan langsung!
+    if profit >= INSTANT_MARKET_TP_PCT:
+        log.info(
+            f"💰 [INSTANT TP] {pos.base_asset}: profit {profit*100:+.2f}% >= "
+            f"{INSTANT_MARKET_TP_PCT*100:.2f}% → tutup posisi & kunci cuan langsung"
+        )
+        preview = client.preview_close(pos.contract_id)
+        if preview and preview.get("ok"):
+            res = client.execute(preview["confirmationToken"])
+            _record_position_close(pos, "Instant Market-TP")
+            return {
+                "action": "CLOSE",
+                "detail": f"Instant Market-TP ({profit*100:+.2f}%)",
+                "reason": "Instant Market-TP",
                 "result": res,
             }
         return None
@@ -1092,6 +1131,8 @@ def apply_layer4_trailing(client: WaltClient, pos: Position) -> Optional[dict]:
     # Cabang aktif baru: LONG di atas entry, SHORT di bawah entry
     if action == "lock_0010":
         new_sl = pos.entry_price * 1.0010 if pos.side == "long" else pos.entry_price * 0.9990
+    elif action == "lock_0022":
+        new_sl = pos.entry_price * 1.0022 if pos.side == "long" else pos.entry_price * 0.9978
     elif action == "lock_0030":
         new_sl = pos.entry_price * 1.0030 if pos.side == "long" else pos.entry_price * 0.9970
     # Cabang lama dipertahankan untuk kompatibilitas mundur

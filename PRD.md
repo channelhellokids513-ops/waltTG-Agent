@@ -113,10 +113,10 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
    - **Opsi A Smart Fast-Exit Idle:** Jika 0 posisi aktif dan tidak ada perubahan snapshot penutupan, proses langsung selesai (*fast-exit*) dalam <2 detik sehingga hemat kuota runner hingga 95%.
    - **Deteksi Penutupan Posisi (`Closed_Positions`):** Membandingkan posisi aktif dengan `logs/open_snapshot.json` (dipersist via `actions/cache`) dan mencatat setiap penutupan posisi ke sheet `Closed_Positions` serta `logs/closed_history.csv`.
    - Jika terdapat posisi aktif, bot memantau intensif tanpa jeda dan menerapkan **Proteksi Risiko Terpadu**:
-     - **Lapis 1:** Baseline Dynamic TP (+1.0% / +1.2% + Windfall) & **Uniform SL 1.0%** di semua kelas aset, dilengkapi guard validasi sisi harga dan migrasi penutupan otomatis bagi posisi lama yang melampaui rugi 1.0%.
+     - **Lapis 1:** Wick-Catcher Baseline TP (+0.55% ETF, +0.60% Crypto, +0.65% Komoditas, +0.75% Saham + Windfall $\ge 0.45\%$) & **Uniform SL 1.0%** di semua kelas aset, dilengkapi guard validasi sisi harga dan migrasi penutupan otomatis bagi posisi lama yang melampaui rugi 1.0%.
      - **Lapis 2:** Funding Integrity dengan **Hysteresis 0.1%/hari** (*emergency close* jika funding berlawanan arah $\ge 0.1\%$/hari, atau geser SL ke breakeven jika $< 0.1\%$/hari).
      - **Lapis 3:** *Deprecated* (digantikan oleh SL baseline 1.0%).
-     - **Lapis 4:** **Trailing Tiers Selaras TP** (Profit $\ge +0.4\% \to$ lock SL di `Entry + 0.10%`; Profit $\ge +0.6\% \to$ lock SL di `Entry + 0.30%`).
+     - **Lapis 4:** **Opsi 3 Hybrid Ultimate (Zero-Risk + Pinch Lock + Instant Market-TP):** Profit $\ge +0.25\% \to$ lock SL di `Entry + 0.10%`; Profit $\ge +0.35\% \to$ lock SL di `Entry + 0.22%` & Pinch TP ke `Entry + 0.50%`; Profit $\ge +0.50\% \to$ **Instant Market-TP Close**.
 3. **Market Execute (`market-execute.yml` — Tiap 2 Jam di menit 43 WIB / `43 */2 * * *` UTC):**
    - Berjalan 24/7 memanfaatkan likuiditas perpetual synthetic Walt.
    - **Dynamic Slot Elasticity:** Kuota slot posisi beradaptasi elastis dari 5 slot (modal mikro <$30) hingga 15 slot (modal mapan).

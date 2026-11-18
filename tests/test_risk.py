@@ -72,19 +72,19 @@ def _make_pos(
 @pytest.mark.parametrize(
     "asset,expected_tp_pct",
     [
-        ("SPY", 0.010),
-        ("US100", 0.010),
-        ("AAPL", 0.010),
-        ("BTC", 0.010),
-        ("SOL", 0.010),
-        ("XAU", 0.012),
-        ("XAG", 0.012),
-        ("NVDA", 0.012),
-        ("NBIS", 0.012),
-        (None, 0.012),
+        ("SPY", 0.0055),
+        ("US100", 0.0055),
+        ("AAPL", 0.0055),
+        ("BTC", 0.0060),
+        ("SOL", 0.0060),
+        ("XAU", 0.0065),
+        ("XAG", 0.0065),
+        ("NVDA", 0.0075),
+        ("NBIS", 0.0075),
+        (None, 0.0075),
     ],
 )
-def test_baseline_tpsl_sl_is_always_1_percent_and_tp_unchanged(asset, expected_tp_pct):
+def test_baseline_tpsl_sl_is_always_1_percent_and_tp_wick_catcher(asset, expected_tp_pct):
     tp_pct, sl_pct = get_asset_baseline_tpsl_pct(asset)
     assert sl_pct == pytest.approx(0.010)
     assert tp_pct == pytest.approx(expected_tp_pct)
@@ -99,14 +99,14 @@ def test_baseline_tpsl_sl_is_always_1_percent_and_tp_unchanged(asset, expected_t
     assert tp_short == pytest.approx(round(entry * (1 - expected_tp_pct), 4))
 
 
-def test_windfall_tp_advances_tp_when_2x_funding_between_08_and_baseline():
-    # NVDA baseline TP = 1.2% (0.012). Funding 0.5%/hari -> windfall_tp = 1.0% (0.010) < 0.012
-    tp_long, sl_long = compute_baseline_tpsl("long", 100.0, asset="NVDA", funding_daily=-0.005)
-    assert tp_long == pytest.approx(101.0)
+def test_windfall_tp_advances_tp_when_15x_funding_between_045_and_baseline():
+    # NVDA baseline TP = 0.75% (0.0075). Funding 0.4%/hari -> windfall_tp = 1.5 * 0.4% = 0.60% (0.0060) < 0.0075
+    tp_long, sl_long = compute_baseline_tpsl("long", 100.0, asset="NVDA", funding_daily=-0.004)
+    assert tp_long == pytest.approx(100.6)
     assert sl_long == pytest.approx(99.0)
 
-    tp_short, sl_short = compute_baseline_tpsl("short", 100.0, asset="NVDA", funding_daily=0.005)
-    assert tp_short == pytest.approx(99.0)
+    tp_short, sl_short = compute_baseline_tpsl("short", 100.0, asset="NVDA", funding_daily=0.004)
+    assert tp_short == pytest.approx(99.4)
     assert sl_short == pytest.approx(101.0)
 
 
@@ -223,35 +223,50 @@ def test_funding_flip_hysteresis_closes_only_at_or_above_threshold(monkeypatch):
 
 
 # -----------------------------------------------------------------------------
-# 5. Trailing tiers baru (Poin 7)
+# 5. Trailing tiers baru, Pinch Lock, & Instant Market-TP (Opsi 3 Hybrid)
 # -----------------------------------------------------------------------------
 
-def test_new_trailing_tiers_lock_0010_and_lock_0030():
+def test_new_trailing_tiers_pinch_lock_and_instant_market_tp(monkeypatch):
+    monkeypatch.setattr(walt_bot, "_record_position_close", lambda *a, **kw: None)
     assert TRAILING_TIERS == [
-        (0.004, "lock_0010"),
-        (0.006, "lock_0030"),
+        (0.0025, "lock_0010"),
+        (0.0035, "lock_0022"),
     ]
 
-    # Tier 1: profit +0.45% (>= 0.4%) pada LONG -> SL di entry +0.10% (100.10)
+    # Tier 1: profit +0.28% (>= 0.25%) pada LONG -> SL di entry +0.10% (100.10)
     client1 = _make_mock_client()
-    pos_t1_long = _make_pos(side="long", entry=100.0, current=100.45, tp=101.2, sl=99.0)
+    pos_t1_long = _make_pos(side="long", entry=100.0, current=100.28, tp=100.75, sl=99.0)
     res1 = evaluate_and_apply_position_risk(client1, pos_t1_long, current_funding_daily=-0.006)
     assert res1 is not None
+    assert res1["action"] == "UPDATE_AUTO_CLOSE"
     assert res1["sl"] == pytest.approx(100.10)
 
-    # Tier 2: profit +0.65% (>= 0.6%) pada LONG -> SL di entry +0.30% (100.30)
+    # Tier 2 Pinch Lock: profit +0.40% (>= 0.35% & < 0.50%) pada LONG -> SL di 100.22 & TP dirapatkan ke 100.50
     client2 = _make_mock_client()
-    pos_t2_long = _make_pos(side="long", entry=100.0, current=100.65, tp=101.2, sl=100.10)
+    pos_t2_long = _make_pos(side="long", entry=100.0, current=100.40, tp=100.75, sl=100.10)
     res2 = evaluate_and_apply_position_risk(client2, pos_t2_long, current_funding_daily=-0.006)
     assert res2 is not None
-    assert res2["sl"] == pytest.approx(100.30)
+    assert res2["action"] == "UPDATE_AUTO_CLOSE"
+    assert res2["sl"] == pytest.approx(100.22)
+    assert res2["tp"] == pytest.approx(100.50)
 
-    # Tier 2 pada SHORT: profit +0.65% (current=99.35) -> SL di entry -0.30% (99.70)
+    # Tier 2 Pinch Lock pada SHORT: profit +0.40% (current=99.60) -> SL di 99.78 & TP dirapatkan ke 99.50
     client3 = _make_mock_client()
-    pos_t2_short = _make_pos(side="short", entry=100.0, current=99.35, tp=98.8, sl=101.0)
+    pos_t2_short = _make_pos(side="short", entry=100.0, current=99.60, tp=99.25, sl=101.0)
     res3 = evaluate_and_apply_position_risk(client3, pos_t2_short, current_funding_daily=0.006)
     assert res3 is not None
-    assert res3["sl"] == pytest.approx(99.70)
+    assert res3["action"] == "UPDATE_AUTO_CLOSE"
+    assert res3["sl"] == pytest.approx(99.78)
+    assert res3["tp"] == pytest.approx(99.50)
+
+    # Tier 3 Instant Market-TP: profit +0.52% (>= 0.50%) tapi belum lewati TP bursa 100.75 -> langsung CLOSE!
+    client_itp = _make_mock_client()
+    pos_itp = _make_pos(side="long", entry=100.0, current=100.52, tp=100.75, sl=100.22)
+    res_itp = evaluate_and_apply_position_risk(client_itp, pos_itp, current_funding_daily=-0.006)
+    assert res_itp is not None
+    assert res_itp["action"] == "CLOSE"
+    assert res_itp["reason"] == "Instant Market-TP"
+    client_itp.preview_close.assert_called_once_with(pos_itp.contract_id)
 
     # apply_layer4_trailing wrapper
     client4 = _make_mock_client()
