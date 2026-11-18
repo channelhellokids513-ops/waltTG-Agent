@@ -87,10 +87,12 @@ Mengatasi limit bursa Walt pada aset berharga tinggi (seperti `NVDA` atau `MSTR`
 - Walt OAuth token kadaluarsa secara berkala dan dirotasi oleh bursa.
 - `token_manager.py` secara otomatis mengenkripsi token baru dengan libsodium (`pynacl`) dan meng-update GitHub Secret `WALT_REFRESH_TOKEN` via REST API repository. Bot tidak akan pernah berhenti karena token expired.
 
-### 7. Autonomous Auto-Compounding (Snowballing Engine)
-- Mengumpulkan seluruh pendapatan Take Profit dan yield funding harian yang masuk ke kas dompet secara otomatis untuk diputar kembali ke modal trading (*reinvest*).
-- Ukuran margin per posisi membesar secara dinamis dan proporsional terhadap pertumbuhan saldo kas (`deployable = available * 85% / remaining_slots`).
-- Fleksibel: Jika pemilik akun melakukan penarikan dana (*withdraw*), ukuran margin otomatis menyesuaikan mengecil ke batas aman tanpa perlu restart atau konfigurasi manual.
+### 7. Autonomous Auto-Compounding & Dynamic Slot Elasticity
+- **Auto-Reinvest:** Mengumpulkan seluruh pendapatan Take Profit dan yield funding harian yang masuk ke kas dompet secara otomatis untuk diputar kembali ke modal trading (*reinvest*).
+- **Dynamic Slot Elasticity:** Kuota slot posisi tidak kaku, melainkan elastis beradaptasi dengan ketersediaan modal kas (5 slot pada modal mikro <$30, hingga 15 slot simultan pada modal berkembang).
+- **Conviction-Based Sizing:** Margin dihitung berdasarkan besaran yield funding (hingga $1.35\times$), konsensus Swarm AI (hingga $1.25\times$), dan tier keamanan aset (Safe-Haven bluechip $1.15\times$).
+- **Portfolio Risk Ceiling:** Margin tiap posisi dibatasi maksimal 15% dari total ekuitas dengan floor aman $2.50 USDC dan cash buffer 15%.
+- **Fleksibel:** Jika pemilik akun melakukan penarikan dana (*withdraw*), ukuran margin dan slot otomatis menyesuaikan mengecil ke batas aman tanpa perlu restart atau konfigurasi manual.
 
 ---
 

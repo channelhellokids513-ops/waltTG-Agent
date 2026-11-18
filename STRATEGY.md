@@ -60,13 +60,24 @@ funding_annualized = funding_daily × 365 × 100
 - **Leverage Maksimal:** **2x** (konservatif, estimasi pergerakan harga menuju likuidasi ~49%).
 - **Dynamic Auto-Compounding (Snowballing):**
   - Bot secara otomatis mengumpulkan seluruh profit Take Profit & yield funding rate yang masuk ke kas dompet untuk ditradingkan kembali (*auto-reinvest*) selama belum di-withdraw oleh user.
-  - Alokasi ukuran margin per posisi diskalakan secara dinamis: `deployable = available_balance * 85% / remaining_slots`.
-  - Margin otomatis membesar seiring pertumbuhan modal (contoh: modal $15.56 $\to$ ~$2.65/posisi; modal $50 $\to$ ~$8.50/posisi; modal $100 $\to$ ~$17.00/posisi; modal $500 $\to$ ~$85.00/posisi).
-  - Batas bawah margin minimum: **$2.50 USDC** (batas aman order exchange Walt Perps).
-  - Jika pemilik akun melakukan penarikan dana (*withdraw*), ukuran margin otomatis mengecil secara proporsional.
-- **Cadangan Kas (Cash Buffer):** **15%** dari saldo kas selalu dijaga tidak disentuh demi keamanan likuiditas.
-- **Jumlah Posisi Simultan:** **Maksimal 5 posisi aktif**.
-- **Buffer Modal Wajib:** Minimal **15% – 20%** dari saldo akun harus selalu disisakan dalam bentuk saldo bebas (USDC) untuk menjaga ketahanan margin.
+  - Alokasi ukuran margin per posisi diskalakan secara dinamis: `base_margin = deployable / remaining_slots` dengan `deployable = available_balance * 85%`.
+  - Margin otomatis membesar seiring pertumbuhan modal dan mengecil secara proporsional jika dilakukan penarikan dana (*withdraw*).
+- **Dynamic Slot Elasticity (Slot Posisi Fleksibel):**
+  - Tidak dibatasi kaku ke 5 slot. Jumlah slot posisi aktif beradaptasi elastis mengikuti saldo kas (`get_dynamic_max_slots`):
+    - **Modal Mikro (< $30 USDC):** **5 slot** (konservatif & aman dari margin call, margin ~$2.50/posisi).
+    - **Modal Menengah ($30 – $75 USDC):** **5 – 8 slot** (margin ~$5.00 – $7.50/posisi).
+    - **Modal Berkembang ($75 – $150 USDC):** **8 – 12 slot** (margin ~$7.50 – $12.00/posisi).
+    - **Modal Mapan ($150+ USDC):** hingga **15 slot maksimal** (diversifikasi luas lintas saham US, komoditas, dan crypto bluechip).
+- **Conviction-Based Margin Sizing (Skala Margin Berbasis Keyakinan):**
+  - Margin posisi disesuaikan secara individual menggunakan sistem pembobotan (*multiplier*):
+    1. **Funding Rate Magnitude:** Funding $\ge 0.8\%$/hari $\to \mathbf{1.35\times}$; Funding $\ge 0.4\%$/hari $\to \mathbf{1.15\times}$; Normal $\to \mathbf{1.00\times}$.
+    2. **AI Swarm Consensus:** UNANIMOUS / Skor $\ge +0.60 \to \mathbf{1.25\times}$; STRONG $\to \mathbf{1.00\times}$; MIXED / SPLIT $\to \mathbf{0.75\times}$.
+    3. **Asset Safety Tier:** Safe-Haven / Liquid Bluechip (`BTC`, `ETH`, `SPY`, `XAU`, `QQQ`, `AAPL`) $\to \mathbf{1.15\times}$; Altcoins / Growth $\to \mathbf{1.00\times}$.
+    4. **Verdict Multiplier:** GO $\to \mathbf{1.00\times}$; HALF $\to \mathbf{0.50\times}$.
+- **Portfolio Risk Ceiling & Floor:**
+  - **Single-Position Hard Ceiling:** Maksimal **15%** dari total ekuitas saldo akun per posisi agar tidak terjadi over-konsentrasi modal pada satu aset.
+  - **Batas Bawah Margin (Floor):** **$2.50 USDC** (syarat minimum order exchange Walt Perps).
+  - **Cadangan Kas Wajib (Cash Buffer):** **15%** dari saldo kas selalu dijaga bebas demi ketahanan likuiditas.
 
 ### 3.2 Margin Minimum Efektif di Walt (Leverage 2x)
 Setiap kontrak di Walt memiliki ketentuan *minimum order size (min_size_base)*. Berikut adalah acuan margin minimum efektif untuk aset prioritas pada leverage 2x:

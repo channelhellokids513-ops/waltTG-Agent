@@ -56,22 +56,100 @@ MAX_LEVERAGE = 2
 DEFAULT_MARGIN = 2.50       # USDC per posisi minimum (floor)
 MARGIN_RANGE = (2.50, 3.00)
 MIN_BUFFER_PCT = 0.15       # 15% dari saldo tidak boleh dipakai (cash buffer)
+SAFE_HAVEN_ASSETS = {"BTC", "ETH", "SPY", "QQQ", "XAU", "AAPL"}
 
-def calculate_dynamic_margin(available_balance: float, active_slots: int = 0, max_slots: int = 5) -> float:
+
+def get_dynamic_max_slots(available_balance: float) -> int:
     """
-    Kalkulasi ukuran margin per posisi berbasis Auto-Compounding (Snowballing).
-    Seluruh akumulasi profit & yield funding yang masuk ke kas otomatis diputar kembali
-    ke modal trading secara proporsional selama belum ditarik (withdraw):
-      - 85% dari available balance dialokasikan untuk trading (15% cash buffer).
-      - Modal dibagi rata ke kuota slot kosong yang tersisa (maks 5 posisi aktif).
-      - Batas bawah $2.50 USDC (syarat batas minimal bursa Walt Perps).
+    Hitung batas maksimal slot posisi aktif secara elastis berdasarkan ekuitas:
+    - Modal mikro (< $30): 5 slot (konservatif & aman dari margin call).
+    - Modal menengah ($30 - $75): 5 - 8 slot.
+    - Modal berkembang ($75 - $150): 8 - 12 slot.
+    - Modal mapan ($150+): hingga 15 slot maksimal (diversifikasi luas).
     """
+    if available_balance < 30.0:
+        return 5
+    elif available_balance < 75.0:
+        return min(8, max(5, int(available_balance / 7.0)))
+    elif available_balance < 150.0:
+        return min(12, max(8, int(available_balance / 10.0)))
+    else:
+        return min(15, max(10, int(available_balance / 15.0)))
+
+
+def calculate_dynamic_margin(
+    available_balance: float,
+    active_slots: int = 0,
+    max_slots: Optional[int] = None,
+    opp: Optional[Any] = None,
+    research: Optional[Any] = None,
+    verdict_mult: float = 1.0,
+) -> float:
+    """
+    Kalkulasi ukuran margin per posisi berbasis Auto-Compounding & Conviction Sizing:
+    1. Base Margin:
+       - 85% available balance dialokasikan untuk trading (15% cash buffer).
+       - Modal dibagi rata ke kuota slot kosong yang tersisa (max_slots elastis 5 s.d 15).
+       - Batas bawah $2.50 USDC (floor exchange).
+    2. Conviction Multipliers:
+       - Funding Rate magnitude:
+         * abs(funding_daily) >= 0.008 (>= 0.8%/hari): 1.35x
+         * abs(funding_daily) >= 0.004 (>= 0.4%/hari): 1.15x
+         * normal (< 0.4%/hari): 1.0x
+       - AI Swarm Consensus:
+         * UNANIMOUS atau skor final >= +0.60: 1.25x
+         * STRONG atau skor final +0.20 s/d +0.59: 1.0x
+         * MIXED / SPLIT atau skor final < +0.20: 0.75x
+       - Asset Safety Tier:
+         * Safe-haven / Liquid (BTC, ETH, SPY, XAU, QQQ, AAPL): 1.15x
+         * High-growth / Altcoins: 1.0x
+       - Verdict Multiplier (GO = 1.0x, HALF = 0.5x, dll): verdict_mult
+    3. Portfolio Risk Constraints:
+       - Single Position Hard Ceiling: Maksimal 15% dari total ekuitas (atau floor $2.50).
+       - Floor: $2.50 USDC minimum order bursa.
+    """
+    if max_slots is None:
+        max_slots = get_dynamic_max_slots(available_balance)
+
     remaining_slots = max(1, max_slots - active_slots)
     deployable = available_balance * (1.0 - MIN_BUFFER_PCT)
     if deployable <= 0:
         return DEFAULT_MARGIN
-    raw_margin = round(deployable / remaining_slots, 2)
-    return max(DEFAULT_MARGIN, raw_margin)
+
+    base_margin = deployable / remaining_slots
+    mult = float(verdict_mult)
+
+    if opp:
+        # Funding rate magnitude
+        funding_daily = getattr(opp, "funding_daily", 0.0)
+        funding_abs = abs(funding_daily)
+        if funding_abs >= 0.008:
+            mult *= 1.35
+        elif funding_abs >= 0.004:
+            mult *= 1.15
+
+        # Asset safety tier
+        base_asset = getattr(opp, "base_asset", "")
+        if base_asset in SAFE_HAVEN_ASSETS:
+            mult *= 1.15
+
+    if research:
+        score = getattr(research, "final_score", 0.0)
+        consensus = getattr(research, "overall_consensus_level", "")
+        if consensus == "UNANIMOUS" or score >= 0.60:
+            mult *= 1.25
+        elif consensus == "STRONG" or (0.20 <= score < 0.60):
+            mult *= 1.0
+        elif consensus in ("MIXED", "SPLIT") or score < 0.20:
+            mult *= 0.75
+
+    sized_margin = base_margin * mult
+
+    # Single position risk ceiling: max 15% dari available balance (tetap izinkan floor $2.50)
+    single_position_cap = max(DEFAULT_MARGIN, round(available_balance * 0.15, 2))
+    final_margin = min(sized_margin, single_position_cap)
+
+    return max(DEFAULT_MARGIN, round(final_margin, 2))
 
 # Filter likuiditas
 MIN_VOL_24H = 1_000_000     # $1M
@@ -965,10 +1043,13 @@ def daily_scan(client: WaltClient) -> dict:
     contracts = client.list_contracts()
 
     opps = rank_opportunities(contracts["contracts"])
-    top3 = opps[:3]
+    accounts = balance.get("accounts", [])
+    available = float(accounts[0].get("balance_available", 0.0)) if accounts else 0.0
+    scan_limit = max(5, get_dynamic_max_slots(available))
+    top_candidates = opps[:scan_limit]
 
-    # Fetch live price untuk top 3
-    for opp in top3:
+    # Fetch live price untuk top candidates
+    for opp in top_candidates:
         try:
             r = client.latest_rate(f"{opp.base_asset}-USD-PERP")
             opp_price = float(r["rate"])
@@ -1002,9 +1083,9 @@ def daily_scan(client: WaltClient) -> dict:
                 "price": getattr(o, "live_price", 0),
                 "min_margin_2x": o.min_margin_2x,
             }
-            for o in top3
+            for o in top_candidates
         ],
-        "_raw_opportunities": top3,
+        "_raw_opportunities": top_candidates,
         "readiness": readiness,
     }
 
@@ -1045,7 +1126,7 @@ def format_summary_telegram(
 
     # Top opportunities + research + execution
     lines.append(f"\n*🎯 Top Peluang & Prosedur Eksekusi*")
-    for i, opp in enumerate(summary["top_opportunities"], 1):
+    for i, opp in enumerate(summary["top_opportunities"][:5], 1):
         asset = opp["asset"]
         side = opp["side"].upper()
         funding = opp["funding_daily_pct"]
@@ -1171,15 +1252,20 @@ def scan_with_research(
             existing_contracts = set()
 
         active_slot_count = len(existing_contracts)
-        base_margin = calculate_dynamic_margin(available, active_slots=active_slot_count, max_slots=5)
-        log.info(f"Auto-Compounding Sizing: Available ${available:.2f} | Posisi Aktif {active_slot_count}/5 | Base Margin ${base_margin:.2f}")
+        max_slots = get_dynamic_max_slots(available)
+        log.info(
+            f"Dynamic Elastic Slot & Conviction Sizing: Available ${available:.2f} | "
+            f"Posisi Aktif {active_slot_count}/{max_slots} | Max Allowed Slots: {max_slots}"
+        )
 
         raw_opps = summary.get("_raw_opportunities", [])
-        for opp in raw_opps:
+        for opp in raw_opps[:max_slots]:
+            if active_slot_count >= max_slots:
+                log.info(f"  Slot maksimal tercapai ({active_slot_count}/{max_slots}), hentikan alokasi.")
+                break
             asset = opp.base_asset
             research = researches.get(asset)
             verdict, reason, mult = decide_go_nogo(opp, research)
-            margin = base_margin * mult
 
             if verdict in ("GO", "HALF") and mult > 0:
                 if opp.contract_id in existing_contracts:
@@ -1190,6 +1276,15 @@ def scan_with_research(
                     })
                     continue
 
+                margin = calculate_dynamic_margin(
+                    available_balance=available,
+                    active_slots=active_slot_count,
+                    max_slots=max_slots,
+                    opp=opp,
+                    research=research,
+                    verdict_mult=mult,
+                )
+
                 if deployed + margin > target_deploy or (available - deployed) < 3.0:
                     log.info(f"  SKIP {asset}: buffer saldo tercapai (${deployed:.2f}/${target_deploy:.2f})")
                     executions.append({
@@ -1199,13 +1294,15 @@ def scan_with_research(
                     continue
 
                 if dry_run:
-                    log.info(f"  🧪 DRY_RUN {opp.side.upper()} {asset} margin ${margin}")
+                    log.info(f"  🧪 DRY_RUN {opp.side.upper()} {asset} margin ${margin:.2f}")
                     executions.append({
                         "asset": asset, "side": opp.side, "margin": margin,
                         "price": getattr(opp, "live_price", 0.0),
                         "verdict": "DRY_RUN", "reason": reason,
                     })
                     deployed += margin
+                    existing_contracts.add(opp.contract_id)
+                    active_slot_count += 1
                     continue
 
                 try:
@@ -1224,6 +1321,7 @@ def scan_with_research(
                         })
                         deployed += actual_margin
                         existing_contracts.add(opp.contract_id)
+                        active_slot_count += 1
                     else:
                         executions.append({
                             "asset": asset, "side": opp.side, "verdict": "FAILED",
@@ -1307,6 +1405,9 @@ def market_execute(
     contracts_data = client.list_contracts()
     opps = rank_opportunities(contracts_data["contracts"], allowed_assets=target_universe)
 
+    # Dynamic Slot Elasticity
+    max_slots = get_dynamic_max_slots(available)
+
     # Research saham: Utamakan hasil penelitian dari Spreadsheet/CSV terlebih dahulu (hemat API & cepat)
     from sheet_logger import fetch_latest_research_from_sheet
     cached_researches = fetch_latest_research_from_sheet()
@@ -1318,7 +1419,7 @@ def market_execute(
         else None
     )
     researches: dict[str, Research] = {}
-    for opp in opps[:5]:
+    for opp in opps[:max_slots]:
         if opp.base_asset in ALLOWED_STOCKS:
             if opp.base_asset in cached_researches:
                 cached = cached_researches[opp.base_asset]
@@ -1334,7 +1435,7 @@ def market_execute(
     # Decide + execute
     executions = []
     deployed = 0.0
-    target_deploy = available * 0.80  # sisakan 20% buffer
+    target_deploy = available * (1.0 - MIN_BUFFER_PCT)  # 15% cash buffer dijaga konsisten
 
     # Verifikasi posisi yang benar-benar aktif (statuses=["open"]) secara defensif
     open_contract_ids = set()
@@ -1355,24 +1456,37 @@ def market_execute(
         position_check_failed = True
 
     active_slot_count = len(open_contract_ids)
-    base_margin = calculate_dynamic_margin(available, active_slots=active_slot_count, max_slots=5)
-    log.info(f"Auto-Compounding Sizing: Available ${available:.2f} | Posisi Aktif {active_slot_count}/5 | Base Margin ${base_margin:.2f}")
+    log.info(
+        f"Dynamic Elastic Slot & Conviction Sizing: Available ${available:.2f} | "
+        f"Posisi Aktif {active_slot_count}/{max_slots} | Max Allowed Slots: {max_slots}"
+    )
 
-    for opp in opps[:5]:
+    for opp in opps[:max_slots]:
+        if active_slot_count >= max_slots:
+            log.info(f"  Slot maksimal tercapai ({active_slot_count}/{max_slots}), hentikan pembukaan posisi baru.")
+            break
         if deployed >= target_deploy:
             break
         research = researches.get(opp.base_asset)
         verdict, reason, mult = decide_go_nogo(opp, research)
-        margin = base_margin * mult
-        if verdict == "SKIP" or margin <= 0:
+        if verdict == "SKIP" or mult <= 0:
             log.info(f"  SKIP {opp.base_asset}: {reason}")
             executions.append({
                 "asset": opp.base_asset, "verdict": "SKIP", "reason": reason,
             })
             continue
 
-        if deployed + margin > target_deploy:
-            log.info(f"  SKIP {opp.base_asset}: budget habis")
+        margin = calculate_dynamic_margin(
+            available_balance=available,
+            active_slots=active_slot_count,
+            max_slots=max_slots,
+            opp=opp,
+            research=research,
+            verdict_mult=mult,
+        )
+
+        if deployed + margin > target_deploy or (available - deployed) < 3.0:
+            log.info(f"  SKIP {opp.base_asset}: buffer saldo tercapai (${deployed:.2f}/${target_deploy:.2f})")
             continue
 
         # Cek apakah sudah ada posisi aktif di kontrak ini (Fail-Safe & Anti-Duplicate)
@@ -1396,7 +1510,7 @@ def market_execute(
             })
             continue
 
-        log.info(f"  {verdict} {opp.side.upper()} {opp.base_asset} margin ${margin} — {reason}")
+        log.info(f"  {verdict} {opp.side.upper()} {opp.base_asset} margin ${margin:.2f} (mult {mult:.2f}) — {reason}")
         if dry_run:
             executions.append({
                 "asset": opp.base_asset, "side": opp.side, "margin": margin,
@@ -1404,12 +1518,14 @@ def market_execute(
             })
             deployed += margin
             open_contract_ids.add(opp.contract_id)
+            active_slot_count += 1
             continue
 
         try:
             result = open_position(client, opp, margin=margin, leverage=MAX_LEVERAGE)
             if result:
                 open_contract_ids.add(opp.contract_id)
+                active_slot_count += 1
                 actual_margin = result.get("actual_margin", margin) if isinstance(result, dict) else margin
                 order_id = result.get("order", {}).get("order_id") if isinstance(result, dict) else None
                 order_price = result.get("price") or getattr(opp, "live_price", 0.0)
@@ -1441,7 +1557,7 @@ def market_execute(
     msg_lines = [
         f"*{title}*",
         f"_{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC_\n",
-        f"Saldo awal: `${available:.2f}` | Deploy: `${deployed:.2f}`",
+        f"Saldo: `${available:.2f}` | Deploy: `${deployed:.2f}` | Slot: *{active_slot_count}/{max_slots}*",
         f"Executed: *{len(executed_list)}* | Skipped: *{len(skipped_list)}*\n",
     ]
     if executed_list:
