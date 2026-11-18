@@ -6,6 +6,10 @@ on:
     - cron: '*/10 * * * *'
   workflow_dispatch:
 
+concurrency:
+  group: walt-trading-account
+  cancel-in-progress: false
+
 jobs:
   monitor:
     runs-on: ubuntu-latest

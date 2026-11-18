@@ -12,6 +12,10 @@ on:
         required: false
         default: "false"
 
+concurrency:
+  group: walt-trading-account
+  cancel-in-progress: false
+
 jobs:
   execute:
     runs-on: ubuntu-latest
