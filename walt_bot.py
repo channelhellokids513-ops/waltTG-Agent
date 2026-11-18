@@ -242,9 +242,19 @@ class WaltClient:
         data = r.json()
         if "error" in data:
             raise RuntimeError(f"Walt error: {data['error']}")
-        content = data.get("result", {}).get("content", [])
+        result = data.get("result") or {}
+        content = result.get("content", [])
+        if isinstance(result, dict) and result.get("isError"):
+            err_text = content[0].get("text", str(result)) if content else str(result)
+            raise RuntimeError(f"Walt MCP error ({tool}): {err_text}")
         if content and content[0].get("type") == "text":
-            return json.loads(content[0]["text"])
+            raw_text = content[0]["text"]
+            try:
+                return json.loads(raw_text)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Gagal parse JSON dari MCP ({tool}): {e} | respons: {str(raw_text)[:200]}"
+                ) from e
         return data.get("result")
 
     # --- READ-only ---
