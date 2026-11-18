@@ -807,8 +807,7 @@ def evaluate_and_apply_position_risk(
     1. Lapis 2 (Funding Flip Sign): Jika funding berbalik arah negatif → TUTUP POSISI SEGERA.
     2. TP Dinamis: Ambil target TP baseline/windfall, perketat jika target baru lebih dekat ke entry.
     3. SL Dinamis: Komparasikan kandidat SL dari:
-       - Baseline (Lapis 1)
-       - Volatilitas/Drawdown >2.5% (Lapis 3)
+       - Baseline 1% (Lapis 1)
        - Funding rendah <0.1%/hari (Lapis 2)
        - Progressive Trailing Stop / Early Zero-Risk Lock (Lapis 4)
        Pilih SL yang paling aman & menguntungkan (strictly better).
@@ -844,25 +843,16 @@ def evaluate_and_apply_position_risk(
             new_tp = target_tp
             tp_reason = "L1 Tighten"
 
-    # --- 3. Evaluasi Target SL (Komparasi L1, L3, L2, L4) ---
+    # --- 3. Evaluasi Target SL (Komparasi L1, L2, L4) ---
     candidate_sl = None
     sl_reason = None
 
-    # A. Kandidat dari Baseline (Lapis 1)
+    # A. Kandidat dari Baseline 1% (Lapis 1)
     if not pos.sl or _sl_is_improvement(pos, target_sl):
         candidate_sl = target_sl
         sl_reason = "L1 Baseline"
 
-    # B. Kandidat dari Proteksi Volatilitas (Lapis 3)
-    move = abs((pos.current_price - pos.entry_price) / pos.entry_price)
-    profitable = pos.profit_pct_price > 0
-    if move > 0.020 and not profitable:
-        l3_sl = round(pos.entry_price * 0.975 if pos.side == "long" else pos.entry_price * 1.025, 4)
-        if _sl_is_better(pos.side, l3_sl, candidate_sl) and _sl_is_improvement(pos, l3_sl):
-            candidate_sl = l3_sl
-            sl_reason = "L3 Volatility Cut"
-
-    # C. Kandidat dari Funding Lemah <0.1% (Lapis 2)
+    # B. Kandidat dari Funding Lemah <0.1% (Lapis 2)
     if abs(current_funding_daily) < 0.001:
         l2_sl = round(pos.entry_price, 4)
         if _sl_is_better(pos.side, l2_sl, candidate_sl) and _sl_is_improvement(pos, l2_sl):
@@ -964,15 +954,7 @@ def apply_layer2_funding(
 
 
 def apply_layer3_volatility(client: WaltClient, pos: Position) -> Optional[dict]:
-    """Lapis 3: Proteksi pergerakan harga negatif (wrapper kompatibilitas)."""
-    move = abs((pos.current_price - pos.entry_price) / pos.entry_price)
-    profitable = pos.profit_pct_price > 0
-    if move > 0.020 and not profitable:
-        new_sl = round(pos.entry_price * 0.975 if pos.side == "long" else pos.entry_price * 1.025, 4)
-        if _sl_is_improvement(pos, new_sl):
-            preview = client.preview_auto_close(pos.contract_id, sl=new_sl)
-            if preview.get("ok"):
-                return client.execute(preview["confirmationToken"])
+    """deprecated: digantikan SL baseline 1%"""
     return None
 
 
