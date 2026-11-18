@@ -159,7 +159,7 @@ MIN_FUNDING_DAILY = 0.005   # 0.5%/hari
 MONTHLY_TARGET = 100.0      # USDC
 
 # Risk management parameters (Ultra-Fast Capital Turnover — Cuan Kilat & Modal $15 Cepat Bebas)
-DEFAULT_SL_PCT = 0.030       # 3.0% default SL (ketat & batasi drawdown)
+DEFAULT_SL_PCT = 0.010       # 1.0% default SL (ketat & batasi drawdown)
 DEFAULT_TP_PCT = 0.012       # 1.2% default TP (cepat hit & modal kembali cair)
 
 # Tangga Trailing Stop & Early Breakeven (Ultra-Fast Scalp & Zero-Risk Lock)
@@ -179,23 +179,23 @@ TRAILING_TIERS = [
 def get_asset_baseline_tpsl_pct(asset: Optional[str] = None) -> tuple[float, float]:
     """
     Return (tp_pct, sl_pct) disesuaikan dengan profil volatilitas aset:
-    - Target tipis & kilat agar sering kena TP, turnover cepat, dan modal $15 terus berputar:
-    - Crypto Tier-1 (BTC, ETH, SOL, BNB, XRP, AVAX, SUI, LINK, NEAR, AAVE): TP +1.0%, SL 2.5%
-    - ETF / Saham Kalem (SPY, US100, AAPL): TP +1.0%, SL 2.5%
-    - Komoditas (XAU, XAG, BRENTOIL): TP +1.2%, SL 3.0%
-    - Saham Volatil (NVDA, TSLA, MSTR, CRCL, SNDK, VVV, dll): TP +1.2%, SL 3.0%
+    - SL seragam 1.0% (0.010) untuk semua kelas aset guna membatasi drawdown ketat.
+    - Crypto Tier-1 (BTC, ETH, SOL, BNB, XRP, AVAX, SUI, LINK, NEAR, AAVE): TP +1.0%, SL 1.0%
+    - ETF / Saham Kalem (SPY, US100, AAPL): TP +1.0%, SL 1.0%
+    - Komoditas (XAU, XAG, BRENTOIL): TP +1.2%, SL 1.0%
+    - Saham Volatil (NVDA, TSLA, MSTR, CRCL, SNDK, VVV, dll): TP +1.2%, SL 1.0%
     """
     if not asset:
-        return 0.012, 0.030
+        return 0.012, 0.010
     asset_up = asset.upper()
     if asset_up in {"SPY", "US100", "AAPL"}:
-        return 0.010, 0.025
+        return 0.010, 0.010
     elif asset_up in ALLOWED_CRYPTO:
-        return 0.010, 0.025
+        return 0.010, 0.010
     elif asset_up in ALLOWED_COMMODITIES:
-        return 0.012, 0.030
+        return 0.012, 0.010
     else:
-        return 0.012, 0.030
+        return 0.012, 0.010
 
 # Logging
 logging.basicConfig(
