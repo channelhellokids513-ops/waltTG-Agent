@@ -102,8 +102,7 @@ class TokenManager:
         # Rotate refresh_token kalau ada (RFC 6749 §6)
         if "refresh_token" in data and data["refresh_token"] != self.refresh_token:
             self.refresh_token = data["refresh_token"]
-            print(f"[WARN] Refresh token di-rotate oleh Walt.")
-            print(f"       Token baru: {self.refresh_token[:10]}...{self.refresh_token[-10:]}")
+            print("[WARN] Refresh token di-rotate oleh Walt.")
 
             # 1. Update file .env lokal jika ada
             self._update_local_env(self.refresh_token)
@@ -111,14 +110,26 @@ class TokenManager:
             # 2. Auto-update GitHub Secret jika GH_PAT & GITHUB_REPOSITORY ada
             pat = os.environ.get("GH_PAT")
             repo = os.environ.get("GITHUB_REPOSITORY")
+            synced = False
             if pat and repo:
-                update_github_secret(repo, "WALT_REFRESH_TOKEN", self.refresh_token, pat)
+                synced = update_github_secret(repo, "WALT_REFRESH_TOKEN", self.refresh_token, pat)
             else:
                 if not pat:
                     print("⚠️  [AUTO-SYNC GAGAL] Secret 'GH_PAT' belum ada di GitHub Secrets!")
                     print("   Silakan buat secret baru bernama 'GH_PAT' di GitHub Settings -> Secrets.")
                 if not repo:
                     print("⚠️  [AUTO-SYNC GAGAL] GITHUB_REPOSITORY tidak terdeteksi.")
+
+            if not synced:
+                try:
+                    from notifier import send_telegram
+                    send_telegram(
+                        "⚠️ *ALERT TOKEN ROTATION*: `WALT_REFRESH_TOKEN` telah di-rotate oleh Walt, "
+                        "tetapi auto-update GitHub Secret gagal atau `GH_PAT` tidak tersedia. "
+                        "Harap perbarui secret `WALT_REFRESH_TOKEN` secara manual!"
+                    )
+                except Exception as err:
+                    print(f"⚠️  Gagal mengirim alert rotasi token ke Telegram: {err}")
 
     def _update_local_env(self, new_token: str):
         try:
@@ -137,6 +148,6 @@ class TokenManager:
 
 if __name__ == "__main__":
     tm = TokenManager()
-    token = tm.get_access_token()
-    print(f"access_token (first 30 chars): {token[:30]}...")
+    tm.get_access_token()
+    print("access_token berhasil diperoleh.")
     print(f"expires_at: {time.ctime(tm._expires_at)}")
