@@ -1953,6 +1953,133 @@ def crypto_execute(client: WaltClient, dry_run: bool = False) -> dict:
     )
 
 
+def compute_closed_stats(
+    csv_path: str = "logs/closed_history.csv",
+    send_tg: bool = True,
+) -> dict:
+    """
+    Baca logs/closed_history.csv (atau sheet Closed_Positions via fetch CSV) dan hitung:
+    - jumlah trade, win-rate, rata-rata win dan rata-rata loss (USD dan %);
+    - estimasi fee (0.09%/sisi × notional), total funding, net PnL;
+    - breakdown per alasan close (TP / SL / trailing / funding flip / migrasi).
+    Kirim ringkasannya ke Telegram.
+    """
+    from sheet_logger import fetch_sheet_csv_rows
+
+    rows = fetch_sheet_csv_rows(
+        "Closed_Positions",
+        expected_col_name="Exit Price ($)",
+        local_csv_fallback=csv_path,
+    )
+    data_rows = []
+    if rows:
+        first_cell = str(rows[0][0]).strip().lower() if rows[0] else ""
+        data_rows = rows[1:] if ("timestamp" in first_cell or "asset" in str(rows[0]).lower()) else rows
+
+    trades = []
+    reason_breakdown: dict[str, int] = {
+        "TP": 0,
+        "SL": 0,
+        "trailing": 0,
+        "funding flip": 0,
+        "migrasi": 0,
+    }
+
+    for r in data_rows:
+        if len(r) < 10:
+            continue
+        try:
+            margin = float(r[6] or 0.0)
+            pnl_usd = float(r[7] or 0.0)
+            funding_usd = float(r[8] or 0.0)
+        except Exception:
+            continue
+        reason_raw = str(r[9] or "").strip()
+        reason_low = reason_raw.lower()
+
+        if "migrasi" in reason_low:
+            cat = "migrasi"
+        elif "funding flip" in reason_low:
+            cat = "funding flip"
+        elif "trailing" in reason_low or "lock" in reason_low:
+            cat = "trailing"
+        elif "tp" in reason_low:
+            cat = "TP"
+        elif "sl" in reason_low:
+            cat = "SL"
+        else:
+            cat = reason_raw or "other"
+            reason_breakdown.setdefault(cat, 0)
+
+        reason_breakdown[cat] = reason_breakdown.get(cat, 0) + 1
+        pnl_pct = (pnl_usd / margin * 100.0) if margin > 0 else 0.0
+        notional = margin * MAX_LEVERAGE
+        fee_usd = 2 * 0.0009 * notional  # 0.09%/sisi (open + close)
+
+        trades.append({
+            "asset": r[1],
+            "side": r[2],
+            "margin": margin,
+            "pnl_usd": pnl_usd,
+            "pnl_pct": pnl_pct,
+            "funding_usd": funding_usd,
+            "fee_usd": fee_usd,
+            "reason": reason_raw,
+            "category": cat,
+        })
+
+    total_trades = len(trades)
+    wins = [t for t in trades if t["pnl_usd"] > 0]
+    losses = [t for t in trades if t["pnl_usd"] <= 0]
+
+    win_rate_pct = (len(wins) / total_trades * 100.0) if total_trades > 0 else 0.0
+    avg_win_usd = (sum(t["pnl_usd"] for t in wins) / len(wins)) if wins else 0.0
+    avg_win_pct = (sum(t["pnl_pct"] for t in wins) / len(wins)) if wins else 0.0
+    avg_loss_usd = (sum(t["pnl_usd"] for t in losses) / len(losses)) if losses else 0.0
+    avg_loss_pct = (sum(t["pnl_pct"] for t in losses) / len(losses)) if losses else 0.0
+
+    gross_pnl_usd = sum(t["pnl_usd"] for t in trades)
+    total_funding_usd = sum(t["funding_usd"] for t in trades)
+    estimated_fee_usd = sum(t["fee_usd"] for t in trades)
+    net_pnl_usd = gross_pnl_usd + total_funding_usd - estimated_fee_usd
+
+    stats = {
+        "total_trades": total_trades,
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate_pct": round(win_rate_pct, 2),
+        "avg_win_usd": round(avg_win_usd, 4),
+        "avg_win_pct": round(avg_win_pct, 2),
+        "avg_loss_usd": round(avg_loss_usd, 4),
+        "avg_loss_pct": round(avg_loss_pct, 2),
+        "gross_pnl_usd": round(gross_pnl_usd, 4),
+        "total_funding_usd": round(total_funding_usd, 4),
+        "estimated_fee_usd": round(estimated_fee_usd, 4),
+        "net_pnl_usd": round(net_pnl_usd, 4),
+        "breakdown_by_reason": reason_breakdown,
+    }
+
+    msg_lines = [
+        "*📈 Walt Perps — Closed Positions Stats*",
+        f"Total Trade: *{total_trades}* (Win: {len(wins)} | Loss: {len(losses)})",
+        f"Win Rate: *{win_rate_pct:.1f}%*",
+        f"Avg Win: `${avg_win_usd:+.4f}` (`{avg_win_pct:+.2f}%`)",
+        f"Avg Loss: `${avg_loss_usd:+.4f}` (`{avg_loss_pct:+.2f}%`)",
+        f"Gross Price PnL: `${gross_pnl_usd:+.4f}`",
+        f"Total Funding: `${total_funding_usd:+.4f}`",
+        f"Est. Fee (0.09%/sisi): `-${estimated_fee_usd:.4f}`",
+        f"Net PnL: *`${net_pnl_usd:+.4f}`*\n",
+        "*Breakdown Alasan Close:*",
+    ]
+    for k, v in reason_breakdown.items():
+        msg_lines.append(f"• {k}: {v}")
+
+    if send_tg:
+        send_telegram("\n".join(msg_lines))
+
+    return stats
+
+
 # =============================================================================
 # MAIN DISPATCHER
 # =============================================================================
@@ -1967,10 +2094,16 @@ def main(command: str = "scan"):
         python walt_bot.py monitor               # risk monitor run
         python walt_bot.py market_execute        # execute US stocks & commodities
         python walt_bot.py crypto_execute        # execute bluechip crypto (BTC, ETH, SOL)
+        python walt_bot.py stats                 # closed positions performance stats
         python walt_bot.py open NBIS short 2.50  # buka posisi manual
         python walt_bot.py close NBIS            # tutup posisi
     """
     import sys
+
+    if command == "stats":
+        result = compute_closed_stats()
+        print(json.dumps(result, indent=2, default=str))
+        return
 
     client = WaltClient()
 
