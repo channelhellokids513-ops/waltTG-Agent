@@ -824,6 +824,26 @@ def _sl_is_improvement(pos: Position, new_sl: float, buffer: float = 0.0005) -> 
         return new_sl < pos.sl * (1 - buffer)
 
 
+def _record_position_close(pos: Position, reason: str):
+    """Catat penutupan posisi ke Closed_Positions (Google Sheet) & logs/closed_history.csv."""
+    try:
+        from sheet_logger import log_close
+        pnl_quote = pos.pnl_pct_margin * pos.margin
+        log_close(
+            asset=pos.base_asset,
+            side=pos.side,
+            contract_id=pos.contract_id,
+            entry_price=pos.entry_price,
+            exit_price=pos.current_price,
+            margin=pos.margin,
+            pnl_quote=pnl_quote,
+            funding_quote=pos.funding_paid,
+            reason=reason,
+        )
+    except Exception as e:
+        log.warning(f"Gagal mencatat log_close untuk {pos.base_asset}: {e}")
+
+
 def evaluate_and_apply_position_risk(
     client: WaltClient,
     pos: Position,
@@ -854,6 +874,7 @@ def evaluate_and_apply_position_risk(
         preview = client.preview_close(pos.contract_id)
         if preview and preview.get("ok"):
             res = client.execute(preview["confirmationToken"])
+            _record_position_close(pos, "Funding Flip Sign")
             return {
                 "action": "CLOSE",
                 "detail": "Funding Flip Sign → Close Posisi",
@@ -959,6 +980,7 @@ def evaluate_and_apply_position_risk(
         preview = client.preview_close(pos.contract_id)
         if preview and preview.get("ok"):
             res = client.execute(preview["confirmationToken"])
+            _record_position_close(pos, "SL 1% breached (migrasi)")
             return {
                 "action": "CLOSE",
                 "detail": "SL 1% breached (migrasi)",
@@ -979,6 +1001,7 @@ def evaluate_and_apply_position_risk(
         preview = client.preview_close(pos.contract_id)
         if preview and preview.get("ok"):
             res = client.execute(preview["confirmationToken"])
+            _record_position_close(pos, "TP breached")
             return {
                 "action": "CLOSE",
                 "detail": "TP breached",
@@ -1092,7 +1115,149 @@ def apply_layer4_trailing(client: WaltClient, pos: Position) -> Optional[dict]:
     return None
 
 
-def risk_monitor_run(client: WaltClient) -> dict:
+def _detect_and_log_exchange_closes(
+    client: WaltClient,
+    active_positions: list[dict],
+    snapshot_path: str = "logs/open_snapshot.json",
+) -> tuple[dict[str, dict], list[dict]]:
+    """
+    Bandingkan posisi open saat ini dengan snapshot run sebelumnya (logs/open_snapshot.json).
+    Untuk posisi yang hilang (ditutup otomatis oleh exchange lewat TP/SL), ambil detail dari
+    client.list_positions(statuses=["closed"]) secara defensif dan catat via sheet_logger.log_close.
+    Return (current_snapshot_dict, closed_actions_list).
+    """
+    os.makedirs(os.path.dirname(snapshot_path), exist_ok=True)
+    prev_snapshot: dict[str, dict] = {}
+    if os.path.exists(snapshot_path):
+        try:
+            with open(snapshot_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    prev_snapshot = loaded
+                elif isinstance(loaded, list):
+                    prev_snapshot = {str(cid): {"contract_id": cid} for cid in loaded}
+        except Exception as e:
+            log.warning(f"Gagal membaca open_snapshot.json: {e}")
+
+    current_snapshot: dict[str, dict] = {}
+    for p in active_positions:
+        if str(p.get("status", "open")).lower() not in ("open", "active"):
+            continue
+        cid_str = str(p["contract_id"])
+        current_snapshot[cid_str] = {
+            "contract_id": p["contract_id"],
+            "base_asset": p.get("contract_base_asset") or p.get("base_asset", ""),
+            "side": p.get("side", "long"),
+            "leverage": int(p.get("leverage", MAX_LEVERAGE) or MAX_LEVERAGE),
+            "margin": float(p.get("margin_quote", p.get("margin", 0.0)) or 0.0),
+            "entry_price": float(p.get("avg_entry_price", p.get("entry_price", 0.0)) or 0.0),
+            "funding_paid": float(p.get("funding_paid_quote", p.get("funding_paid", 0.0)) or 0.0),
+        }
+
+    missing_cids = set(prev_snapshot.keys()) - set(current_snapshot.keys())
+    closed_events: list[dict] = []
+
+    if missing_cids:
+        closed_by_cid: dict[str, dict] = {}
+        try:
+            closed_resp = client.list_positions(statuses=["closed"])
+            for cp in closed_resp.get("positions", []):
+                c_str = str(cp.get("contract_id"))
+                if c_str in missing_cids:
+                    closed_by_cid[c_str] = cp
+        except Exception as e:
+            log.warning(f"Gagal fetch closed positions untuk snapshot diff: {e}")
+
+        from sheet_logger import log_close
+        for cid_str in missing_cids:
+            prev_info = prev_snapshot.get(cid_str, {})
+            cp = closed_by_cid.get(cid_str, {})
+
+            asset = (
+                cp.get("contract_base_asset")
+                or cp.get("base_asset")
+                or prev_info.get("base_asset")
+                or f"CID_{cid_str}"
+            )
+            side = str(cp.get("side") or prev_info.get("side") or "long").lower()
+            entry_price = float(
+                cp.get("avg_entry_price")
+                or cp.get("entry_price")
+                or prev_info.get("entry_price")
+                or 0.0
+            )
+            exit_price = float(
+                cp.get("avg_close_price")
+                or cp.get("close_price")
+                or cp.get("exit_price")
+                or cp.get("mark_price")
+                or entry_price
+            )
+            margin = float(
+                cp.get("margin_quote")
+                or cp.get("margin")
+                or prev_info.get("margin")
+                or 0.0
+            )
+            leverage = int(cp.get("leverage") or prev_info.get("leverage") or MAX_LEVERAGE)
+            funding_quote = float(
+                cp.get("funding_paid_quote")
+                or cp.get("funding_paid")
+                or prev_info.get("funding_paid")
+                or 0.0
+            )
+
+            raw_pnl = (
+                cp.get("realized_pnl_quote")
+                if cp.get("realized_pnl_quote") is not None
+                else (cp.get("pnl_quote") if cp.get("pnl_quote") is not None else cp.get("realized_pnl"))
+            )
+            if raw_pnl is not None:
+                pnl_quote = float(raw_pnl)
+            elif entry_price > 0 and exit_price > 0:
+                move = (exit_price - entry_price) / entry_price if side == "long" else (entry_price - exit_price) / entry_price
+                pnl_quote = margin * leverage * move
+            else:
+                pnl_quote = 0.0
+
+            reason = str(cp.get("close_reason") or cp.get("reason") or "")
+            if not reason:
+                reason = "Exchange Auto-Close TP/Trailing" if pnl_quote >= 0 else "Exchange Auto-Close SL"
+
+            try:
+                log_close(
+                    asset=asset,
+                    side=side,
+                    contract_id=int(cid_str) if cid_str.isdigit() else 0,
+                    entry_price=entry_price,
+                    exit_price=exit_price,
+                    margin=margin,
+                    pnl_quote=pnl_quote,
+                    funding_quote=funding_quote,
+                    reason=reason,
+                )
+                closed_events.append({
+                    "asset": asset,
+                    "action": "EXCHANGE_CLOSE_DETECTED",
+                    "detail": f"{reason} (PnL ${pnl_quote:+.4f})",
+                })
+            except Exception as err:
+                log.warning(f"Gagal log_close untuk {asset}: {err}")
+
+    return current_snapshot, closed_events
+
+
+def _save_open_snapshot(snapshot: dict[str, dict], snapshot_path: str = "logs/open_snapshot.json"):
+    """Simpan snapshot posisi open terkini ke disk."""
+    try:
+        os.makedirs(os.path.dirname(snapshot_path), exist_ok=True)
+        with open(snapshot_path, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, indent=2)
+    except Exception as e:
+        log.warning(f"Gagal menyimpan open_snapshot.json: {e}")
+
+
+def risk_monitor_run(client: WaltClient, snapshot_path: str = "logs/open_snapshot.json") -> dict:
     """
     Dispatcher utama risk monitor — jalan tiap 10 menit dari scheduled task.
     Evaluasi terpadu secara atomik untuk setiap posisi aktif.
@@ -1100,20 +1265,26 @@ def risk_monitor_run(client: WaltClient) -> dict:
     """
     positions_data = client.list_positions(statuses=["open"])
     active_positions = positions_data.get("positions", [])
+
+    current_snapshot, closed_actions = _detect_and_log_exchange_closes(
+        client, active_positions, snapshot_path=snapshot_path
+    )
+
     if not active_positions:
+        _save_open_snapshot(current_snapshot, snapshot_path=snapshot_path)
         log.info("💤 [SMART IDLE] 0 posisi aktif. Semua order aman/kas cair. Masuk mode tidur (fast-exit).")
         return {
             "ts": datetime.now(timezone.utc).isoformat(),
             "status": "idle",
             "positions_checked": 0,
-            "actions": [],
+            "actions": closed_actions,
         }
 
     contracts_data = client.list_contracts()
     contracts_by_id = {c["contract_id"]: c for c in contracts_data["contracts"]}
 
-    actions = []
-    for p_raw in positions_data.get("positions", []):
+    actions = list(closed_actions)
+    for p_raw in active_positions:
         cid = p_raw["contract_id"]
         contract = contracts_by_id.get(cid)
         if not contract:
@@ -1148,6 +1319,8 @@ def risk_monitor_run(client: WaltClient) -> dict:
         try:
             res = evaluate_and_apply_position_risk(client, pos, current_funding_daily)
             if res and res.get("action") != "FAILED":
+                if res.get("action") == "CLOSE":
+                    current_snapshot.pop(str(cid), None)
                 actions.append({
                     "asset": pos.base_asset,
                     "action": res.get("action"),
@@ -1157,9 +1330,11 @@ def risk_monitor_run(client: WaltClient) -> dict:
         except Exception as e:
             log.error(f"{pos.base_asset} evaluate_and_apply_position_risk error: {e}")
 
+    _save_open_snapshot(current_snapshot, snapshot_path=snapshot_path)
+
     return {
         "ts": datetime.now(timezone.utc).isoformat(),
-        "positions_checked": len(positions_data.get("positions", [])),
+        "positions_checked": len(active_positions),
         "actions": actions,
     }
 

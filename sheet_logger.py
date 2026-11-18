@@ -7,6 +7,7 @@ Mencatat hasil daily scan, evaluasi Swarm AI (P1-P7), dan eksekusi order ke:
 """
 
 import os
+import io
 import csv
 import json
 import logging
@@ -219,6 +220,111 @@ def log_execution(executions: list[dict], filepath: str = "logs/executions_histo
             log.warning(f"Gagal kirim eksekusi ke Google Sheets Webhook: {e}")
 
     return {"executions_count": len(rows), "csv_logged": True}
+
+
+CLOSED_POSITIONS_HEADERS = [
+    "Timestamp (UTC)", "Asset", "Sisi", "Contract ID", "Entry Price ($)",
+    "Exit Price ($)", "Margin ($)", "PnL ($)", "Funding ($)", "Alasan Close"
+]
+
+
+def fetch_sheet_csv_rows(
+    sheet_name: str,
+    spreadsheet_id: Optional[str] = None,
+    expected_col_name: Optional[str] = None,
+    local_csv_fallback: Optional[str] = None,
+) -> list[list[str]]:
+    """
+    Ambil seluruh baris dari sheet tertentu via CSV export URL Google Sheets.
+    Jika expected_col_name diberikan, memvalidasi bahwa header baris pertama mengandung kolom tersebut
+    (mencegah false-positive saat Google Sheets gviz fallback ke sheet pertama jika sheet belum ada).
+    Fallback ke file CSV lokal jika Google Sheet tidak dapat diakses publik.
+    """
+    sheet_id = spreadsheet_id or os.environ.get("GOOGLE_SHEET_ID", DEFAULT_SPREADSHEET_ID)
+    if sheet_id:
+        export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
+        try:
+            r = httpx.get(export_url, follow_redirects=True, timeout=12.0)
+            if r.status_code == 200 and r.text and not r.text.lstrip().startswith("<"):
+                reader = list(csv.reader(io.StringIO(r.text)))
+                if reader:
+                    if expected_col_name:
+                        header_row = [c.strip() for c in reader[0]]
+                        if expected_col_name not in header_row:
+                            return []
+                    return reader
+        except Exception as e:
+            log.debug(f"CSV export fetch untuk sheet '{sheet_name}' gagal: {e}")
+
+    if local_csv_fallback and os.path.exists(local_csv_fallback):
+        try:
+            with open(local_csv_fallback, mode="r", encoding="utf-8") as f:
+                return list(csv.reader(f))
+        except Exception as e:
+            log.debug(f"Gagal baca fallback CSV lokal '{local_csv_fallback}': {e}")
+
+    return []
+
+
+def log_close(
+    asset: str,
+    side: str,
+    contract_id: int,
+    entry_price: float,
+    exit_price: float,
+    margin: float,
+    pnl_quote: float,
+    funding_quote: float,
+    reason: str,
+    filepath: str = "logs/closed_history.csv",
+) -> dict:
+    """
+    Catat penutupan posisi ke sheet 'Closed_Positions' via webhook dan ke logs/closed_history.csv.
+    Mengecek keberadaan header di sheet Closed_Positions melalui CSV export terlebih dahulu.
+    """
+    _ensure_dir(filepath)
+    file_exists = os.path.exists(filepath) and os.path.getsize(filepath) > 0
+
+    ts = datetime.now(timezone.utc).isoformat()
+    row = [
+        ts,
+        asset,
+        str(side or "").upper(),
+        contract_id,
+        round(float(entry_price or 0.0), 6),
+        round(float(exit_price or 0.0), 6),
+        round(float(margin or 0.0), 4),
+        round(float(pnl_quote or 0.0), 4),
+        round(float(funding_quote or 0.0), 4),
+        reason,
+    ]
+
+    with open(filepath, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(CLOSED_POSITIONS_HEADERS)
+        writer.writerow(row)
+
+    webhook_ok = False
+    webhook_url = _normalize_webhook_url(os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", DEFAULT_WEBHOOK_URL))
+    if webhook_url:
+        existing_rows = fetch_sheet_csv_rows(
+            "Closed_Positions",
+            expected_col_name="Exit Price ($)",
+        )
+        rows_to_send = [row] if existing_rows else [CLOSED_POSITIONS_HEADERS, row]
+        try:
+            r = httpx.post(
+                webhook_url,
+                json={"action": "log_close", "sheet": "Closed_Positions", "rows": rows_to_send},
+                follow_redirects=True,
+                timeout=20.0,
+            )
+            webhook_ok = r.status_code in (200, 302)
+        except Exception as e:
+            log.warning(f"Gagal kirim log_close ke Google Sheets Webhook: {e}")
+
+    return {"csv_logged": True, "webhook_logged": webhook_ok, "row": row}
 
 
 def fetch_latest_research_from_sheet(

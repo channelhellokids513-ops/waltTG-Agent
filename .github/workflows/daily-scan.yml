@@ -34,6 +34,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Restore and persist logs/snapshot cache
+        uses: actions/cache@v4
+        with:
+          path: logs/
+          key: walt-logs-state-${{ github.run_id }}
+          restore-keys: |
+            walt-logs-state-
+
       - name: Run daily scan and auto-execute
         env:
           WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}
