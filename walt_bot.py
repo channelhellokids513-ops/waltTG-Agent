@@ -848,7 +848,11 @@ def evaluate_and_apply_position_risk(
     # B. Kandidat dari Funding Lemah <0.1% (Lapis 2)
     if abs(current_funding_daily) < 0.001:
         l2_sl = round(pos.entry_price, 4)
-        if _sl_is_better(pos.side, l2_sl, candidate_sl) and _sl_is_improvement(pos, l2_sl):
+        l2_valid_side = (
+            (pos.side == "long" and l2_sl < pos.current_price)
+            or (pos.side == "short" and l2_sl > pos.current_price)
+        )
+        if l2_valid_side and _sl_is_better(pos.side, l2_sl, candidate_sl) and _sl_is_improvement(pos, l2_sl):
             candidate_sl = l2_sl
             sl_reason = "L2 Breakeven"
 
@@ -894,6 +898,49 @@ def evaluate_and_apply_position_risk(
     # Pastikan candidate_sl adalah improvement nyata dibanding pos.sl saat ini
     final_sl = candidate_sl if (candidate_sl is not None and _sl_is_improvement(pos, candidate_sl)) else None
     final_tp = new_tp
+
+    # --- Guard SL/TP Sisi Salah + Migrasi Posisi Lama ---
+    # LONG : final_sl < current_price dan final_tp > current_price
+    # SHORT: final_sl > current_price dan final_tp < current_price
+    sl_check = final_sl if final_sl is not None else target_sl
+    sl_breached = (
+        (pos.side == "long" and sl_check >= pos.current_price)
+        or (pos.side == "short" and sl_check <= pos.current_price)
+    )
+    if sl_breached:
+        log.warning(
+            f"[GUARD] {pos.base_asset}: SL 1% breached (current=${pos.current_price:.4f}, sl=${sl_check:.4f}) → tutup posisi"
+        )
+        preview = client.preview_close(pos.contract_id)
+        if preview and preview.get("ok"):
+            res = client.execute(preview["confirmationToken"])
+            return {
+                "action": "CLOSE",
+                "detail": "SL 1% breached (migrasi)",
+                "reason": "SL 1% breached (migrasi)",
+                "result": res,
+            }
+        return None
+
+    tp_check = final_tp if final_tp is not None else (pos.tp if pos.tp is not None else target_tp)
+    tp_breached = (
+        (pos.side == "long" and tp_check <= pos.current_price)
+        or (pos.side == "short" and tp_check >= pos.current_price)
+    )
+    if tp_breached:
+        log.warning(
+            f"[GUARD] {pos.base_asset}: TP breached (current=${pos.current_price:.4f}, tp=${tp_check:.4f}) → tutup posisi"
+        )
+        preview = client.preview_close(pos.contract_id)
+        if preview and preview.get("ok"):
+            res = client.execute(preview["confirmationToken"])
+            return {
+                "action": "CLOSE",
+                "detail": "TP breached",
+                "reason": "TP breached",
+                "result": res,
+            }
+        return None
 
     if final_tp is None and final_sl is None:
         return None
