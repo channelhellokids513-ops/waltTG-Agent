@@ -442,3 +442,57 @@ def test_dynamic_monitor_cadence_rules():
     assert sub_go_5 is True
     assert delay_go_5 == 270
     assert "Random 5-min" in reason_go_5
+
+
+# -----------------------------------------------------------------------------
+# 10. 3-Gear Adaptive Execution Engine (30m / 60m / 120m)
+# -----------------------------------------------------------------------------
+
+def test_evaluate_execution_gear_rules():
+    from walt_bot import Opportunity, evaluate_execution_gear
+
+    def _opp(asset: str, funding: float) -> Opportunity:
+        return Opportunity(
+            contract_id=1,
+            base_asset=asset,
+            funding_daily=funding,
+            volume_24h=5_000_000.0,
+            max_leverage=2,
+            side="short" if funding > 0 else "long",
+        )
+
+    # 1. Gear 3 Turbo (30m): >= 4 peluang >= 0.5%/hari
+    opps_many = [_opp("NVDA", 0.006), _opp("SNDK", 0.0055), _opp("MSTR", 0.006), _opp("TSLA", 0.0052)]
+    gear, interval, _ = evaluate_execution_gear(opps_many)
+    assert gear == "GEAR_3_TURBO_30M"
+    assert interval == 30
+
+    # 2. Gear 3 Turbo (30m): >= 2 peluang ekstrem >= 0.8%/hari
+    opps_extreme = [_opp("NVDA", 0.009), _opp("SNDK", 0.0085)]
+    gear_ex, interval_ex, _ = evaluate_execution_gear(opps_extreme)
+    assert gear_ex == "GEAR_3_TURBO_30M"
+    assert interval_ex == 30
+
+    # 3. Gear 3 Post-TP (30m): baru saja TP closed dan ada peluang >= 0.6%/hari
+    opps_post_tp = [_opp("SOL", 0.0065)]
+    gear_tp, interval_tp, _ = evaluate_execution_gear(opps_post_tp, recent_tp_closed=True)
+    assert gear_tp == "GEAR_3_POST_TP_30M"
+    assert interval_tp == 30
+
+    # 4. Gear 2 Normal (60m) vs Boost (30m): 2-3 peluang >= 0.5%/hari
+    opps_normal = [_opp("BTC", 0.0055), _opp("ETH", 0.0052)]
+    rng_60 = SimpleNamespace(random=lambda: 0.70)
+    gear_60, interval_60, _ = evaluate_execution_gear(opps_normal, rng=rng_60)
+    assert gear_60 == "GEAR_2_NORMAL_60M"
+    assert interval_60 == 60
+
+    rng_30 = SimpleNamespace(random=lambda: 0.15)
+    gear_30, interval_30, _ = evaluate_execution_gear(opps_normal, rng=rng_30)
+    assert gear_30 == "GEAR_2_BOOST_30M"
+    assert interval_30 == 30
+
+    # 5. Gear 1 Konservatif (120m / 2 jam): <= 1 peluang >= 0.5%/hari
+    opps_quiet = [_opp("AAPL", 0.0051)]
+    gear_120, interval_120, _ = evaluate_execution_gear(opps_quiet)
+    assert gear_120 == "GEAR_1_CONSERVATIVE_120M"
+    assert interval_120 == 120

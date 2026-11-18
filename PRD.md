@@ -120,16 +120,17 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
      - **Lapis 2:** Funding Integrity dengan **Hysteresis 0.1%/hari** (*emergency close* jika funding berlawanan arah $\ge 0.1\%$/hari, atau geser SL ke breakeven jika $< 0.1\%$/hari).
      - **Lapis 3:** *Deprecated* (digantikan oleh SL baseline 1.0%).
      - **Lapis 4:** **Opsi 3 Hybrid Ultimate (Zero-Risk + Pinch Lock + Instant Market-TP):** Profit $\ge +0.25\% \to$ lock SL di `Entry + 0.10%`; Profit $\ge +0.35\% \to$ lock SL di `Entry + 0.22%` & Pinch TP ke `Entry + 0.50%`; Profit $\ge +0.50\% \to$ **Instant Market-TP Close**.
-3. **Market Execute (`market-execute.yml` — Tiap 2 Jam di menit 43 WIB / `43 */2 * * *` UTC):**
-   - Berjalan 24/7 memanfaatkan likuiditas perpetual synthetic Walt.
-   - **Dynamic Slot Elasticity:** Kuota slot posisi beradaptasi elastis dari 5 slot (modal mikro <$30) hingga 15 slot (modal mapan).
-   - **Conviction-Based Sizing:** Margin dihitung berbasis besaran yield funding (hingga 1.35x), konsensus Swarm AI (hingga 1.25x), dan tier aset safe-haven (1.15x) dengan hard ceiling 15% dari total ekuitas.
-   - **Anti-Duplicate Filter:** Memeriksa `statuses=["open"]` dan memvalidasi `status in ('open', 'active')` agar tidak pernah terjadi pembukaan ganda pada kontrak yang sama.
-4. **Crypto Execute (`crypto-execute.yml` — Tiap 2 Jam di menit 11 WIB / `11 */2 * * *` UTC):**
-   - Modul mandiri untuk capture yield 10 crypto bluechip (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `AVAX`, `SUI`, `LINK`, `NEAR`, `AAVE`).
+3. **Market Execute (`market-execute.yml` — Dinamis 30 Menit / 1 Jam / 2 Jam dengan 3-Gear Adaptive Engine):**
+   - Berjalan 24/7 memanfaatkan likuiditas perpetual synthetic Walt dengan **3-Gear Adaptive Execution (`evaluate_execution_gear`)**:
+     - **Gear 3 (Turbo 30 Menit):** Aktif jika terdapat $\ge 4$ peluang funding $\ge 0.5\%$/hari, $\ge 2$ peluang ekstrem $\ge 0.8\%$/hari, atau baru saja ada posisi yang tertutup TP sementara peluang $\ge 0.6\%$/hari tersedia.
+     - **Gear 2 (Normal Aktif 1 Jam + Random Boost 30m 30%):** Aktif jika terdapat 2–3 peluang funding $\ge 0.5\%$/hari.
+     - **Gear 1 (Konservatif 2 Jam):** Aktif jika peluang funding sedang sepi ($\le 1$ aset).
+     - **Gear 0 (Smart Idle Gatekeeper):** Langsung *fast-exit* dalam <2 detik tanpa memanggil AI jika slot posisi sudah penuh.
+   - **Dynamic Slot Elasticity & Conviction Sizing:** Kuota slot elastis 5–15 slot berdasarkan Total Ekuitas dan pembobotan margin berbasis keyakinan (hard ceiling 15% ekuitas).
+4. **Crypto Execute (`crypto-execute.yml` — Dinamis 30 Menit / 1 Jam / 2 Jam dengan 3-Gear Adaptive Engine):**
+   - Modul mandiri untuk capture yield 10 crypto bluechip (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `AVAX`, `SUI`, `LINK`, `NEAR`, `AAVE`) dengan mekanisme **3-Gear Adaptive (30m / 1h / 2h)** yang identik.
    - Strict altcoin exclusion: token spekulatif dan memecoin di-blacklist total.
-   - Dynamic TP/SL: TP tipis +1.0%, SL 2.5% (turnover modal cepat).
-   - Sinkronisasi Cloud Scheduler `walt-crypto-execute` di region Jakarta.
+   - Wick-Catcher TP +0.60% & SL 1.0% (turnover modal cepat).
 
 ### 3.4 Langkah Penerapan Segera (Fase 1 Action Plan)
 - [x] Pastikan GitHub Secret terkonfigurasi lengkap di repository (`WALT_CLIENT_ID`, `WALT_REFRESH_TOKEN`, `DASHSCOPE_API_KEY`, `DASHSCOPE_API_GEMINI_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GOOGLE_SHEET_WEBHOOK_URL`, `GH_PAT`).

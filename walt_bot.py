@@ -1291,6 +1291,110 @@ def decide_dynamic_monitor_cadence(
     return False, 0, "Kategori GO stabil (interval normal 10 menit)"
 
 
+def evaluate_execution_gear(
+    opps: list[Opportunity],
+    recent_tp_closed: bool = False,
+    rng: Optional[Any] = None,
+) -> tuple[str, int, str]:
+    """
+    Tentukan Gigi Kecepatan (Gear) dan interval eksekusi (30, 60, atau 120 menit)
+    untuk Market Execute & Crypto Execute berdasarkan peluang funding dari scan:
+    - GEAR 3 (Turbo 30 Menit):
+      * Terdapat >= 4 aset dengan |funding_daily| >= 0.5%/hari, ATAU
+      * Terdapat >= 2 aset dengan funding ekstrem (|funding_daily| >= 0.8%/hari), ATAU
+      * Baru saja ada posisi yang kena TP (recent_tp_closed=True) dan ada >= 1 peluang >= 0.6%/hari.
+    - GEAR 2 (Normal Aktif 60 Menit / 1 Jam, sesekali 30 Menit random 30%):
+      * Terdapat 2 - 3 aset dengan |funding_daily| >= 0.5%/hari.
+    - GEAR 1 (Konservatif 120 Menit / 2 Jam):
+      * Peluang funding tipis (<= 1 aset yang memenuhi >= 0.5%/hari).
+    Return (gear_label, interval_minutes, reason).
+    """
+    rand = rng if rng is not None else random
+    qualifying = [o for o in opps if abs(o.funding_daily) >= MIN_FUNDING_DAILY]
+    extreme = [o for o in qualifying if abs(o.funding_daily) >= 0.008]
+    strong = [o for o in qualifying if abs(o.funding_daily) >= 0.006]
+
+    if len(qualifying) >= 4 or len(extreme) >= 2:
+        return (
+            "GEAR_3_TURBO_30M",
+            30,
+            f"Panen Raya ({len(qualifying)} peluang >=0.5%, {len(extreme)} ekstrem >=0.8%/hari) → interval 30 menit",
+        )
+
+    if recent_tp_closed and len(strong) >= 1:
+        return (
+            "GEAR_3_POST_TP_30M",
+            30,
+            f"Post-TP Re-Deploy ({len(strong)} peluang >=0.6%/hari tersedia) → interval 30 menit",
+        )
+
+    if len(qualifying) >= 2:
+        if rand.random() < 0.30:
+            return (
+                "GEAR_2_BOOST_30M",
+                30,
+                f"Aktif Normal ({len(qualifying)} peluang >=0.5% + Random Boost 30m) → interval 30 menit",
+            )
+        return (
+            "GEAR_2_NORMAL_60M",
+            60,
+            f"Aktif Normal ({len(qualifying)} peluang >=0.5%/hari) → interval 60 menit (1 jam)",
+        )
+
+    return (
+        "GEAR_1_CONSERVATIVE_120M",
+        120,
+        f"Konservatif ({len(qualifying)} peluang >=0.5%/hari) → interval 120 menit (2 jam)",
+    )
+
+
+def _load_execution_regime(regime_path: str = "logs/market_regime.json") -> dict:
+    """Baca state rezim eksekusi (Gear & timestamp eksekusi terakhir) dari disk."""
+    if os.path.exists(regime_path):
+        try:
+            with open(regime_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception as e:
+            log.debug(f"Gagal membaca market_regime.json: {e}")
+    return {}
+
+
+def _save_execution_regime(data: dict, regime_path: str = "logs/market_regime.json"):
+    """Simpan state rezim eksekusi ke disk."""
+    try:
+        os.makedirs(os.path.dirname(regime_path), exist_ok=True)
+        with open(regime_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        log.debug(f"Gagal menyimpan market_regime.json: {e}")
+
+
+def _update_regime_state(
+    category: Literal["market", "crypto"],
+    opps: list[Opportunity],
+    mark_executed: bool = False,
+    recent_tp_closed: bool = False,
+    regime_path: str = "logs/market_regime.json",
+    rng: Optional[Any] = None,
+) -> tuple[str, int, str]:
+    """Update Gear, interval, dan timestamp eksekusi untuk 'market' atau 'crypto'."""
+    state = _load_execution_regime(regime_path)
+    gear, interval_min, reason = evaluate_execution_gear(
+        opps, recent_tp_closed=recent_tp_closed, rng=rng
+    )
+    state[f"{category}_gear"] = gear
+    state[f"{category}_interval_min"] = interval_min
+    state[f"{category}_reason"] = reason
+    state[f"{category}_opps_count"] = len(opps)
+    if mark_executed:
+        state[f"last_{category}_exec_ts"] = time.time()
+    state["updated_at"] = datetime.now(timezone.utc).isoformat()
+    _save_execution_regime(state, regime_path=regime_path)
+    return gear, interval_min, reason
+
+
 def _detect_and_log_exchange_closes(
     client: WaltClient,
     active_positions: list[dict],
@@ -1529,10 +1633,135 @@ def _run_single_monitor_pass(
     return remaining_positions, current_snapshot, actions, len(active_positions)
 
 
+def _maybe_run_adaptive_executions(
+    client: WaltClient,
+    contracts_by_id: dict[int, dict],
+    active_positions_count: int,
+    recent_tp_closed: bool = False,
+    regime_path: str = "logs/market_regime.json",
+    rng: Optional[Any] = None,
+) -> list[dict]:
+    """
+    Evaluasi apakah Market Execute (Saham & Komoditas) atau Crypto Execute perlu dipicu lebih cepat
+    (30 menit pada Gear 3 / 60 menit pada Gear 2 / 120 menit pada Gear 1) berdasarkan parameter funding
+    dan ketersediaan slot posisi.
+    """
+    state = _load_execution_regime(regime_path)
+    now = time.time()
+
+    last_market_ts = float(state.get("last_market_exec_ts", 0.0) or 0.0)
+    last_crypto_ts = float(state.get("last_crypto_exec_ts", 0.0) or 0.0)
+
+    # Jika belum pernah tercatat di cache, inisialisasi timestamp sekarang agar mulai menghitung interval
+    if last_market_ts <= 0 or last_crypto_ts <= 0:
+        if last_market_ts <= 0:
+            state["last_market_exec_ts"] = now
+            last_market_ts = now
+        if last_crypto_ts <= 0:
+            state["last_crypto_exec_ts"] = now
+            last_crypto_ts = now
+        _save_execution_regime(state, regime_path=regime_path)
+        if not recent_tp_closed:
+            return []
+
+    elapsed_market_min = (now - last_market_ts) / 60.0
+    elapsed_crypto_min = (now - last_crypto_ts) / 60.0
+
+    # Pengecekan paling cepat adalah 30 menit (toleransi 28 menit untuk jitter cron), kecuali baru saja TP
+    if not recent_tp_closed and elapsed_market_min < 28.0 and elapsed_crypto_min < 28.0:
+        return []
+
+    # Ambil daftar kontrak jika belum ada untuk mengevaluasi peluang funding terkini
+    if not contracts_by_id:
+        try:
+            c_data = client.list_contracts()
+            for c in c_data.get("contracts", []):
+                contracts_by_id[c["contract_id"]] = c
+        except Exception as e:
+            log.warning(f"Gagal ambil contracts untuk adaptive execution check: {e}")
+            return []
+
+    all_contracts = list(contracts_by_id.values())
+    market_opps = rank_opportunities(all_contracts, allowed_assets=(ALLOWED_STOCKS | ALLOWED_COMMODITIES))
+    crypto_opps = rank_opportunities(all_contracts, allowed_assets=ALLOWED_CRYPTO)
+
+    m_gear, m_interval, m_reason = _update_regime_state(
+        "market", market_opps, mark_executed=False, recent_tp_closed=recent_tp_closed, regime_path=regime_path, rng=rng
+    )
+    c_gear, c_interval, c_reason = _update_regime_state(
+        "crypto", crypto_opps, mark_executed=False, recent_tp_closed=recent_tp_closed, regime_path=regime_path, rng=rng
+    )
+
+    due_market = elapsed_market_min >= (m_interval - 2.0) or (recent_tp_closed and len(market_opps) >= 2 and elapsed_market_min >= 15.0)
+    due_crypto = elapsed_crypto_min >= (c_interval - 2.0) or (recent_tp_closed and len(crypto_opps) >= 2 and elapsed_crypto_min >= 15.0)
+
+    if not due_market and not due_crypto:
+        return []
+
+    # Cek balance & kuota slot sebelum mengeksekusi (Gear 0 Smart Gatekeeper)
+    try:
+        bal = client.balance()
+        accounts = bal.get("accounts", [])
+        available = float(accounts[0].get("balance_available", 0.0)) if accounts else 0.0
+        open_pos = client.list_positions(statuses=["open"])
+        open_list = [
+            p for p in open_pos.get("positions", [])
+            if str(p.get("status", "open")).lower() in ("open", "active")
+        ]
+        total_eq = get_total_equity(bal, open_pos)
+        max_slots = get_dynamic_max_slots(total_eq)
+        if len(open_list) >= max_slots or available < 3.0:
+            log.info(
+                f"💤 [GEAR 0 GATEKEEPER] Adaptive execute ditunda: Slot {len(open_list)}/{max_slots}, Available ${available:.2f}"
+            )
+            return []
+    except Exception as e:
+        log.warning(f"Gagal verifikasi saldo/slot untuk adaptive execution: {e}")
+        return []
+
+    dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
+    triggered_actions: list[dict] = []
+
+    if due_market:
+        log.info(
+            f"🚀 [ADAPTIVE EXECUTE - {m_gear}] Memicu Market Execute "
+            f"(elapsed {elapsed_market_min:.1f}m >= {m_interval}m | {m_reason})"
+        )
+        try:
+            m_res = market_execute(client, dry_run=dry_run, title=f"🚀 Walt Market Execute ({m_gear})")
+            exec_cnt = len([e for e in m_res.get("executions", []) if e.get("verdict") in ("EXECUTED", "DRY_RUN")])
+            triggered_actions.append({
+                "asset": "MARKET_UNIVERSE",
+                "action": "ADAPTIVE_MARKET_EXECUTE",
+                "detail": f"{m_gear} ({m_interval}m): {exec_cnt} opened",
+            })
+        except Exception as e:
+            log.error(f"Adaptive market_execute error: {e}")
+
+    if due_crypto:
+        log.info(
+            f"⚡ [ADAPTIVE EXECUTE - {c_gear}] Memicu Crypto Execute "
+            f"(elapsed {elapsed_crypto_min:.1f}m >= {c_interval}m | {c_reason})"
+        )
+        try:
+            c_res = crypto_execute(client, dry_run=dry_run)
+            exec_cnt = len([e for e in c_res.get("executions", []) if e.get("verdict") in ("EXECUTED", "DRY_RUN")])
+            triggered_actions.append({
+                "asset": "CRYPTO_UNIVERSE",
+                "action": "ADAPTIVE_CRYPTO_EXECUTE",
+                "detail": f"{c_gear} ({c_interval}m): {exec_cnt} opened",
+            })
+        except Exception as e:
+            log.error(f"Adaptive crypto_execute error: {e}")
+
+    return triggered_actions
+
+
 def risk_monitor_run(
     client: WaltClient,
     snapshot_path: str = "logs/open_snapshot.json",
     enable_dynamic_subcycle: Optional[bool] = None,
+    enable_adaptive_execute: Optional[bool] = None,
     sleep_fn: Any = time.sleep,
     rng: Optional[Any] = None,
 ) -> dict:
@@ -1547,13 +1776,29 @@ def risk_monitor_run(
     """
     if enable_dynamic_subcycle is None:
         enable_dynamic_subcycle = os.getenv("DYNAMIC_MONITOR_SUBCYCLE", "true").lower() == "true"
+    if enable_adaptive_execute is None:
+        enable_adaptive_execute = os.getenv("ADAPTIVE_EXECUTION_ENABLED", "true").lower() == "true"
 
     contracts_by_id: dict[int, dict] = {}
     remaining_positions, current_snapshot, actions, checked_count = _run_single_monitor_pass(
         client, contracts_by_id, snapshot_path=snapshot_path
     )
 
+    recent_tp_closed = any(
+        "tp" in str(a.get("detail", "")).lower() or "trailing" in str(a.get("detail", "")).lower()
+        for a in actions
+    )
+
     if checked_count == 0:
+        if enable_adaptive_execute:
+            adaptive_acts = _maybe_run_adaptive_executions(
+                client,
+                contracts_by_id,
+                active_positions_count=0,
+                recent_tp_closed=recent_tp_closed,
+                rng=rng,
+            )
+            actions.extend(adaptive_acts)
         log.info("💤 [SMART IDLE] 0 posisi aktif. Semua order aman/kas cair. Masuk mode tidur (fast-exit).")
         return {
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -1583,7 +1828,7 @@ def risk_monitor_run(
             f"tunggu {delay_sec}s (~{delay_sec/60:.1f} menit) untuk evaluasi sub-cycle ke-2..."
         )
         sleep_fn(delay_sec)
-        _, _, actions_2, checked_2 = _run_single_monitor_pass(
+        remaining_positions, current_snapshot, actions_2, checked_2 = _run_single_monitor_pass(
             client, contracts_by_id, snapshot_path=snapshot_path, cycle_label="5m-SubCycle"
         )
         actions.extend(actions_2)
@@ -1593,6 +1838,20 @@ def risk_monitor_run(
         )
     else:
         log.info(f"⏱️ [DYNAMIC MONITOR] Interval normal 10 menit ({cadence_reason}).")
+
+    if enable_adaptive_execute:
+        recent_tp_closed = any(
+            "tp" in str(a.get("detail", "")).lower() or "trailing" in str(a.get("detail", "")).lower()
+            for a in actions
+        )
+        adaptive_acts = _maybe_run_adaptive_executions(
+            client,
+            contracts_by_id,
+            active_positions_count=len(remaining_positions),
+            recent_tp_closed=recent_tp_closed,
+            rng=rng,
+        )
+        actions.extend(adaptive_acts)
 
     return {
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -1617,6 +1876,12 @@ def daily_scan(client: WaltClient) -> dict:
     contracts = client.list_contracts()
 
     opps = rank_opportunities(contracts["contracts"])
+    market_opps = rank_opportunities(contracts["contracts"], allowed_assets=(ALLOWED_STOCKS | ALLOWED_COMMODITIES))
+    crypto_opps = rank_opportunities(contracts["contracts"], allowed_assets=ALLOWED_CRYPTO)
+    m_gear, m_int, m_reason = _update_regime_state("market", market_opps, mark_executed=False)
+    c_gear, c_int, c_reason = _update_regime_state("crypto", crypto_opps, mark_executed=False)
+    log.info(f"⚙️ [EXECUTION GEAR] Market: {m_gear} ({m_int}m) | Crypto: {c_gear} ({c_int}m)")
+
     total_equity = get_total_equity(balance, positions)
     scan_limit = max(5, get_dynamic_max_slots(total_equity))
     top_candidates = opps[:scan_limit]
@@ -1667,6 +1932,14 @@ def daily_scan(client: WaltClient) -> dict:
             for o in top_candidates
         ],
         "_raw_opportunities": opps,
+        "execution_regime": {
+            "market_gear": m_gear,
+            "market_interval_min": m_int,
+            "market_reason": m_reason,
+            "crypto_gear": c_gear,
+            "crypto_interval_min": c_int,
+            "crypto_reason": c_reason,
+        },
         "readiness": readiness,
     }
 
@@ -2012,6 +2285,12 @@ def market_execute(
     contracts_data = client.list_contracts()
     opps = rank_opportunities(contracts_data["contracts"], allowed_assets=target_universe)
 
+    category_key: Literal["market", "crypto"] = "crypto" if target_universe == ALLOWED_CRYPTO else "market"
+    gear_label, gear_interval_min, gear_reason = _update_regime_state(
+        category_key, opps, mark_executed=True
+    )
+    log.info(f"⚙️ [ADAPTIVE GEAR - {category_key.upper()}] {gear_label} ({gear_interval_min}m): {gear_reason}")
+
     # Verifikasi posisi yang benar-benar aktif (statuses=["open"]) secara defensif
     open_contract_ids = set()
     position_check_failed = False
@@ -2034,6 +2313,24 @@ def market_execute(
     # Dynamic Slot Elasticity berbasis Total Ekuitas (available + margin open positions)
     total_equity = get_total_equity(balance_data, existing)
     max_slots = get_dynamic_max_slots(total_equity)
+    active_slot_count = len(open_contract_ids)
+
+    # GEAR 0 Smart Idle Gatekeeper: Jika slot sudah penuh, langsung fast-exit tanpa memanggil riset AI!
+    if active_slot_count >= max_slots:
+        log.info(
+            f"💤 [GEAR 0 SMART GATEKEEPER] Slot posisi sudah penuh ({active_slot_count}/{max_slots}). "
+            "Fast-exit tanpa riset AI."
+        )
+        return {
+            "status": "slots_full",
+            "active_slots": active_slot_count,
+            "max_slots": max_slots,
+            "gear": gear_label,
+            "interval_minutes": gear_interval_min,
+            "executions": [],
+            "deployed": 0.0,
+            "available": available,
+        }
 
     # Research saham: Utamakan hasil penelitian dari Spreadsheet/CSV terlebih dahulu (hemat API & cepat)
     from sheet_logger import fetch_latest_research_from_sheet
