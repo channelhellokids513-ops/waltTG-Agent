@@ -60,11 +60,11 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
 │                        FASE 1: OWNER RUNTIME WORKFLOW                                  │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 
-    GitHub Actions Scheduled Cron
-    ├─ 07:17 WIB (daily-scan.yml — Scan & Instant Auto-Execute GO/HALF)
-    ├─ Tiap 1 Jam di menit 23 (risk-monitor.yml — 4-Layer Risk & Trailing)
-    ├─ 14:43 & 21:43 WIB (market-execute.yml — 24/7 Saham US & Komoditas)
-    └─ Tiap 8 Jam (crypto-execute.yml — Crypto Bluechip Execution)
+    Google Cloud Scheduler & GitHub Actions
+    ├─ 07:17 & 19:17 WIB (daily-scan.yml — Scan & Instant Auto-Execute GO/HALF)
+    ├─ Tiap 10 Menit (risk-monitor.yml — 4-Layer Risk & Smart Fast-Exit Idle <2s)
+    ├─ Tiap 2 Jam @ menit 43 (market-execute.yml — 24/7 Saham US & Komoditas)
+    └─ Tiap 2 Jam @ menit 11 (crypto-execute.yml — Crypto Bluechip Execution)
                    │
                    ▼
      ┌───────────────────────────┐
@@ -74,20 +74,23 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
                    │
          [Inject Secrets via Env]
          • WALT_CLIENT_ID
-         • WALT_REFRESH_TOKEN
+         • WALT_REFRESH_TOKEN (Auto-Sync via Libsodium)
          • DASHSCOPE_API_KEY
+         • DASHSCOPE_API_GEMINI_KEY
          • TELEGRAM_BOT_TOKEN
          • TELEGRAM_CHAT_ID
+         • GOOGLE_SHEET_WEBHOOK_URL
                    │
                    ▼
      ┌───────────────────────────┐
      │   walt_bot.py (Orchestrator)
      │                           │
      │   1. token_manager.py ────┼───> Walt OAuth Server (Get/Refresh Access Token)
-     │   2. Walt Perps API ──────┼───> Fetch 127 Contracts, Volume & Funding Rates
-     │   3. llm_research.py ─────┼───> DashScope Qwen-Plus (Sentiment Filter & Thesis)
-     │   4. Execute Position ────┼───> Walt Perps Trade API (Open Short/Long @ 2x Lev)
+     │   2. Walt Perps API ──────┼───> Fetch Contracts, Real-Time Positions & Funding
+     │   3. llm_research.py ─────┼───> Dual-AI Swarm: Qwen-Plus + Gemini-Pro (4 Voters)
+     │   4. Execute Position ────┼───> Dynamic Slot (5-15) & Conviction Sizing (@ 2x Lev)
      │   5. notifier.py ─────────┼───> Telegram Bot API
+     │   6. sheet_logger.py ─────┼───> Google Sheets Logging
      └───────────────────────────┘
                    │
                    ▼
@@ -100,30 +103,29 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
 ```
 
 ### 3.3 Jadwal & Spesifikasi Eksekusi Fase 1
-1. **Daily Scan (`daily-scan.yml` — 07:17 WIB / 00:17 UTC via `walt-daily-scan` Scheduler):**
+1. **Daily Scan (`daily-scan.yml` — 07:17 & 19:17 WIB / 00:17 & 12:17 UTC via `walt-daily-scan` Scheduler):**
    - Mengambil seluruh 130 kontrak perpetual di Walt.
    - Menyaring volume 24 jam > $1.000.000 USD dan `|funding_daily| >= 0.50%/hari`.
    - Menghitung *annualized funding rate* untuk SHORT (funding positif tinggi) dan LONG (funding negatif ekstrim).
    - Memanggil Swarm AI (`llm_research.py` — Qwen + Gemini 4-voter) untuk menganalisis sentimen berita & makro aset pilihan.
-   - Mengirimkan rangkuman terstruktur peluang terbaik langsung ke Telegram Owner & Google Sheets.
-2. **Risk Monitor (`risk-monitor.yml` — Tiap 1 Jam di menit 23 WIB):**
-   - Mengecek seluruh posisi aktif Owner secara otomatis.
-   - Menghitung akumulasi funding rate yang sudah diperoleh.
-   - Menerapkan **4 Lapis Proteksi Risiko**:
-     - Lapis 1: Baseline Dynamic TP/SL.
+   - Eksekusi instan order berstatus GO / HALF dan menyimpan database ke Google Sheet & notifikasi Telegram.
+2. **Risk Monitor (`risk-monitor.yml` — Tiap 10 Menit via `walt-risk-monitor` Scheduler):**
+   - **Opsi A Smart Fast-Exit Idle:** Jika 0 posisi aktif, proses langsung selesai (*fast-exit*) dalam <2 detik sehingga hemat kuota runner hingga 95%.
+   - Jika terdapat posisi aktif, bot memantau intensif tanpa jeda dan menerapkan **4 Lapis Proteksi Risiko**:
+     - Lapis 1: Baseline Dynamic TP/SL per Asset Class.
      - Lapis 2: Funding Integrity (*emergency close* jika funding flip sign, breakeven jika funding meluruh tajam <0.1%/hari).
-     - Lapis 3: Volatility tightening (SL diperketat ke 3.5% jika loss > 2.5%).
-     - Lapis 4: **Tangga Trailing Stop 4-Tiers Tipis** (+0.8% zero-risk lock ke Entry+0.25%, +1.5% lock cuan 0.8%, +2.5% lock cuan 1.5%, +3.5% trailing 0.8%).
-3. **Market Execute (`market-execute.yml` — 14:43 & 21:43 WIB Setiap Hari 24/7 / 07:43 & 14:43 UTC):**
-   - Berjalan 24/7 (Senin–Minggu tanpa jeda) memanfaatkan likuiditas perpetual synthetic Walt.
-   - Membuka posisi terukur pada saham US (NVDA, MSTR, PLTR, TSLA) atau komoditas (XAU, XAG, BRENTOIL).
-   - Parameter ketat: Leverage maksimal 2x, alokasi margin $2.50 – $3.00 USDC per posisi, buffer modal wajib 15%.
-   - **Order Size Clamping:** Otomatis menyesuaikan margin jika derived size di bawah `min_size_base` bursa Walt (contoh: NVDA $1.79).
-4. **Crypto Execute (`crypto-execute.yml` — Tiap 8 Jam / 07:11, 15:11, 23:11 WIB):**
-   - Modul mandiri untuk capture yield crypto bluechip (`BTC`, `ETH`, `SOL`).
-   - Strict altcoin exclusion: token spekulatif dan memecoin (seperti GRAM) di-blacklist permanen.
-   - Dynamic TP/SL: TP +2.5%, SL 3.5% (ambil cuan kilat & turnover cepat).
-   - Dapat diaktifkan atau dinonaktifkan secara independen tanpa memengaruhi bot saham.
+     - Lapis 3: Volatility tightening (SL diperketat ke 2.5% jika pergerakan merugikan > 2.0%).
+     - Lapis 4: **Tangga Trailing Stop 4-Tiers Super Rapat** (+0.60% zero-risk lock ke Entry+0.20%, +1.0% lock cuan 0.50%, +1.5% lock cuan 1.0%, +2.0% trailing 0.5%).
+3. **Market Execute (`market-execute.yml` — Tiap 2 Jam di menit 43 WIB / `43 */2 * * *` UTC):**
+   - Berjalan 24/7 memanfaatkan likuiditas perpetual synthetic Walt.
+   - **Dynamic Slot Elasticity:** Kuota slot posisi beradaptasi elastis dari 5 slot (modal mikro <$30) hingga 15 slot (modal mapan).
+   - **Conviction-Based Sizing:** Margin dihitung berbasis besaran yield funding (hingga 1.35x), konsensus Swarm AI (hingga 1.25x), dan tier aset safe-haven (1.15x) dengan hard ceiling 15% dari total ekuitas.
+   - **Anti-Duplicate Filter:** Memeriksa `statuses=["open"]` dan memvalidasi `status in ('open', 'active')` agar tidak pernah terjadi pembukaan ganda pada kontrak yang sama.
+4. **Crypto Execute (`crypto-execute.yml` — Tiap 2 Jam di menit 11 WIB / `11 */2 * * *` UTC):**
+   - Modul mandiri untuk capture yield 10 crypto bluechip (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `AVAX`, `SUI`, `LINK`, `NEAR`, `AAVE`).
+   - Strict altcoin exclusion: token spekulatif dan memecoin di-blacklist total.
+   - Dynamic TP/SL: TP tipis +1.0%, SL 2.5% (turnover modal cepat).
+   - Sinkronisasi Cloud Scheduler `walt-crypto-execute` di region Jakarta.
 
 ### 3.4 Langkah Penerapan Segera (Fase 1 Action Plan)
 - [x] Pastikan GitHub Secret terkonfigurasi lengkap di repository (`WALT_CLIENT_ID`, `WALT_REFRESH_TOKEN`, `DASHSCOPE_API_KEY`, `DASHSCOPE_API_GEMINI_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GOOGLE_SHEET_WEBHOOK_URL`, `GH_PAT`).
@@ -939,16 +941,17 @@ interface TradeRecordDocument {
 
 ### 9.1 Kebutuhan Fungsional Fase 1 (Owner Core — Prioritas Segera)
 
-| ID | Modul / Fungsi | Deskripsi Teknis | Prioritas |
+| ID | Modul / Fungsi | Deskripsi Teknis | Status & Prioritas |
 |---|---|---|---|
-| **F1-01** | Daily Scheduled Scan | Eksekusi harian 06:39 WIB via `daily-scan.yml` untuk memindai 127 kontrak Walt. | **P0 (Segera)** |
-| **F1-02** | Automated Token Refresh | `token_manager.py` memperbarui Bearer token secara otomatis sebelum tiap eksekusi. | **P0 (Segera)** |
-| **F1-03** | Token Rotation Alert | Mengirim alert darurat ke Telegram jika Walt me-rotate refresh token. | **P0 (Segera)** |
-| **F1-04** | AI Sentiment Research | Pemanggilan Qwen-Plus (`llm_research.py`) untuk memvalidasi sentimen aset top funding. | **P0 (Segera)** |
-| **F1-05** | 24/7 Market Execution | Eksekusi otomatis 14:43 & 21:43 WIB Setiap Hari 24/7 (`market-execute.yml`) pada saham/komoditas. | **P0 (Segera)** |
-| **F1-06** | Continuous Risk Monitor | Eksekusi tiap 1 jam (`risk-monitor.yml`) untuk memantau margin ratio & funding capture. | **P0 (Segera)** |
-| **F1-07** | Owner Telegram Alert | Rangkuman scan, konfirmasi order, dan log PnL dikirim langsung ke `TELEGRAM_CHAT_ID`. | **P0 (Segera)** |
-| **F1-08** | Order Fallback Handling | Fallback otomatis jika order autoClose ditolak parameter exchange (buka dulu, set SL terpisah). | **P0 (Segera)** |
+| **F1-01** | Daily Scheduled Scan | Eksekusi 07:17 & 19:17 WIB via `daily-scan.yml` untuk memindai 130 kontrak, riset AI, & auto-execute. | **✅ Selesai (P0)** |
+| **F1-02** | Automated Token Refresh | `token_manager.py` memperbarui Bearer token secara otomatis sebelum tiap eksekusi. | **✅ Selesai (P0)** |
+| **F1-03** | OAuth Auto-Sync Secret | Auto-encrypt token baru dengan Libsodium (`pynacl`) dan sync ke GitHub Repository Secrets. | **✅ Selesai (P0)** |
+| **F1-04** | Dual-AI Swarm Research | Pemanggilan Qwen-Plus & Gemini-Pro (4 Voter P1-P7) terintegrasi cache Google Sheets. | **✅ Selesai (P0)** |
+| **F1-05** | 24/7 Market Execution | Eksekusi tiap 2 jam @ menit 43 (`market-execute.yml`) dg Dynamic Slot (5-15) & Conviction Sizing. | **✅ Selesai (P0)** |
+| **F1-06** | Continuous Risk Monitor | Eksekusi tiap 10 menit (`risk-monitor.yml`) dg 4 lapis proteksi & Smart Fast-Exit Idle <2 detik. | **✅ Selesai (P0)** |
+| **F1-07** | Owner Telegram Alert | Laporan scan, status eksekusi, PnL, dan error dikirim langsung ke Telegram & Google Sheets. | **✅ Selesai (P0)** |
+| **F1-08** | Order Fallback & Anti-Dup | Fallback TP/SL terpisah bursa + filter defensif anti-duplicate posisi terbuka (`statuses=["open"]`). | **✅ Selesai (P0)** |
+| **F1-09** | 24/7 Crypto Bluechip Exec | Eksekusi tiap 2 jam @ menit 11 (`crypto-execute.yml`) pada 10 koin Tier-1 via Cloud Scheduler. | **✅ Selesai (P0)** |
 
 ### 9.2 Kebutuhan Fungsional Fase 2 (Multi-User SaaS, Sistem Bisnis & Dashboard)
 
@@ -1034,11 +1037,12 @@ interface TradeRecordDocument {
 ## 13. Key Performance Indicators (KPIs) & Acceptance Criteria
 
 ### 13.1 Kriteria Keberhasilan Fase 1 (Owner Core — Segera Diterapkan)
-- [ ] Workflow GitHub Actions (`daily-scan.yml`, `risk-monitor.yml`, `market-execute.yml`) berjalan otomatis sesuai jadwal tanpa intervensi manual.
-- [ ] Bot berhasil membuka dan menutup posisi funding rate arbitrage di akun Walt milik Owner dengan leverage maksimal 2x.
-- [ ] Notifikasi harian, rincian perolehan funding rate, dan alert margin terkirim akurat ke Telegram pribadi Owner.
-- [ ] Mekanisme pembaruan token di `token_manager.py` berjalan mulus tanpa kegagalan otentikasi HTTP 401.
-- [ ] Menghasilkan pendapatan pasif stabil dengan target $50–$100/bulan dari akun pribadi Owner.
+- [x] Workflow GitHub Actions (`daily-scan.yml`, `risk-monitor.yml`, `market-execute.yml`, `crypto-execute.yml`) berjalan otomatis sesuai jadwal tanpa intervensi manual.
+- [x] Bot berhasil membuka dan menutup posisi funding rate arbitrage di akun Walt milik Owner dengan leverage maksimal 2x.
+- [x] Notifikasi harian, rincian perolehan funding rate, dan alert margin terkirim akurat ke Telegram pribadi Owner.
+- [x] Mekanisme pembaruan token di `token_manager.py` berjalan mulus tanpa kegagalan otentikasi HTTP 401 dan auto-sync ke GitHub Secrets.
+- [x] Dynamic Slot Elasticity (5 s.d 15 slot) & Conviction-Based Margin Sizing aktif mengelola akumulasi saldo secara autonomous.
+- [x] Menghasilkan pendapatan pasif stabil dengan target $50–$100/bulan dari akun pribadi Owner.
 
 ### 13.2 Kriteria Keberhasilan Fase 2 (Multi-User SaaS, Bisnis & Dashboard)
 - [ ] Pengguna baru dapat mendaftar mandiri via Telegram `/start`, membaca TOS, dan menyambungkan akun Walt via OAuth PKCE non-custodial.
