@@ -1185,7 +1185,7 @@ def daily_scan(client: WaltClient) -> dict:
             }
             for o in top_candidates
         ],
-        "_raw_opportunities": top_candidates,
+        "_raw_opportunities": opps,
         "readiness": readiness,
     }
 
@@ -1359,11 +1359,19 @@ def scan_with_research(
         )
 
         raw_opps = summary.get("_raw_opportunities", [])
-        for opp in raw_opps[:max_slots]:
+        for opp in raw_opps:
             if active_slot_count >= max_slots:
                 log.info(f"  Slot maksimal tercapai ({active_slot_count}/{max_slots}), hentikan alokasi.")
                 break
+            if deployed >= target_deploy or (available - deployed) < 3.0:
+                log.info(f"  Buffer saldo tercapai (${deployed:.2f}/${target_deploy:.2f}), hentikan alokasi.")
+                break
             asset = opp.base_asset
+            if asset in ALLOWED_STOCKS and asset not in researches and (qwen or gemini):
+                try:
+                    researches[asset] = research_stock(asset, qwen=qwen, gemini=gemini)
+                except Exception as e:
+                    log.warning(f"  ✗ research {asset} failed: {e}")
             research = researches.get(asset)
             verdict, reason, mult = decide_go_nogo(opp, research)
 
@@ -1401,7 +1409,7 @@ def scan_with_research(
                         "asset": asset, "side": opp.side, "verdict": "SKIP",
                         "reason": f"buffer saldo tercapai (${deployed:.2f}/${target_deploy:.2f})",
                     })
-                    continue
+                    break
 
                 if dry_run:
                     log.info(f"  🧪 DRY_RUN {opp.side.upper()} {asset} margin ${margin:.2f}")
@@ -1529,15 +1537,20 @@ def market_execute(
         else None
     )
     researches: dict[str, Research] = {}
-    for opp in opps[:max_slots]:
+    otf_research_calls = 0
+    max_otf_calls = max_slots * 2
+    for opp in opps:
         if opp.base_asset in ALLOWED_STOCKS:
             if opp.base_asset in cached_researches:
                 cached = cached_researches[opp.base_asset]
                 log.info(f"  ✓ Pakai riset spreadsheet {opp.base_asset}: skor {cached.final_score:+.2f}, sentimen {cached.news_sentiment}")
                 researches[opp.base_asset] = cached
-            elif qwen or gemini:
+            elif (qwen or gemini) and otf_research_calls < max_otf_calls:
                 try:
-                    log.info(f"  🔍 Riset on-the-fly untuk {opp.base_asset} (belum ada di spreadsheet)...")
+                    otf_research_calls += 1
+                    log.info(
+                        f"  🔍 Riset on-the-fly ({otf_research_calls}/{max_otf_calls}) untuk {opp.base_asset} (belum ada di spreadsheet)..."
+                    )
                     researches[opp.base_asset] = research_stock(opp.base_asset, qwen=qwen, gemini=gemini)
                 except Exception as e:
                     log.warning(f"research {opp.base_asset}: {e}")
@@ -1571,11 +1584,11 @@ def market_execute(
         f"Posisi Aktif {active_slot_count}/{max_slots} | Max Allowed Slots: {max_slots}"
     )
 
-    for opp in opps[:max_slots]:
+    for opp in opps:
         if active_slot_count >= max_slots:
             log.info(f"  Slot maksimal tercapai ({active_slot_count}/{max_slots}), hentikan pembukaan posisi baru.")
             break
-        if deployed >= target_deploy:
+        if deployed >= target_deploy or (available - deployed) < 3.0:
             break
         research = researches.get(opp.base_asset)
         verdict, reason, mult = decide_go_nogo(opp, research)
@@ -1629,7 +1642,7 @@ def market_execute(
 
         if deployed + margin > target_deploy or (available - deployed) < 3.0:
             log.info(f"  SKIP {opp.base_asset}: buffer saldo tercapai (${deployed:.2f}/${target_deploy:.2f})")
-            continue
+            break
 
         log.info(f"  {verdict} {opp.side.upper()} {opp.base_asset} margin ${margin:.2f} (mult {mult:.2f}) — {reason}")
         if dry_run:
