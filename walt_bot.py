@@ -53,9 +53,25 @@ ALLOWED_ASSETS = ALLOWED_STOCKS | ALLOWED_COMMODITIES | ALLOWED_CRYPTO
 
 # Position sizing
 MAX_LEVERAGE = 2
-DEFAULT_MARGIN = 2.50       # USDC per posisi
+DEFAULT_MARGIN = 2.50       # USDC per posisi minimum (floor)
 MARGIN_RANGE = (2.50, 3.00)
-MIN_BUFFER_PCT = 0.15       # 15% dari saldo tidak boleh dipakai
+MIN_BUFFER_PCT = 0.15       # 15% dari saldo tidak boleh dipakai (cash buffer)
+
+def calculate_dynamic_margin(available_balance: float, active_slots: int = 0, max_slots: int = 5) -> float:
+    """
+    Kalkulasi ukuran margin per posisi berbasis Auto-Compounding (Snowballing).
+    Seluruh akumulasi profit & yield funding yang masuk ke kas otomatis diputar kembali
+    ke modal trading secara proporsional selama belum ditarik (withdraw):
+      - 85% dari available balance dialokasikan untuk trading (15% cash buffer).
+      - Modal dibagi rata ke kuota slot kosong yang tersisa (maks 5 posisi aktif).
+      - Batas bawah $2.50 USDC (syarat batas minimal bursa Walt Perps).
+    """
+    remaining_slots = max(1, max_slots - active_slots)
+    deployable = available_balance * (1.0 - MIN_BUFFER_PCT)
+    if deployable <= 0:
+        return DEFAULT_MARGIN
+    raw_margin = round(deployable / remaining_slots, 2)
+    return max(DEFAULT_MARGIN, raw_margin)
 
 # Filter likuiditas
 MIN_VOL_24H = 1_000_000     # $1M
@@ -567,10 +583,11 @@ def open_position(
         # Buffer 1.5% + 0.02 USD untuk toleransi slippage dan pembulatan perps relay
         min_margin_req = (opp.min_size_base * price / leverage) * (1.0 + max(opp.price_slippage, 0.015))
         min_margin_req = round(min_margin_req + 0.02, 2)
-        if min_margin_req > DEFAULT_MARGIN * 1.5:
+        max_allowed_margin = max(margin * 1.5, DEFAULT_MARGIN * 1.5)
+        if min_margin_req > max_allowed_margin:
             log.warning(
                 f"{opp.base_asset}: min margin yang disyaratkan exchange (${min_margin_req:.2f}) "
-                f"melampaui batas risiko portofolio (${DEFAULT_MARGIN * 1.5:.2f}), skip"
+                f"melampaui batas risiko portofolio (${max_allowed_margin:.2f}), skip"
             )
             return None
         if margin < min_margin_req:
@@ -1153,12 +1170,16 @@ def scan_with_research(
             log.warning(f"Gagal fetch existing positions: {e}")
             existing_contracts = set()
 
+        active_slot_count = len(existing_contracts)
+        base_margin = calculate_dynamic_margin(available, active_slots=active_slot_count, max_slots=5)
+        log.info(f"Auto-Compounding Sizing: Available ${available:.2f} | Posisi Aktif {active_slot_count}/5 | Base Margin ${base_margin:.2f}")
+
         raw_opps = summary.get("_raw_opportunities", [])
         for opp in raw_opps:
             asset = opp.base_asset
             research = researches.get(asset)
             verdict, reason, mult = decide_go_nogo(opp, research)
-            margin = DEFAULT_MARGIN * mult
+            margin = base_margin * mult
 
             if verdict in ("GO", "HALF") and mult > 0:
                 if opp.contract_id in existing_contracts:
@@ -1333,12 +1354,16 @@ def market_execute(
         log.warning(f"Pemeriksaan posisi awal gagal: {exc}; lewati pembukaan demi keamanan")
         position_check_failed = True
 
+    active_slot_count = len(open_contract_ids)
+    base_margin = calculate_dynamic_margin(available, active_slots=active_slot_count, max_slots=5)
+    log.info(f"Auto-Compounding Sizing: Available ${available:.2f} | Posisi Aktif {active_slot_count}/5 | Base Margin ${base_margin:.2f}")
+
     for opp in opps[:5]:
         if deployed >= target_deploy:
             break
         research = researches.get(opp.base_asset)
         verdict, reason, mult = decide_go_nogo(opp, research)
-        margin = DEFAULT_MARGIN * mult
+        margin = base_margin * mult
         if verdict == "SKIP" or margin <= 0:
             log.info(f"  SKIP {opp.base_asset}: {reason}")
             executions.append({

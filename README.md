@@ -87,6 +87,11 @@ Mengatasi limit bursa Walt pada aset berharga tinggi (seperti `NVDA` atau `MSTR`
 - Walt OAuth token kadaluarsa secara berkala dan dirotasi oleh bursa.
 - `token_manager.py` secara otomatis mengenkripsi token baru dengan libsodium (`pynacl`) dan meng-update GitHub Secret `WALT_REFRESH_TOKEN` via REST API repository. Bot tidak akan pernah berhenti karena token expired.
 
+### 7. Autonomous Auto-Compounding (Snowballing Engine)
+- Mengumpulkan seluruh pendapatan Take Profit dan yield funding harian yang masuk ke kas dompet secara otomatis untuk diputar kembali ke modal trading (*reinvest*).
+- Ukuran margin per posisi membesar secara dinamis dan proporsional terhadap pertumbuhan saldo kas (`deployable = available * 85% / remaining_slots`).
+- Fleksibel: Jika pemilik akun melakukan penarikan dana (*withdraw*), ukuran margin otomatis menyesuaikan mengecil ke batas aman tanpa perlu restart atau konfigurasi manual.
+
 ---
 
 ## ⏰ Jadwal Eksekusi Sistem

@@ -56,11 +56,16 @@ funding_annualized = funding_daily × 365 × 100
 
 ## 3. Position Sizing & Money Management
 
-### 3.1 Parameter Posisi
+### 3.1 Parameter Posisi & Dynamic Auto-Compounding
 - **Leverage Maksimal:** **2x** (konservatif, estimasi pergerakan harga menuju likuidasi ~49%).
-- **Margin per Posisi:** **$2.50 – $3.00 USDC**.
-- **Notional Exposure per Posisi:** **$5.00 – $6.00 USDC** (pada leverage 2x).
-- **Jumlah Posisi Simultan:** **2 – 4 posisi** (tergantung saldo tersedia).
+- **Dynamic Auto-Compounding (Snowballing):**
+  - Bot secara otomatis mengumpulkan seluruh profit Take Profit & yield funding rate yang masuk ke kas dompet untuk ditradingkan kembali (*auto-reinvest*) selama belum di-withdraw oleh user.
+  - Alokasi ukuran margin per posisi diskalakan secara dinamis: `deployable = available_balance * 85% / remaining_slots`.
+  - Margin otomatis membesar seiring pertumbuhan modal (contoh: modal $15.56 $\to$ ~$2.65/posisi; modal $50 $\to$ ~$8.50/posisi; modal $100 $\to$ ~$17.00/posisi; modal $500 $\to$ ~$85.00/posisi).
+  - Batas bawah margin minimum: **$2.50 USDC** (batas aman order exchange Walt Perps).
+  - Jika pemilik akun melakukan penarikan dana (*withdraw*), ukuran margin otomatis mengecil secara proporsional.
+- **Cadangan Kas (Cash Buffer):** **15%** dari saldo kas selalu dijaga tidak disentuh demi keamanan likuiditas.
+- **Jumlah Posisi Simultan:** **Maksimal 5 posisi aktif**.
 - **Buffer Modal Wajib:** Minimal **15% – 20%** dari saldo akun harus selalu disisakan dalam bentuk saldo bebas (USDC) untuk menjaga ketahanan margin.
 
 ### 3.2 Margin Minimum Efektif di Walt (Leverage 2x)
