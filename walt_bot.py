@@ -251,7 +251,7 @@ def is_log_redact_enabled() -> bool:
 
 
 _REDACT_PATTERNS = [
-    (_re.compile(r"(?i)(\b(?:balance(?:\s+available)?|equity|available|margin|pnl|realized(?:\s+pnl)?|unrealized(?:\s+pnl)?|buffer|saldo)\s*[:=]?\s*)(?:[+-]?\$[0-9,.]+(?:/\$[0-9,.]+)?)"), r"\1***"),
+    (_re.compile(r"(?i)(\b(?:balance(?:\s+available)?|equity|available|margin|pnl|realized(?:\s+pnl)?|unrealized(?:\s+pnl)?|buffer|saldo)\s*[:=]?\s*)(?:[+-]?\$[+-]?[0-9,.]+(?:/[+-]?\$[+-]?[0-9,.]+)?)"), r"\1***"),
     (_re.compile(r"(?i)(\border_id\s*[:=]\s*)([a-zA-Z0-9_-]+)"), r"\1***"),
     (_re.compile(r"(?i)('sheet_id'\s*:\s*')([^']+)(')"), r"\1***\3"),
     (_re.compile(r"(?i)\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b"), "***@***"),
