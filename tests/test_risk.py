@@ -318,8 +318,10 @@ def test_calculate_dynamic_margin_bounds(equity):
                 verdict_mult=v_mult,
                 total_equity=equity,
             )
-            assert m >= DEFAULT_MARGIN
             expected_cap = max(DEFAULT_MARGIN, round(equity * 0.15, 2))
+            if v_mult < 1.0 and m == 0.0:
+                continue  # E1: HALF di bawah floor exchange ($2.50) dikembalikan sebagai 0.0 (SKIP)
+            assert m >= DEFAULT_MARGIN
             assert m <= expected_cap
 
 

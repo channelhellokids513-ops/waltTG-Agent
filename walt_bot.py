@@ -180,9 +180,13 @@ def calculate_dynamic_margin(
 
     sized_margin = base_margin * mult
 
-    # Single position risk ceiling: max 15% dari total ekuitas (tetap izinkan floor $2.50)
+    # Single position risk ceiling: max 15% dari total ekuitas (tetap izinkan floor $2.50 untuk GO)
     single_position_cap = max(DEFAULT_MARGIN, round(equity * 0.15, 2))
     final_margin = min(sized_margin, single_position_cap)
+
+    # E1: HALF yang benar-benar HALF — jika setelah multiplier < floor $2.50, JANGAN dinaikkan ke floor
+    if float(verdict_mult) < 1.0 and round(final_margin, 2) < DEFAULT_MARGIN:
+        return 0.0
 
     return max(DEFAULT_MARGIN, round(final_margin, 2))
 
@@ -2454,6 +2458,13 @@ def scan_with_research(
                     verdict_mult=mult,
                     total_equity=total_equity,
                 )
+                if margin < DEFAULT_MARGIN:
+                    log.info(f"  SKIP {asset}: HALF di bawah floor exchange")
+                    executions.append({
+                        "asset": asset, "side": opp.side, "leverage": MAX_LEVERAGE, "verdict": "SKIP",
+                        "reason": "HALF di bawah floor exchange",
+                    })
+                    continue
 
                 resolved = resolve_order_margin(client, opp, margin=margin, leverage=MAX_LEVERAGE)
                 if resolved is None:
@@ -2742,6 +2753,13 @@ def market_execute(
             verdict_mult=mult,
             total_equity=total_equity,
         )
+        if margin < DEFAULT_MARGIN:
+            log.info(f"  SKIP {opp.base_asset}: HALF di bawah floor exchange")
+            executions.append({
+                "asset": opp.base_asset, "side": opp.side, "leverage": MAX_LEVERAGE, "verdict": "SKIP",
+                "reason": "HALF di bawah floor exchange",
+            })
+            continue
 
         resolved = resolve_order_margin(client, opp, margin=margin, leverage=MAX_LEVERAGE)
         if resolved is None:
