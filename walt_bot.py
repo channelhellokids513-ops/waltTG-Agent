@@ -1232,7 +1232,7 @@ def evaluate_and_apply_position_risk(
     log.info(f"🛡️ [ATOMIC RISK] {pos.base_asset}: {detail_str}")
 
     preview = client.preview_auto_close(pos.contract_id, tp=final_tp, sl=final_sl)
-    if preview.get("ok"):
+    if preview and preview.get("ok"):
         res = client.execute(preview["confirmationToken"])
         return {
             "action": "UPDATE_AUTO_CLOSE",
@@ -1243,7 +1243,8 @@ def evaluate_and_apply_position_risk(
         }
     else:
         log.warning(f"⚠️ [ATOMIC RISK] {pos.base_asset}: preview auto close gagal: {preview}")
-        return {"action": "FAILED", "detail": f"Preview failed: {preview.get('code')}", "result": preview}
+        err_code = preview.get("code") if isinstance(preview, dict) else None
+        return {"action": "FAILED", "detail": f"Preview failed: {err_code}", "result": preview}
 
 
 def apply_layer1_baseline(client: WaltClient, pos: Position) -> Optional[dict]:
@@ -1254,7 +1255,7 @@ def apply_layer1_baseline(client: WaltClient, pos: Position) -> Optional[dict]:
     if new_tp is None and new_sl is None:
         return None
     preview = client.preview_auto_close(pos.contract_id, tp=new_tp, sl=new_sl)
-    if preview.get("ok"):
+    if preview and preview.get("ok"):
         return client.execute(preview["confirmationToken"])
     return None
 
@@ -1325,7 +1326,7 @@ def apply_layer4_trailing(client: WaltClient, pos: Position) -> Optional[dict]:
     if not _sl_is_improvement(pos, new_sl, buffer=0.0005):
         return None
     preview = client.preview_auto_close(pos.contract_id, sl=new_sl)
-    if preview.get("ok"):
+    if preview and preview.get("ok"):
         return client.execute(preview["confirmationToken"])
     return None
 
