@@ -40,15 +40,16 @@ jobs:
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-flash-latest' }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || secrets.GOOGLE_SHEET_ID || '1ag6MqYnOLdZgkFwk_cs3W-22EOX5e5DGQTVvPWENHTg' }}
+          GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SHEET_WEBHOOK_URL: ${{ secrets.GOOGLE_SHEET_WEBHOOK_URL }}
           GH_PAT: ${{ secrets.GH_PAT || secrets.GH_PATH || secrets.GITHUB_PAT || secrets.PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           JOB_TIMEOUT_MIN: "20"
+          LOG_REDACT: "true"
         run: |
           mkdir -p logs
           set -o pipefail
-          python walt_bot.py monitor 2>&1 | tee monitor_output.log
+          python walt_bot.py monitor
 
       - name: Save logs/snapshot cache (always)
         if: always()
@@ -59,12 +60,18 @@ jobs:
 
       - name: Publish Summary
         if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
         run: |
-          echo "## 🛡️ Hasil Risk Monitor" >> $GITHUB_STEP_SUMMARY
-          echo '```text' >> $GITHUB_STEP_SUMMARY
-          if [ -f monitor_output.log ]; then
-            cat monitor_output.log >> $GITHUB_STEP_SUMMARY
-          else
-            echo "File log tidak ditemukan." >> $GITHUB_STEP_SUMMARY
-          fi
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+          from pathlib import Path
+          p = Path("logs/last_safe_summary.json")
+          s = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+          print("## 🛡️ Ringkasan Risk Monitor (Redacted)")
+          print(f"- **Job Status:** `{os.getenv('JOB_STATUS', 'unknown')}`")
+          print(f"- **Cadence Mode:** `{s.get('cadence_mode', '-')}` (cycles: `{s.get('cycles_run', '-')}`)")
+          print(f"- **Positions Checked:** `{s.get('positions_checked', '-')}`")
+          print(f"- **Actions Count:** `{s.get('actions_count', 0)}`")
+          print(f"- **Gear:** market=`{s.get('market_gear', '-')}`, crypto=`{s.get('crypto_gear', '-')}`")
+          PY

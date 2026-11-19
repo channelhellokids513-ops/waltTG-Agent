@@ -50,17 +50,18 @@ jobs:
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-flash-latest' }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || secrets.GOOGLE_SHEET_ID || '1ag6MqYnOLdZgkFwk_cs3W-22EOX5e5DGQTVvPWENHTg' }}
+          GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SHEET_WEBHOOK_URL: ${{ secrets.GOOGLE_SHEET_WEBHOOK_URL }}
           GH_PAT: ${{ secrets.GH_PAT || secrets.GH_PATH || secrets.GITHUB_PAT || secrets.PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           JOB_TIMEOUT_MIN: "15"
+          LOG_REDACT: "true"
           AUTO_EXECUTE_ON_SCAN: ${{ github.event.inputs.auto_execute || vars.AUTO_EXECUTE_ON_SCAN || 'true' }}
           DRY_RUN: ${{ github.event.inputs.dry_run || vars.DRY_RUN || 'false' }}
         run: |
           mkdir -p logs
           set -o pipefail
-          python walt_bot.py scan_with_research 2>&1 | tee scan_output.log
+          python walt_bot.py scan_with_research
 
       - name: Save logs/snapshot cache (always)
         if: always()
@@ -69,22 +70,19 @@ jobs:
           path: logs/
           key: walt-logs-state-${{ github.run_id }}-${{ github.run_attempt }}
 
-      - name: Upload Logs Artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: walt-scan-logs
-          path: logs/
-          retention-days: 30
-
       - name: Publish Summary
         if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
         run: |
-          echo "## 📊 Hasil Scan & Auto-Execute Bot" >> $GITHUB_STEP_SUMMARY
-          echo '```text' >> $GITHUB_STEP_SUMMARY
-          if [ -f scan_output.log ]; then
-            cat scan_output.log >> $GITHUB_STEP_SUMMARY
-          else
-            echo "File log tidak ditemukan." >> $GITHUB_STEP_SUMMARY
-          fi
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+          from pathlib import Path
+          p = Path("logs/last_safe_summary.json")
+          s = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+          print("## 📊 Ringkasan Daily Scan & Research (Redacted)")
+          print(f"- **Job Status:** `{os.getenv('JOB_STATUS', 'unknown')}`")
+          print(f"- **Opportunities Count:** `{s.get('opportunities_count', 0)}`")
+          print(f"- **Executions Count:** `{s.get('executions_count', 0)}`")
+          print(f"- **Gear:** market=`{s.get('market_gear', '-')}`, crypto=`{s.get('crypto_gear', '-')}`")
+          PY

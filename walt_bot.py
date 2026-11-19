@@ -240,12 +240,39 @@ def get_asset_baseline_tpsl_pct(asset: Optional[str] = None) -> tuple[float, flo
     else:
         return DEFAULT_TP_PCT, DEFAULT_SL_PCT
 
-# Logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+# Logging dengan dukungan LOG_REDACT untuk repo publik
+import re as _re
+
+
+def is_log_redact_enabled() -> bool:
+    return os.getenv("LOG_REDACT", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+_REDACT_PATTERNS = [
+    (_re.compile(r"(?i)(\b(?:balance(?:\s+available)?|equity|available|margin|pnl|realized(?:\s+pnl)?|unrealized(?:\s+pnl)?|buffer|saldo)\s*[:=]?\s*)(?:[+-]?\$[0-9,.]+(?:/\$[0-9,.]+)?)"), r"\1***"),
+    (_re.compile(r"(?i)(\border_id\s*[:=]\s*)([a-zA-Z0-9_-]+)"), r"\1***"),
+    (_re.compile(r"(?i)('sheet_id'\s*:\s*')([^']+)(')"), r"\1***\3"),
+    (_re.compile(r"(?i)\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b"), "***@***"),
+]
+
+
+def redact_sensitive_text(text: str) -> str:
+    """Samarkan angka saldo/margin/PnL/order_id/email pada log stdout saat LOG_REDACT=true."""
+    out = text
+    for pat, repl in _REDACT_PATTERNS:
+        out = pat.sub(repl, out)
+    return out
+
+
+class _RedactingFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        rendered = super().format(record)
+        return redact_sensitive_text(rendered) if is_log_redact_enabled() else rendered
+
+
+_handler = logging.StreamHandler()
+_handler.setFormatter(_RedactingFormatter("%(asctime)s | %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+logging.basicConfig(level=logging.INFO, handlers=[_handler], force=True)
 log = logging.getLogger("walt-bot")
 
 
@@ -2744,6 +2771,44 @@ def compute_closed_stats(
 # MAIN DISPATCHER
 # =============================================================================
 
+def build_safe_stdout_summary(command: str, result: Any) -> dict[str, Any]:
+    """Ringkasan aman untuk stdout & Step Summary repo publik (tanpa saldo/margin/PnL/order_id)."""
+    if not isinstance(result, dict):
+        return {"command": command, "status": "ok"}
+    actions = result.get("actions")
+    execs = result.get("executions")
+    opps = result.get("top_opportunities") or result.get("opportunities")
+    regime = result.get("execution_regime") or {}
+    summary: dict[str, Any] = {
+        "command": command,
+        "ts": result.get("ts") or datetime.now(timezone.utc).isoformat(),
+        "status": result.get("status", "ok"),
+        "positions_checked": result.get("positions_checked"),
+        "cycles_run": result.get("cycles_run"),
+        "cadence_mode": result.get("cadence_mode"),
+        "actions_count": len(actions) if isinstance(actions, list) else 0,
+        "executions_count": len([e for e in execs if isinstance(e, dict) and e.get("verdict") in ("EXECUTED", "DRY_RUN")]) if isinstance(execs, list) else 0,
+        "opportunities_count": len(opps) if isinstance(opps, list) else None,
+        "market_gear": regime.get("market_gear") or result.get("gear"),
+        "crypto_gear": regime.get("crypto_gear"),
+    }
+    return {k: v for k, v in summary.items() if v is not None}
+
+
+def _emit_cli_result(command: str, result: Any) -> None:
+    safe_summary = build_safe_stdout_summary(command, result)
+    try:
+        os.makedirs("logs", exist_ok=True)
+        with open("logs/last_safe_summary.json", "w", encoding="utf-8") as f:
+            json.dump(safe_summary, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+    if is_log_redact_enabled():
+        print(json.dumps(safe_summary, indent=2, default=str))
+    else:
+        print(json.dumps(result, indent=2, default=str))
+
+
 def main(command: str = "scan"):
     """
     CLI entry point.
@@ -2762,20 +2827,20 @@ def main(command: str = "scan"):
 
     if command == "stats":
         result = compute_closed_stats()
-        print(json.dumps(result, indent=2, default=str))
+        _emit_cli_result(command, result)
         return
 
     client = WaltClient()
 
     if command == "scan":
         result = daily_scan(client)
-        print(json.dumps(result, indent=2, default=str))
+        _emit_cli_result(command, result)
 
     elif command == "scan_with_research":
         dry = os.getenv("DRY_RUN", "false").lower() == "true"
         auto_exec = os.getenv("AUTO_EXECUTE_ON_SCAN", "true").lower() == "true"
         result = scan_with_research(client, auto_execute=auto_exec, dry_run=dry)
-        print(json.dumps(result, indent=2, default=str))
+        _emit_cli_result(command, result)
 
     elif command == "monitor":
         result = risk_monitor_run(client)
@@ -2786,17 +2851,17 @@ def main(command: str = "scan"):
                 info = a.get("detail") or a.get("layer") or a.get("action")
                 msg += f"• *{a['asset']}* — {info}\n"
             send_telegram(msg)
-        print(json.dumps(result, indent=2, default=str))
+        _emit_cli_result(command, result)
 
     elif command in ("market_execute", "execute"):
         dry = os.getenv("DRY_RUN", "false").lower() == "true"
         result = market_execute(client, dry_run=dry)
-        print(json.dumps(result, indent=2, default=str))
+        _emit_cli_result(command, result)
 
     elif command == "crypto_execute":
         dry = os.getenv("DRY_RUN", "false").lower() == "true"
         result = crypto_execute(client, dry_run=dry)
-        print(json.dumps(result, indent=2, default=str))
+        _emit_cli_result(command, result)
 
     elif command == "open":
         if len(sys.argv) < 5:
