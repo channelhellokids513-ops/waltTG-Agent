@@ -161,13 +161,20 @@ Keempat voter menilai **7 Parameter Standar Validasi (P1-P7)** yang sama secara 
 | Sinyal Funding | Status Konsensus Swarm | Skor Final & Arah | Risk Catalyst (P5) | Keputusan Bot | Aksi & Margin |
 |---|---|---|---|---|---|
 | Tinggi (≥0.5%/hari) | **UNANIMOUS / STRONG** | Aligned dg posisi | P5 < 0.70 | ✅ **GO (Full Size)** | Buka posisi full ($2.50 – $3.00 USDC) |
-| Tinggi (≥0.5%/hari) | **MIXED** | Aligned dg posisi | P5 < 0.70 | ⚠️ **HALF** | Buka posisi separuh ($1.25 – $1.50 USDC) |
-| Tinggi (≥0.5%/hari) | Model Manapun | Aligned dg posisi | **P5 ≥ 0.70** (Katalis Tinggi) | ⚠️ **HALF / SKIP** | Proteksi event katalis: batas ukuran posisi |
-| Tinggi (≥0.5%/hari) | **SPLIT / Vendor Conflict** | Netral / Terpecah | Berapapun | ⚠️ **HALF** | Proteksi divergensi sinyal AI: setengah posisi |
-| Tinggi (≥0.5%/hari) | Model Manapun | Crowded (**P6 ≥ 0.85**) | Berapapun | ⚠️ **HALF** | Proteksi contrarian crowded positioning |
+| Tinggi (≥0.5%/hari) | **MIXED** | Aligned dg posisi | P5 < 0.70 | ⚠️ **HALF** | Buka separuh *hanya jika* hasil $\ge \$2.50$; jika $< \$2.50 \to$ **SKIP** (*HALF di bawah floor exchange*) |
+| Tinggi (≥0.5%/hari) | Model Manapun | Aligned dg posisi | **P5 ≥ 0.70** (`max_p5_risk`) | ❌ **SKIP** | Katalis risiko tinggi → batalkan entry |
+| Tinggi (≥0.5%/hari) | **SPLIT / Vendor Conflict** | Netral / Terpecah | Berapapun | ⚠️ **HALF** | Setengah ukuran (atau **SKIP** jika di bawah floor `$2.50`) |
+| Tinggi (≥0.5%/hari) | Model Manapun | Crowded (**P6 ≥ 0.85**) | Berapapun | ⚠️ **HALF** | Proteksi contrarian (atau **SKIP** jika di bawah floor `$2.50`) |
 | Tinggi (≥0.5%/hari) | Model Manapun | Melawan arah posisi | Berapapun | ❌ **SKIP** | Batalkan eksekusi, hindari melawan tren |
+| Berapapun | Riset Basi (> 6 jam) | — | — | ❌ **SKIP** | Abaikan riset basi (`max_research_age_hours`); saham tanpa riset segar di-**SKIP** |
 | Berapapun | Model Manapun | Berapapun | **Earnings ≤ 7 hari** | ❌ **SKIP** | Batalkan eksekusi (hindari risiko earnings) |
 | Rendah (<0.5%/hari)| Model Manapun | Berapapun | Berapapun | ❌ **SKIP** | Batalkan eksekusi (funding rate kurang menarik) |
+
+*Aturan Gerbang Kualitas Entry & Ekonomi Tambahan (E1–E5):*
+- **HALF di Bawah Floor (`E1`):** Jika verdict `HALF` menghasilkan margin `< $2.50`, bot otomatis **SKIP** (`HALF di bawah floor exchange`), tidak lagi dinaikkan paksa ke `$2.50`.
+- **Batas Frekuensi 24 Jam (`E4`):** Maksimal **2 entry/aset/24 jam** (`max_entries_per_asset_24h`) dan **8 entry total/24 jam** (`max_entries_per_day`) yang dilacak di `logs/market_regime.json`.
+- **Circuit Breaker Harian UTC (`E4`):** Jika ekuitas turun $\ge 5\%$ (`daily_loss_limit_pct`) dari ekuitas awal hari UTC, seluruh entry baru dihentikan hingga `00:00 UTC` berikutnya disertai alert Telegram (risk monitor tetap berjalan normal).
+- **Gerbang Ekonomi Funding vs Fee (`E5`):** Entry hanya lolos jika `expected_funding = |funding_daily| × (expected_hold_hours / 24)` memenuhi `expected_funding >= (2 × 0.0009 + price_slippage) × 1.5` (`expected_hold_hours` default `24` jam). Laporan `stats` juga memantau *median hold time* dan memberi peringatan jika jauh di bawah target *carry*.
 
 *Aturan Alignment:*
 - `SHORT` + sentimen `bearish` = **Confirm** (berita bearish mendukung posisi Short).

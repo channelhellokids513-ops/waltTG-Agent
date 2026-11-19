@@ -122,12 +122,20 @@ gcloud scheduler jobs list --location=asia-southeast2
 ## 🔒 Kebijakan Privasi Log (Repo Publik) & Alur Konfigurasi Strategi
 
 ### Kebijakan Log & State di Repo Publik
-- **`LOG_REDACT=true` di Actions:** Seluruh angka saldo, ekuitas, margin, PnL, `order_id`, dan email disamarkan (`***`) pada *stdout* log publik, sementara notifikasi **Telegram** dan **Google Sheets** tetap menerima angka lengkap.
+- **`LOG_REDACT=true` & Global Secret Filter:** Seluruh angka saldo, ekuitas, margin, PnL, `order_id`, dan email disamarkan (`***`) pada *stdout* log publik, sementara pola mirip API key (`key=`, `Bearer`, `AIza...`, `sk-...`, token Telegram) selalu disensor di log global. Gemini API key dikirim lewat header `x-goog-api-key` (bukan query `?key=`). Notifikasi **Telegram** dan **Google Sheets** tetap menerima angka lengkap.
 - **Tanpa Artifact Publik & Ringkasan Aman:** Langkah *Upload Logs Artifact* dihapus; *Step Summary* hanya menampilkan status job, jumlah aksi/eksekusi, *cadence mode*, dan *gear*.
-- **State Cache Tahan Error (`actions/cache/restore@v4` + `save@v4` `if: always()`):** `logs/market_regime.json` (cooldown 3 jam) dan `logs/open_snapshot.json` tetap tersimpan meski job gagal.
+- **Integritas Snapshot & Dedupe Close (`D1`–`D4`):**
+  - `logs/open_snapshot.json` diisolasi ke cache terpisah (`walt-snapshot-*`) yang **hanya** disimpan oleh `risk-monitor.yml` (workflow lain menghapus file ini sebelum menyimpan cache `walt-logs-state-*`).
+  - Dedupe penutupan posisi memakai **Position ID** unik (`logs/closed_ids.json`, maks 500 ID + pengecekan kolom `Position ID` di `Closed_Positions`). Jika data close dari exchange tidak tersedia, dicatat `UNKNOWN (data close tidak tersedia)` dengan exit/PnL kosong (tidak lagi dianggap TP) dan dikecualikan dari win-rate di `python walt_bot.py stats` (dilengkapi pembanding perubahan ekuitas dari `PnL_Tracker`, *median hold time*, serta hash `Strategy Version`).
+  - Gunakan `python walt_bot.py dump_closed` untuk inspeksi nama *key* & tipe data posisi closed dari MCP tanpa mencetak nilai sensitif.
+- **Header Google Sheets & Deployment Apps Script (`D3`):**
+  - Header tiap sheet (`Daily_Scans`, `Executions_Log`, `Closed_Positions`, `PnL_Tracker`) dikelola tunggal oleh `google_apps_script.js` `doPost` melalui field `header` terpisah (tidak lagi dikirim di dalam `rows`).
+  - Tersedia fungsi manual `cleanupClosedPositions()` di editor Apps Script untuk membersihkan baris header ganda dan duplikat lama.
+  - **Penting:** Setiap kali `google_apps_script.js` diperbarui, pemilik **wajib membuat Deployment baru** (*Deploy → New deployment*) di editor Apps Script, lalu memperbarui secret `GOOGLE_SHEET_WEBHOOK_URL` jika URL Web App berubah.
 - **Tanpa Hardcode Sheet ID:** `GOOGLE_SHEET_ID` dibaca eksklusif dari GitHub Secrets/Variables (`vars.GOOGLE_SHEET_ID || secrets.GOOGLE_SHEET_ID`).
 
-### Alur Sinkronisasi Strategi (Telegram ↔ GitHub Actions)
+### Gerbang Kualitas Entry & Alur Sinkronisasi Strategi (Telegram ↔ GitHub Actions)
+- **Filter Kualitas Entry (`E1`–`E5`):** `HALF` di bawah floor `$2.50` di-**SKIP**, `P5_risk_catalysts >= max_p5_risk` (`0.70`) di-**SKIP**, riset lebih tua dari `max_research_age_hours` (`6` jam) diabaikan, batas frekuensi **2 entry/aset/24 jam** & **8 entry/24 jam**, **circuit breaker harian** (`-5%` ekuitas dari awal hari UTC), serta gerbang ekonomi `expected_funding >= (2 × 0.0009 + slippage) × 1.5` (`expected_hold_hours = 24`).
 - Perubahan strategi lewat Bot Telegram (`/set_strategy` / `/reset_strategy`) divalidasi terhadap batas aman `STRATEGY_PARAM_SPECS`, disimpan lokal di `logs/strategy_config.json`, dan langsung disinkronkan via `GH_PAT` ke **GitHub Repository Variable `STRATEGY_CONFIG_JSON`**.
 - Setiap workflow GitHub Actions meneruskan `STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}` ke `walt_bot.py`. Jika parsing gagal atau ada nilai di luar batas aman, bot mencatat *warning* dan *fallback* otomatis ke `DEFAULT_STRATEGY_CONFIG`.
 - Profil pribadi End User (`logs/user_strategies.json`) dan data auth (`logs/telegram_auth.json`) **tidak pernah** disinkronkan ke variable atau sheet publik.
