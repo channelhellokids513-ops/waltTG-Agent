@@ -261,47 +261,107 @@ def fetch_earnings_days(ticker: str) -> Optional[int]:
 # =============================================================================
 
 UNIFIED_VOTER_SCHEMA_PROMPT = """
+ATURAN PENILAIAN TAKTIS (WAJIB DIPATUHI):
+1. Horizon Analisa: Fokus pada dampak harga 24-72 JAM ke depan (strategi Perpetual Funding Carry dengan SL 1.5% & TP 2.0%-2.5%), BUKAN tesis investasi jangka panjang 1-5 tahun.
+2. Rubrik Kalibrasi Skor P1 & P4 (-1.0 s/d +1.0):
+   - +0.70 s/d +1.00 : Katalis positif kuat & terkonfirmasi (beat earnings besar, upgrade institusi, breakout makro/ETF).
+   - +0.25 s/d +0.69 : Sentimen positif moderat / pemulihan bertahap.
+   - -0.20 s/d +0.20 : Netral, berita campuran (mixed), atau tidak berdampak signifikan ke harga 1-3 hari.
+   - -0.69 s/d -0.25 : Tekanan jual moderat, downgrade ringan, atau kekhawatiran makro.
+   - -1.00 s/d -0.70 : Katalis negatif berat (miss earnings, regulasi keras, hack/insiden, crash).
+3. Anti-Halusinasi: Jika headline tidak relevan dengan ticker, hanya sedikit (<2 berita relevan), atau tidak ada katalis jelas, WAJIB beri P1 di rentang [-0.10, +0.10] dan overall_voter_confidence <= 0.40. JANGAN mengarang tanggal earnings atau event yang tidak tertulis di headline.
+
 Score 7 parameter validasi P1-P7 secara objektif dalam format JSON valid berikut:
 {
   "P1_sentiment_polarity": {
     "score": -1.0 to 1.0,
-    "reasoning": "1-2 kalimat analisa sentimen 7 hari",
+    "reasoning": "1-2 kalimat analisa sentimen jangka pendek (24-72 jam) berdasarkan fakta headline",
     "metadata": {"dominant_tone": "bullish|bearish|neutral", "confidence_level": 0.0 to 1.0}
   },
   "P2_signal_strength": {
     "score": 0.0 to 1.0,
-    "reasoning": "1-2 kalimat tingkat keselarasan headlines",
+    "reasoning": "1-2 kalimat tingkat keselarasan headlines (1.0 = semua searah, 0.0 = saling bertentangan)",
     "metadata": {"aligned_count": 0, "total_count": 0}
   },
   "P3_source_credibility": {
     "score": 0.0 to 1.0,
-    "reasoning": "1-2 kalimat evaluasi reputasi sumber (Tier 1 vs media umum)",
+    "reasoning": "1-2 kalimat evaluasi reputasi sumber (Reuters/Bloomberg/WSJ/CNBC = tinggi, blog/opini = rendah)",
     "metadata": {"tier1_count": 0, "tier2_count": 0}
   },
   "P4_momentum_direction": {
     "score": -1.0 to 1.0,
-    "reasoning": "1-2 kalimat arah sentimen 48 jam terakhir vs 7 hari",
+    "reasoning": "1-2 kalimat arah momentum berita 48 jam terakhir vs 7 hari (menguat/melemah/berbalik)",
     "metadata": {"recent_48h_tone": "accelerating|fading|reversing"}
   },
   "P5_risk_catalysts": {
     "score": 0.0 to 1.0,
-    "reasoning": "1-2 kalimat event resiko mendatang (earnings, FOMC, regulasi)",
+    "reasoning": "1-2 kalimat risiko lonjakan volatilitas mendadak 1-3 hari (earnings, FOMC, CPI, regulasi, short squeeze)",
     "metadata": {"catalyst_list": [], "days_to_nearest": 0}
   },
   "P6_contrarian_check": {
     "score": 0.0 to 1.0,
-    "reasoning": "1-2 kalimat apakah sentimen terlalu ramai/crowded berisiko pembalikan arah",
+    "reasoning": "1-2 kalimat apakah posisi pasar sudah terlalu ramai (crowded) sehingga rawan pembalikan arah",
     "metadata": {"crowdedness_level": "low|medium|high"}
   },
   "P7_historical_pattern": {
     "score": -1.0 to 1.0,
-    "reasoning": "1-2 kalimat analogi pola historis pasar serupa",
+    "reasoning": "1-2 kalimat analogi pola reaksi harga historis dalam 1-3 hari untuk katalis serupa",
     "metadata": {"historical_outcome": "bullish|bearish|mixed"}
   },
   "overall_voter_confidence": 0.0 to 1.0,
   "voter_id": "{voter_id}"
 }
 """
+
+
+def _build_strategy_context_block(
+    ticker: str,
+    funding_daily: Optional[float] = None,
+    recommended_side: Optional[str] = None,
+) -> str:
+    if funding_daily is None and not recommended_side:
+        return (
+            f"Konteks Strategi: Evaluasi arah harga taktis 24-72 jam untuk {ticker} "
+            "(strategi Perpetual Funding Carry dengan SL 1.5% & TP 2.0%-2.5%)."
+        )
+    fr_txt = f"{funding_daily * 100:+.3f}%/hari" if funding_daily is not None else "N/A"
+    side_txt = (recommended_side or "").upper() or "N/A"
+    risk_note = (
+        "Waspadai katalis reli mendadak / short squeeze yang bisa memicu SL 1.5%."
+        if side_txt == "SHORT"
+        else "Waspadai katalis aksi jual / flash crash yang bisa memicu SL 1.5%."
+    )
+    return (
+        f"Konteks Strategi: Bot sedang mempertimbangkan posisi {side_txt} pada {ticker} "
+        f"untuk memanen funding rate ({fr_txt}) dengan SL 1.5% & TP 2.0%-2.5% (horizon 24-72 jam). "
+        f"{risk_note}"
+    )
+
+
+def compute_directional_final_score(per_param_final: dict[str, Any]) -> float:
+    """
+    Hitung final_score arah sentimen murni (-1.0 bearish s/d +1.0 bullish) tanpa bias positif:
+    - Arah ditentukan hanya oleh parameter bertanda: P1 (45%), P4 (35%), P7 (20%).
+    - P2 (signal strength) & P3 (source credibility) bertindak sebagai pengali kualitas [0.5 .. 1.0].
+    - P5 (risk catalysts) & P6 (contrarian) tetap menjadi guard risiko terpisah (tidak menarik skor ke +).
+    """
+    def _g(name: str, default: float = 0.0) -> float:
+        obj = per_param_final.get(name) or {}
+        val = obj.get("final_score", obj.get("score", default))
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return default
+
+    p1 = max(-1.0, min(1.0, _g("P1_sentiment_polarity", 0.0)))
+    p4 = max(-1.0, min(1.0, _g("P4_momentum_direction", 0.0)))
+    p7 = max(-1.0, min(1.0, _g("P7_historical_pattern", 0.0)))
+    p2 = max(0.0, min(1.0, _g("P2_signal_strength", 0.5)))
+    p3 = max(0.0, min(1.0, _g("P3_source_credibility", 0.5)))
+
+    raw_dir = (0.45 * p1) + (0.35 * p4) + (0.20 * p7)
+    quality_mult = 0.5 + 0.5 * ((p2 + p3) / 2.0)
+    return round(max(-1.0, min(1.0, raw_dir * quality_mult)), 3)
 
 
 def _normalize_score(val: Any, default: float, min_val: float, max_val: float) -> float:
@@ -348,14 +408,20 @@ def _extract_voter_params(raw: dict, voter_id: str) -> dict[str, Any]:
     return extracted
 
 
-def run_voter_1(qwen: QwenClient, ticker: str, headlines: list[str]) -> Optional[dict]:
+def run_voter_1(
+    qwen: QwenClient,
+    ticker: str,
+    headlines: list[str],
+    strategy_context: str = "",
+) -> Optional[dict]:
     """Voter 1: Qwen-Turbo (Quick Signal Analyst) — Fokus keyword scanning dan surface polarity."""
     sys_prompt = (
         "Kamu Voter 1: Quick Signal Analyst. Tugasmu adalah analisa cepat (<2 detik) "
-        "terhadap headline berita pasar modal. Fokus utama pada deteksi kata kunci dan polaritas permukaan."
+        "terhadap headline berita pasar modal untuk horizon 24-72 jam. Fokus pada deteksi katalis riil dan polaritas."
     )
     user_prompt = (
         f"Ticker: {ticker}\n"
+        f"{strategy_context}\n"
         f"Headlines 7 hari:\n" + "\n".join(f"- {h}" for h in headlines) + "\n\n"
         + UNIFIED_VOTER_SCHEMA_PROMPT.replace("{voter_id}", "V1_qwen_turbo")
     )
@@ -370,14 +436,20 @@ def run_voter_1(qwen: QwenClient, ticker: str, headlines: list[str]) -> Optional
         return None
 
 
-def run_voter_2(qwen: QwenClient, ticker: str, headlines: list[str]) -> Optional[dict]:
+def run_voter_2(
+    qwen: QwenClient,
+    ticker: str,
+    headlines: list[str],
+    strategy_context: str = "",
+) -> Optional[dict]:
     """Voter 2: Qwen-Plus (Balanced Equity Analyst) — Fokus kredibilitas sumber & konsistensi narasi."""
     sys_prompt = (
         "Kamu Voter 2: Balanced Equity Analyst. Weight headlines berdasarkan kredibilitas sumber "
-        "(Reuters/Bloomberg/WSJ bernilai lebih tinggi). Identifikasi konsistensi narasi dan kontradiksi."
+        "(Reuters/Bloomberg/WSJ bernilai lebih tinggi) untuk horizon 24-72 jam. Identifikasi konsistensi narasi dan kontradiksi."
     )
     user_prompt = (
         f"Ticker: {ticker}\n"
+        f"{strategy_context}\n"
         f"Headlines 7 hari:\n" + "\n".join(f"- {h}" for h in headlines) + "\n\n"
         + UNIFIED_VOTER_SCHEMA_PROMPT.replace("{voter_id}", "V2_qwen_plus")
     )
@@ -392,14 +464,20 @@ def run_voter_2(qwen: QwenClient, ticker: str, headlines: list[str]) -> Optional
         return None
 
 
-def run_voter_3(gemini: GeminiClient, ticker: str, headlines: list[str]) -> Optional[dict]:
+def run_voter_3(
+    gemini: GeminiClient,
+    ticker: str,
+    headlines: list[str],
+    strategy_context: str = "",
+) -> Optional[dict]:
     """Voter 3: Gemini-Flash (Realtime Web Validator) — Fokus breaking news 24 jam & katalis terkini."""
     sys_prompt = (
         "Kamu Voter 3: Realtime Market Validator Google Gemini. Evaluasi apakah ada breaking news atau "
-        "katalis makro 24 jam terakhir yang mengonfirmasi atau membalikkan tren berita 7 hari."
+        "katalis makro 24-48 jam terakhir yang mengonfirmasi atau membalikkan tren berita 7 hari."
     )
     user_prompt = (
         f"Ticker: {ticker}\n"
+        f"{strategy_context}\n"
         f"Headlines 7 hari terakhir:\n" + "\n".join(f"- {h}" for h in headlines) + "\n\n"
         + UNIFIED_VOTER_SCHEMA_PROMPT.replace("{voter_id}", "V3_gemini_flash")
     )
@@ -411,15 +489,21 @@ def run_voter_3(gemini: GeminiClient, ticker: str, headlines: list[str]) -> Opti
         return None
 
 
-def run_voter_4(gemini: GeminiClient, ticker: str, headlines: list[str]) -> Optional[dict]:
+def run_voter_4(
+    gemini: GeminiClient,
+    ticker: str,
+    headlines: list[str],
+    strategy_context: str = "",
+) -> Optional[dict]:
     """Voter 4: Gemini-Pro (Deep Multi-Angle Reasoner) — Analisa sebab-akibat, contrarian check, & hidden risks."""
     sys_prompt = (
         "Kamu Voter 4: Senior Portfolio Manager & Deep Multi-Angle Reasoner Google Gemini. "
-        "Tugasmu menganalisa rantai kausalitas, risiko tersembunyi (hidden risks), posisi crowded (contrarian), "
-        "dan preseden historis."
+        "Tugasmu menganalisa rantai kausalitas 1-3 hari, risiko tersembunyi (hidden risks), posisi crowded (contrarian), "
+        "dan preseden historis agar bot terhindar dari jebakan harga."
     )
     user_prompt = (
         f"Ticker: {ticker}\n"
+        f"{strategy_context}\n"
         f"Headlines 7 hari terakhir:\n" + "\n".join(f"- {h}" for h in headlines) + "\n\n"
         + UNIFIED_VOTER_SCHEMA_PROMPT.replace("{voter_id}", "V4_gemini_pro")
     )
@@ -504,17 +588,12 @@ Detail Evaluasi Voter:
 Tugasmu:
 1. Untuk parameter dengan konsensus SPLIT atau MIXED: teliti apakah outlier memiliki alasan realtime/kredibel yang valid atau sekadar noise. Tentukan trusted_voter dan final_score untuk parameter tersebut.
 2. Untuk parameter dengan konsensus UNANIMOUS atau STRONG: gunakan rata-rata konsensus sebagai final_score parameter tersebut.
-3. Hitung final_score gabungan berbobot sesuai rumus PRD:
-   final_score = Σ (P_i.final_score × weight_i)
-   Bobot:
-     P1_sentiment_polarity: 0.25
-     P2_signal_strength: 0.10
-     P3_source_credibility: 0.10
-     P4_momentum_direction: 0.20
-     P5_risk_catalysts: 0.15
-     P6_contrarian_check: 0.10
-     P7_historical_pattern: 0.10
-4. Berikan justifikasi komprehensif dalam Bahasa Indonesia (1-2 paragraf padat).
+3. Hitung final_score arah sentimen murni (-1.0 bearish s/d +1.0 bullish) tanpa bias positif:
+   - Arah dasar: (0.45 × P1_sentiment_polarity) + (0.35 × P4_momentum_direction) + (0.20 × P7_historical_pattern)
+   - Pengali kualitas: 0.5 + 0.5 × ((P2_signal_strength + P3_source_credibility) / 2)
+   - final_score = arah_dasar × pengali_kualitas
+   - P5_risk_catalysts dan P6_contrarian_check dievaluasi sebagai guard risiko terpisah (JANGAN menambahkannya ke arah sentimen).
+4. Berikan justifikasi komprehensif dalam Bahasa Indonesia (1-2 paragraf padat) yang menyebut apakah aman/berisiko untuk horizon 24-72 jam.
 
 Output HANYA JSON valid dengan skema:
 {
@@ -565,13 +644,14 @@ def run_meta_aggregator(
                 model=MODEL_AGGREGATOR,
             )
             if "final_score" in agg_res and "per_parameter_final" in agg_res:
+                # Enforce rumus arah murni agar tidak ada bias positif dari P2/P3/P5/P6
+                agg_res["final_score"] = compute_directional_final_score(agg_res["per_parameter_final"])
                 return agg_res
         except Exception as e:
             log.warning(f"Meta-Aggregator (Qwen-Max) call failed for {ticker}: {e}. Fallback to rule-based.")
 
     # --- DETERMINISTIC RULE-BASED FALLBACK SYNTHESIS ---
     per_param_final = {}
-    weighted_sum = 0.0
 
     for param, weight in PARAM_WEIGHTS.items():
         avg_score = pre_analysis.get(param, {}).get("avg", 0.0)
@@ -580,9 +660,8 @@ def run_meta_aggregator(
             "trusted_voter": "CONSENSUS",
             "rationale": f"Rata-rata konsensus {len(voter_verdicts)} voter (avg: {avg_score:.2f})",
         }
-        weighted_sum += avg_score * weight
 
-    final_score = round(weighted_sum, 3)
+    final_score = compute_directional_final_score(per_param_final)
 
     # Hitung rata-rata variance untuk overall consensus level
     all_vars = [v.get("variance", 0.0) for v in pre_analysis.values()]
@@ -669,16 +748,23 @@ def research_stock(
     ticker: str,
     qwen: Optional[QwenClient] = None,
     gemini: Optional[GeminiClient] = None,
+    funding_daily: Optional[float] = None,
+    recommended_side: Optional[str] = None,
 ) -> Research:
     """
     Eksekusi pipeline riset saham lengkap:
       1. Ambil data pasar & headlines berita 7 hari
-      2. Jalankan 4 Voter Swarm secara independen (2 Qwen + 2 Gemini)
+      2. Jalankan 4 Voter Swarm secara independen (2 Qwen + 2 Gemini) dengan konteks taktis 24-72 jam
       3. Analisis varians & konsensus P1-P7
-      4. Eksekusi Meta-Aggregator (Qwen-Max)
+      4. Eksekusi Meta-Aggregator (Qwen-Max) dengan skor arah murni (bebas bias positif)
       5. Kembalikan objek Research terstandarisasi
     """
     now_iso = datetime.now(timezone.utc).isoformat()
+    strategy_context = _build_strategy_context_block(
+        ticker,
+        funding_daily=funding_daily,
+        recommended_side=recommended_side,
+    )
 
     # Inisialisasi API clients jika belum tersedia
     if qwen is None and os.getenv("DASHSCOPE_API_KEY"):
@@ -715,11 +801,11 @@ def research_stock(
     tasks = {}
     with ThreadPoolExecutor(max_workers=4) as executor:
         if qwen:
-            tasks[executor.submit(run_voter_1, qwen, ticker, headlines)] = "V1_qwen_turbo"
-            tasks[executor.submit(run_voter_2, qwen, ticker, headlines)] = "V2_qwen_plus"
+            tasks[executor.submit(run_voter_1, qwen, ticker, headlines, strategy_context)] = "V1_qwen_turbo"
+            tasks[executor.submit(run_voter_2, qwen, ticker, headlines, strategy_context)] = "V2_qwen_plus"
         if gemini:
-            tasks[executor.submit(run_voter_3, gemini, ticker, headlines)] = "V3_gemini_flash"
-            tasks[executor.submit(run_voter_4, gemini, ticker, headlines)] = "V4_gemini_pro"
+            tasks[executor.submit(run_voter_3, gemini, ticker, headlines, strategy_context)] = "V3_gemini_flash"
+            tasks[executor.submit(run_voter_4, gemini, ticker, headlines, strategy_context)] = "V4_gemini_pro"
 
         for future in as_completed(tasks):
             voter_name = tasks[future]

@@ -567,12 +567,20 @@ def research_stock(
     ticker: str,
     qwen: Optional[QwenClient] = None,
     gemini: Optional[GeminiClient] = None,
+    funding_daily: Optional[float] = None,
+    recommended_side: Optional[str] = None,
 ) -> Research:
     """Full research bundle untuk 1 saham dengan kolaborasi Dual-AI (Qwen + Gemini)."""
     log.info(f"🔍 Researching {ticker}...")
     if qwen or gemini:
         import llm_research
-        return llm_research.research_stock(ticker, qwen=qwen, gemini=gemini)
+        return llm_research.research_stock(
+            ticker,
+            qwen=qwen,
+            gemini=gemini,
+            funding_daily=funding_daily,
+            recommended_side=recommended_side,
+        )
     days = check_earnings_date(ticker)
     sentiment, narrative = get_news_sentiment(ticker)
     return Research(
@@ -2072,7 +2080,13 @@ def scan_with_research(
         asset = opp["asset"]
         if asset in ALLOWED_STOCKS and (qwen or gemini):
             try:
-                researches[asset] = research_stock(asset, qwen=qwen, gemini=gemini)
+                researches[asset] = research_stock(
+                    asset,
+                    qwen=qwen,
+                    gemini=gemini,
+                    funding_daily=opp.get("funding_daily"),
+                    recommended_side=opp.get("recommended_side"),
+                )
                 log.info(
                     f"  ✓ research {asset}: {researches[asset].news_sentiment} "
                     f"(Consensus: {researches[asset].consensus})"
@@ -2119,7 +2133,13 @@ def scan_with_research(
             asset = opp.base_asset
             if asset in ALLOWED_STOCKS and asset not in researches and (qwen or gemini):
                 try:
-                    researches[asset] = research_stock(asset, qwen=qwen, gemini=gemini)
+                    researches[asset] = research_stock(
+                        asset,
+                        qwen=qwen,
+                        gemini=gemini,
+                        funding_daily=opp.funding_daily,
+                        recommended_side=opp.side,
+                    )
                 except Exception as e:
                     log.warning(f"  ✗ research {asset} failed: {e}")
             research = researches.get(asset)
@@ -2360,7 +2380,13 @@ def market_execute(
                     log.info(
                         f"  🔍 Riset on-the-fly ({otf_research_calls}/{max_otf_calls}) untuk {opp.base_asset} (belum ada di spreadsheet)..."
                     )
-                    researches[opp.base_asset] = research_stock(opp.base_asset, qwen=qwen, gemini=gemini)
+                    researches[opp.base_asset] = research_stock(
+                        opp.base_asset,
+                        qwen=qwen,
+                        gemini=gemini,
+                        funding_daily=opp.funding_daily,
+                        recommended_side=opp.side,
+                    )
                 except Exception as e:
                     log.warning(f"research {opp.base_asset}: {e}")
 

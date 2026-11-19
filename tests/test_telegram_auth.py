@@ -155,3 +155,26 @@ def test_end_user_can_toggle_strategy_packs_and_set_own_strategy(tmp_path, monke
     eff3 = strategy_config.get_effective_user_strategy(3003, user_path=user_strat_path, global_path=global_strat_path)
     assert eff3["active_pack"] == "true_funding_carry"
     assert eff3["default_sl_pct"] == 0.015
+
+
+def test_ai_directional_score_has_no_positive_bias_and_includes_strategy_context():
+    from llm_research import _build_strategy_context_block, compute_directional_final_score
+
+    # Kasus berita bearish (-0.4/-0.3/-0.2) namun P2, P3, P5, P6 tinggi (0.9)
+    # Rumus lama akan bias menjadi +positif; rumus baru wajib tetap negatif (bearish)
+    bearish_params = {
+        "P1_sentiment_polarity": {"final_score": -0.4},
+        "P2_signal_strength": {"final_score": 0.9},
+        "P3_source_credibility": {"final_score": 0.9},
+        "P4_momentum_direction": {"final_score": -0.3},
+        "P5_risk_catalysts": {"final_score": 0.8},
+        "P6_contrarian_check": {"final_score": 0.8},
+        "P7_historical_pattern": {"final_score": -0.2},
+    }
+    score = compute_directional_final_score(bearish_params)
+    assert score < -0.25
+
+    ctx = _build_strategy_context_block("SPY", funding_daily=0.006, recommended_side="short")
+    assert "SHORT" in ctx
+    assert "+0.600%/hari" in ctx
+    assert "24-72 jam" in ctx
