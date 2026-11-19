@@ -1117,44 +1117,78 @@ def _parse_positive_finite_price(raw: Any) -> Optional[float]:
     return round(val, 4)
 
 
+# avg_fill_price/fill_price/execution_price/mark_price: belum terverifikasi dari respons API nyata — konfirmasi via workflows/diagnostics.yml (Ronde 4 Item 4) sebelum andalkan
+_CLOSE_FILL_PRICE_KEYS: tuple[str, ...] = ("avg_fill_price", "fill_price", "execution_price", "price")
+_CLOSE_POSITION_PRICE_KEYS: tuple[str, ...] = ("avg_close_price", "close_price", "exit_price")
+_CLOSE_MARK_PRICE_KEYS: tuple[str, ...] = ("mark_price",)
+
+
+def _parse_sane_exit_price(raw: Any, entry_price: float) -> Optional[float]:
+    """Validasi harga keluar: harus finite > 0 dan menyimpang < 50% dari entry_price (sanity guard)."""
+    val = _parse_positive_finite_price(raw)
+    if val is None:
+        return None
+    if entry_price > 0 and abs(val - entry_price) / entry_price >= 0.5:
+        return None
+    return val
+
+
 def _extract_close_exit_price(res: Any, pos: Position) -> tuple[float, str]:
     """
     Ekstrak harga keluar dengan rantai fallback eksplisit (dari paling akurat ke paling lemah):
       1. exchange_fill     : harga fill riil dari objek order/top-level respons execute close.
       2. response_position : harga posisi penutupan pada respons close (jika dikembalikan API).
-      3. snapshot_estimate : pos.current_price (estimasi snapshot, bukan fill riil).
+      3. mark_price_proxy  : mark price dari respons close (proxy, bukan harga fill riil).
+      4. snapshot_estimate : pos.current_price (estimasi snapshot, bukan fill riil).
+      5. entry_fallback    : pos.entry_price (fallback terakhir bila snapshot tidak valid).
     """
+    entry = float(pos.entry_price or 0.0)
     if isinstance(res, dict):
-        # 1. Harga fill riil dari objek order hasil close (pola result["order"] / result["price"] seperti open_position)
+        # 1. Harga fill riil dari objek order/top-level hasil close
         order_obj = res.get("order")
         if isinstance(order_obj, dict):
-            for key in ("avg_fill_price", "fill_price", "execution_price", "price"):
-                parsed = _parse_positive_finite_price(order_obj.get(key))
+            for key in _CLOSE_FILL_PRICE_KEYS:
+                parsed = _parse_sane_exit_price(order_obj.get(key), entry)
                 if parsed is not None:
                     return parsed, "exchange_fill"
-        for key in ("avg_fill_price", "fill_price", "execution_price", "price"):
-            parsed = _parse_positive_finite_price(res.get(key))
+        for key in _CLOSE_FILL_PRICE_KEYS:
+            parsed = _parse_sane_exit_price(res.get(key), entry)
             if parsed is not None:
                 return parsed, "exchange_fill"
 
-        # 2. Harga posisi yang dikembalikan pada respons close (jika ada)
+        # 2. Harga posisi penutupan pada respons close (jika ada)
         pos_obj = res.get("position")
         if isinstance(pos_obj, dict):
-            for key in ("avg_close_price", "close_price", "exit_price", "mark_price"):
-                parsed = _parse_positive_finite_price(pos_obj.get(key))
+            for key in _CLOSE_POSITION_PRICE_KEYS:
+                parsed = _parse_sane_exit_price(pos_obj.get(key), entry)
                 if parsed is not None:
                     return parsed, "response_position"
-        for key in ("avg_close_price", "close_price", "exit_price"):
-            parsed = _parse_positive_finite_price(res.get(key))
+        for key in _CLOSE_POSITION_PRICE_KEYS:
+            parsed = _parse_sane_exit_price(res.get(key), entry)
             if parsed is not None:
                 return parsed, "response_position"
 
-    # 3. Fallback lama: pos.current_price  # estimasi snapshot, bukan fill riil
-    snap_price = _parse_positive_finite_price(pos.current_price)  # estimasi snapshot, bukan fill riil
+        # 3. Mark price (dipisahkan dari fill/response_position karena mark price bukan harga fill)
+        if isinstance(pos_obj, dict):
+            for key in _CLOSE_MARK_PRICE_KEYS:
+                parsed = _parse_sane_exit_price(pos_obj.get(key), entry)
+                if parsed is not None:
+                    return parsed, "mark_price_proxy"
+        for key in _CLOSE_MARK_PRICE_KEYS:
+            parsed = _parse_sane_exit_price(res.get(key), entry)
+            if parsed is not None:
+                return parsed, "mark_price_proxy"
+
+    # 4. Fallback snapshot: pos.current_price  # estimasi snapshot, bukan fill riil
+    snap_price = _parse_sane_exit_price(pos.current_price, entry)  # estimasi snapshot, bukan fill riil
     if snap_price is not None:
         return snap_price, "snapshot_estimate"
+
+    # 5. Fallback terakhir: pos.entry_price (bukan snapshot)
     entry_fallback = _parse_positive_finite_price(pos.entry_price)
-    return (entry_fallback if entry_fallback is not None else round(float(pos.current_price), 4)), "snapshot_estimate"
+    if entry_fallback is not None:
+        return entry_fallback, "entry_fallback"
+    return round(float(pos.current_price), 4), "entry_fallback"
 
 
 def _execute_validated_close(

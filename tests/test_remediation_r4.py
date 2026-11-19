@@ -41,3 +41,88 @@ def test_r4_1_missing_registry_key_does_not_raise(monkeypatch, caplog):
         and "NVDA" in rec.message
         for rec in caplog.records
     )
+
+
+@pytest.mark.parametrize(
+    "side,current",
+    [
+        ("long", 102.0),   # long profit
+        ("long", 98.0),    # long loss
+        ("short", 98.0),   # short profit
+        ("short", 102.0),  # short loss
+    ],
+)
+def test_r4_2_snapshot_pnl_equivalence_long_short_profit_loss(monkeypatch, side, current):
+    import sheet_logger
+
+    logged = []
+    monkeypatch.setattr(sheet_logger, "log_close", lambda **kw: logged.append(kw))
+    monkeypatch.setattr(walt_bot, "_set_asset_cooldown", lambda *a, **kw: None)
+    monkeypatch.setattr(walt_bot, "_record_closed_id", lambda *a, **kw: None)
+
+    pos = _pos(side=side, entry=100.0, current=current)
+    walt_bot._record_position_close(pos, reason="TP breached", exit_price=pos.current_price)
+
+    assert len(logged) == 1
+    expected_pnl = pos.pnl_pct_margin * pos.margin
+    assert logged[0]["pnl_quote"] == pytest.approx(expected_pnl, abs=1e-9)
+    assert logged[0]["exit_price"] == pytest.approx(round(current, 4), abs=1e-6)
+
+
+def test_r4_2_fill_price_computes_consistent_pnl_and_round4(monkeypatch):
+    from unittest.mock import MagicMock
+    import sheet_logger
+
+    logged = []
+    monkeypatch.setattr(sheet_logger, "log_close", lambda **kw: logged.append(kw))
+    monkeypatch.setattr(walt_bot, "_set_asset_cooldown", lambda *a, **kw: None)
+    monkeypatch.setattr(walt_bot, "_record_closed_id", lambda *a, **kw: None)
+
+    client = MagicMock()
+    client.execute.return_value = {"ok": True, "order": {"price": "97.654321"}}
+    pos = _pos(side="short", entry=100.0, current=98.5)
+    walt_bot._execute_validated_close(
+        client, pos, {"ok": True, "confirmationToken": "tok_f"}, reason="TP breached"
+    )
+    assert len(logged) == 1
+    fill_rounded = round(97.654321, 4)
+    expected_move = (pos.entry_price - fill_rounded) / pos.entry_price
+    expected_pnl = expected_move * pos.leverage * pos.margin
+    assert logged[0]["exit_price"] == pytest.approx(fill_rounded, abs=1e-6)
+    assert logged[0]["pnl_quote"] == pytest.approx(expected_pnl, abs=1e-9)
+
+
+def test_r4_2_mark_price_is_labeled_mark_price_proxy():
+    pos = _pos(side="long", entry=100.0, current=101.0)
+    price, src = walt_bot._extract_close_exit_price({"position": {"mark_price": "101.5"}}, pos)
+    assert price == pytest.approx(101.5, abs=1e-6)
+    assert src == "mark_price_proxy"
+
+
+def test_r4_2_entry_fallback_is_labeled_entry_fallback():
+    pos = _pos(side="long", entry=100.0, current=0.0)
+    price, src = walt_bot._extract_close_exit_price({}, pos)
+    assert price == pytest.approx(100.0, abs=1e-6)
+    assert src == "entry_fallback"
+
+
+def test_r4_2_sanity_guard_rejects_extreme_fill_price_and_falls_back_to_snapshot():
+    pos = _pos(side="long", entry=100.0, current=101.25)
+    # 200.0 menyimpang 100% dari entry (>= 50%) -> harus ditolak sanity guard, jatuh ke snapshot
+    price, src = walt_bot._extract_close_exit_price({"order": {"price": "200.0"}}, pos)
+    assert price == pytest.approx(101.25, abs=1e-6)
+    assert src == "snapshot_estimate"
+
+    # 30.0 menyimpang 70% dari entry (>= 50%) -> ditolak sanity guard, jatuh ke snapshot
+    price2, src2 = walt_bot._extract_close_exit_price({"position": {"avg_close_price": "30.0"}}, pos)
+    assert price2 == pytest.approx(101.25, abs=1e-6)
+    assert src2 == "snapshot_estimate"
+
+
+def test_r4_2_unverified_price_keys_quarantined_in_module_constants():
+    assert hasattr(walt_bot, "_CLOSE_FILL_PRICE_KEYS")
+    assert hasattr(walt_bot, "_CLOSE_POSITION_PRICE_KEYS")
+    assert hasattr(walt_bot, "_CLOSE_MARK_PRICE_KEYS")
+    assert "mark_price" not in walt_bot._CLOSE_POSITION_PRICE_KEYS
+    assert "mark_price" in walt_bot._CLOSE_MARK_PRICE_KEYS
+
