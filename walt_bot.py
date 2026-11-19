@@ -1008,8 +1008,10 @@ def _resolve_trailing_sl(pos: Position, profit: float) -> Optional[tuple[float, 
     if active_tier is None:
         return None
     _threshold, action = active_tier
-    if action == "lock_0035" or (isinstance(action, str) and action in _TRAILING_HANDLERS):
-        lock_pct, label = _TRAILING_HANDLERS[action]
+    handler_spec = _TRAILING_HANDLERS.get(action) if isinstance(action, str) else None
+    if handler_spec is not None:
+        lock_pct, label = handler_spec
+        _is_zero_risk_tier = True if action == "lock_0035" else False
         sl_price = (
             pos.entry_price * (1.0 + lock_pct)
             if pos.side == "long"
