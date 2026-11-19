@@ -204,6 +204,9 @@ DEFAULT_SL_PCT = 0.015      # 1.5% default SL (beri ruang napas noise intraday, 
 DEFAULT_TP_PCT = 0.025      # 2.5% default TP (biarkan profit berlari & tutup fee jauh)
 DEFAULT_CALM_TP_PCT = 0.020 # 2.0% default TP ETF & Crypto
 MAX_P5_RISK = 0.70          # E2: P5_risk_catalysts >= 0.70 -> SKIP
+MAX_ENTRIES_PER_ASSET_24H = 2   # E4: maks 2 entry per aset per 24 jam
+MAX_ENTRIES_PER_DAY = 8         # E4: maks 8 entry total per 24 jam
+DAILY_LOSS_LIMIT_PCT = 0.05     # E4: circuit breaker penurunan ekuitas harian >= 5%
 
 try:
     from strategy_config import load_strategy_config as _load_strategy_config
@@ -214,6 +217,9 @@ try:
     MIN_FUNDING_DAILY = float(_rt_cfg.get("min_funding_daily", MIN_FUNDING_DAILY))
     REENTRY_COOLDOWN_SEC = int(float(_rt_cfg.get("reentry_cooldown_hours", 3.0)) * 3600)
     MAX_P5_RISK = float(_rt_cfg.get("max_p5_risk", MAX_P5_RISK))
+    MAX_ENTRIES_PER_ASSET_24H = int(_rt_cfg.get("max_entries_per_asset_24h", MAX_ENTRIES_PER_ASSET_24H))
+    MAX_ENTRIES_PER_DAY = int(_rt_cfg.get("max_entries_per_day", MAX_ENTRIES_PER_DAY))
+    DAILY_LOSS_LIMIT_PCT = float(_rt_cfg.get("daily_loss_limit_pct", DAILY_LOSS_LIMIT_PCT))
 except Exception as _cfg_exc:
     logging.getLogger("walt-bot").warning(
         f"Gagal memuat konfigurasi strategi bersama ({_cfg_exc}); fallback ke DEFAULT_STRATEGY_CONFIG."
@@ -1454,6 +1460,128 @@ def _save_execution_regime(data: dict, regime_path: str = "logs/market_regime.js
         log.debug(f"Gagal menyimpan market_regime.json: {e}")
 
 
+def record_entry_execution(
+    asset: str,
+    now_ts: Optional[float] = None,
+    regime_path: str = "logs/market_regime.json",
+) -> None:
+    """Catat timestamp entry baru (disimpan rolling 24 jam di logs/market_regime.json)."""
+    if not asset:
+        return
+    now = time.time() if now_ts is None else float(now_ts)
+    cutoff = now - 86400.0
+    state = _load_execution_regime(regime_path)
+    hist = state.get("entry_history_24h")
+    if not isinstance(hist, list):
+        hist = []
+    hist = [
+        item for item in hist
+        if isinstance(item, dict) and float(item.get("ts", 0.0) or 0.0) >= cutoff
+    ]
+    hist.append({"asset": asset.upper(), "ts": now})
+    state["entry_history_24h"] = hist
+    _save_execution_regime(state, regime_path=regime_path)
+
+
+def check_entry_frequency_limits(
+    asset: str,
+    now_ts: Optional[float] = None,
+    regime_path: str = "logs/market_regime.json",
+    max_per_asset: Optional[int] = None,
+    max_per_day: Optional[int] = None,
+) -> tuple[bool, str]:
+    """
+    E4: Cek batas frekuensi entry dalam 24 jam terakhir:
+    - Maksimal max_entries_per_asset_24h (default 2) per aset.
+    - Maksimal max_entries_per_day (default 8) total seluruh aset.
+    Return (allowed, reason).
+    """
+    now = time.time() if now_ts is None else float(now_ts)
+    cutoff = now - 86400.0
+    lim_asset = MAX_ENTRIES_PER_ASSET_24H if max_per_asset is None else int(max_per_asset)
+    lim_day = MAX_ENTRIES_PER_DAY if max_per_day is None else int(max_per_day)
+
+    state = _load_execution_regime(regime_path)
+    hist = state.get("entry_history_24h")
+    if not isinstance(hist, list):
+        hist = []
+    recent = [
+        item for item in hist
+        if isinstance(item, dict) and float(item.get("ts", 0.0) or 0.0) >= cutoff
+    ]
+    if len(recent) >= lim_day:
+        return False, f"batas harian tercapai ({len(recent)}/{lim_day} entry dalam 24 jam)"
+
+    asset_up = asset.upper()
+    asset_cnt = sum(1 for item in recent if str(item.get("asset", "")).upper() == asset_up)
+    if asset_cnt >= lim_asset:
+        return False, f"batas entry aset {asset_up} tercapai ({asset_cnt}/{lim_asset} dalam 24 jam)"
+
+    return True, "OK"
+
+
+def check_daily_circuit_breaker(
+    total_equity: float,
+    now_utc: Optional[datetime] = None,
+    regime_path: str = "logs/market_regime.json",
+    limit_pct: Optional[float] = None,
+    send_alert: bool = True,
+) -> tuple[bool, str]:
+    """
+    E4: Circuit breaker harian UTC.
+    Jika total ekuitas turun >= daily_loss_limit_pct (default 5%) dari ekuitas awal hari UTC,
+    hentikan entry baru sampai 00:00 UTC berikutnya dan kirim alert Telegram (1x per hari).
+    Risk monitor tetap berjalan normal.
+    Return (tripped, reason).
+    """
+    if total_equity <= 0:
+        return False, "OK"
+    now = now_utc or datetime.now(timezone.utc)
+    today_utc = now.strftime("%Y-%m-%d")
+    lim = DAILY_LOSS_LIMIT_PCT if limit_pct is None else float(limit_pct)
+
+    state = _load_execution_regime(regime_path)
+    cb = state.get("daily_circuit_breaker")
+    if not isinstance(cb, dict) or cb.get("date_utc") != today_utc:
+        cb = {
+            "date_utc": today_utc,
+            "start_equity": round(float(total_equity), 6),
+            "tripped": False,
+            "alert_sent": False,
+        }
+        state["daily_circuit_breaker"] = cb
+        _save_execution_regime(state, regime_path=regime_path)
+        return False, "OK"
+
+    start_eq = float(cb.get("start_equity") or total_equity)
+    if start_eq <= 0:
+        return False, "OK"
+
+    drop_pct = (start_eq - total_equity) / start_eq
+    if cb.get("tripped") or drop_pct >= lim:
+        cb["tripped"] = True
+        reason = (
+            f"circuit breaker harian aktif (ekuitas turun {drop_pct*100:.2f}% >= {lim*100:.1f}% "
+            f"dari awal UTC ${start_eq:.2f} → ${total_equity:.2f}; jeda entry sampai 00:00 UTC)"
+        )
+        if send_alert and not cb.get("alert_sent"):
+            cb["alert_sent"] = True
+            try:
+                send_telegram(
+                    f"🚨 *CIRCUIT BREAKER HARIAN AKTIF*\n"
+                    f"Ekuitas turun `{drop_pct*100:.2f}%` (batas `{lim*100:.1f}%`)\n"
+                    f"Awal hari UTC: `${start_eq:.2f}` → Sekarang: `${total_equity:.2f}`\n"
+                    f"Entry baru dihentikan sampai `00:00 UTC` berikutnya. Risk monitor tetap aktif."
+                )
+            except Exception as exc:
+                log.warning(f"Gagal kirim alert circuit breaker: {exc}")
+        state["daily_circuit_breaker"] = cb
+        _save_execution_regime(state, regime_path=regime_path)
+        return True, reason
+
+    return False, "OK"
+
+
 def _update_regime_state(
     category: Literal["market", "crypto"],
     opps: list[Opportunity],
@@ -2410,7 +2538,12 @@ def scan_with_research(
             f"Posisi Aktif {active_slot_count}/{max_slots} | Max Allowed Slots: {max_slots}"
         )
 
-        raw_opps = summary.get("_raw_opportunities", [])
+        cb_tripped, cb_reason = check_daily_circuit_breaker(total_equity)
+        if cb_tripped:
+            log.warning(f"🚨 [CIRCUIT BREAKER] {cb_reason}")
+            raw_opps = []
+        else:
+            raw_opps = summary.get("_raw_opportunities", [])
         for opp in raw_opps:
             if active_slot_count >= max_slots:
                 log.info(f"  Slot maksimal tercapai ({active_slot_count}/{max_slots}), hentikan alokasi.")
@@ -2448,6 +2581,15 @@ def scan_with_research(
                     executions.append({
                         "asset": asset, "side": opp.side, "leverage": MAX_LEVERAGE, "verdict": "SKIP",
                         "reason": f"cooldown {cd_min:.0f}m pasca penutupan (anti-whipsaw)",
+                    })
+                    continue
+
+                freq_ok, freq_reason = check_entry_frequency_limits(asset)
+                if not freq_ok:
+                    log.info(f"  SKIP {asset}: {freq_reason}")
+                    executions.append({
+                        "asset": asset, "side": opp.side, "leverage": MAX_LEVERAGE, "verdict": "SKIP",
+                        "reason": freq_reason,
                     })
                     continue
 
@@ -2515,6 +2657,7 @@ def scan_with_research(
                         _record_open_position_verdict(
                             opp.contract_id, asset, opp.side, verdict, actual_margin, order_price
                         )
+                        record_entry_execution(asset)
                         deployed += actual_margin
                         existing_contracts.add(opp.contract_id)
                         active_slot_count += 1
@@ -2663,6 +2806,11 @@ def market_execute(
     researches: dict[str, Research] = {}
     otf_research_calls = 0
     max_otf_calls = max_slots * 2
+    cb_tripped, cb_reason = check_daily_circuit_breaker(total_equity)
+    if cb_tripped:
+        log.warning(f"🚨 [CIRCUIT BREAKER] {cb_reason}")
+        opps = []
+
     for opp in opps:
         if opp.base_asset in ALLOWED_STOCKS:
             if opp.base_asset in cached_researches:
@@ -2746,6 +2894,18 @@ def market_execute(
             })
             continue
 
+        freq_ok, freq_reason = check_entry_frequency_limits(opp.base_asset)
+        if not freq_ok:
+            log.info(f"  SKIP {opp.base_asset}: {freq_reason}")
+            executions.append({
+                "asset": opp.base_asset,
+                "side": opp.side,
+                "leverage": MAX_LEVERAGE,
+                "verdict": "SKIP",
+                "reason": freq_reason,
+            })
+            continue
+
         margin = calculate_dynamic_margin(
             available_balance=available,
             active_slots=active_slot_count,
@@ -2809,6 +2969,7 @@ def market_execute(
                 _record_open_position_verdict(
                     opp.contract_id, opp.base_asset, opp.side, verdict, actual_margin, order_price
                 )
+                record_entry_execution(opp.base_asset)
                 deployed += actual_margin
             else:
                 log.warning(f"  FAILED {opp.base_asset}: preview / risk check gagal")

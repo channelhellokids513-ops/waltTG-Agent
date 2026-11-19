@@ -29,6 +29,9 @@ DEFAULT_STRATEGY_CONFIG: dict[str, Any] = {
     "max_slots_cap": 15,            # batas atas slot elastis
     "max_p5_risk": 0.70,            # E2: P5_risk_catalysts >= 0.70 -> SKIP
     "max_research_age_hours": 6.0,  # E3: abaikan riset lebih lama dari 6 jam
+    "max_entries_per_asset_24h": 2, # E4: maks 2 entry per aset per 24 jam
+    "max_entries_per_day": 8,       # E4: maks 8 entry total per 24 jam
+    "daily_loss_limit_pct": 0.05,   # E4: circuit breaker turun >= 5% dari ekuitas awal hari UTC
     "dry_run": False,
 }
 
@@ -42,6 +45,9 @@ STRATEGY_PARAM_SPECS: dict[str, dict[str, Any]] = {
     "max_slots_cap": {"type": "int", "min": 1, "max": 15, "desc": "Batas maksimal slot posisi terbuka (1-15)"},
     "max_p5_risk": {"type": "float", "min": 0.3, "max": 1.0, "desc": "Ambang P5_risk_catalysts untuk SKIP (0.3-1.0)"},
     "max_research_age_hours": {"type": "float", "min": 1.0, "max": 24.0, "desc": "Umur maksimal riset valid sebelum dianggap basi (jam)"},
+    "max_entries_per_asset_24h": {"type": "int", "min": 1, "max": 10, "desc": "Maksimal entry per aset dalam 24 jam"},
+    "max_entries_per_day": {"type": "int", "min": 1, "max": 30, "desc": "Maksimal total entry dalam 24 jam"},
+    "daily_loss_limit_pct": {"type": "float", "min": 0.01, "max": 0.25, "desc": "Batas penurunan ekuitas harian UTC untuk circuit breaker (mis. 0.05 = 5%)"},
     "dry_run": {"type": "bool", "desc": "Mode simulasi tanpa order riil (true/false)"},
 }
 
