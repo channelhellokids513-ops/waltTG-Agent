@@ -910,6 +910,14 @@ def open_position(
         log.error(f"{opp.base_asset}: risk check gagal: {risk_detail}")
         return None
 
+    if not has_enough_job_time(AUTO_CLOSE_RETRY_BUDGET_MIN):
+        rem_min = get_job_remaining_minutes()
+        log.warning(
+            f"{opp.base_asset}: skip open_position sebelum execute(token) — sisa waktu job "
+            f"{rem_min:.1f}m < ambang {AUTO_CLOSE_RETRY_BUDGET_MIN:.1f}m"
+        )
+        return None
+
     token = preview["confirmationToken"]
     try:
         result = client.execute(token)
@@ -930,8 +938,16 @@ def open_position(
         f"TP ${tp}, SL ${sl}, order_id={order_id}"
     )
 
-    # Jika preview berhasil tanpa TP/SL, set terpisah dengan retry maksimal 3x
+    # Jika preview berhasil tanpa TP/SL, set terpisah dengan retry maksimal 3x.
+    # Cek sisa waktu setelah order terisi hanya untuk warning; order sudah terisi sehingga
+    # autoClose WAJIB tetap dicoba sampai selesai (tidak boleh berhenti di tengah).
     if "autoClose" not in preview.get("action", {}).get("request", {}):
+        if not has_enough_job_time(AUTO_CLOSE_RETRY_BUDGET_MIN):
+            rem_min = get_job_remaining_minutes()
+            log.warning(
+                f"{opp.base_asset}: sisa waktu job tinggal {rem_min:.1f}m (< {AUTO_CLOSE_RETRY_BUDGET_MIN:.1f}m), "
+                f"tetapi order sudah terisi — tetap lanjutkan pemasangan TP/SL autoClose hingga tuntas"
+            )
         ac_ok = False
         for attempt in range(1, 4):
             time.sleep(3)
@@ -2245,7 +2261,8 @@ def _maybe_run_adaptive_executions(
 
 
 JOB_START_MONO = time.monotonic()
-JOB_TIME_GUARD_MIN = 6.0  # Sisakan minimal 6 menit agar order + TP/SL tidak pernah terpotong timeout
+JOB_TIME_GUARD_MIN = 6.0  # Guard waktu minimum (menit): dipakai di jalur monitor DAN jalur eksekusi sebelum membuka order baru
+AUTO_CLOSE_RETRY_BUDGET_MIN = 1.5  # Ambang minimum (menit) sebelum mengirim order agar tersedia anggaran retry autoClose TP/SL
 
 
 def get_job_remaining_minutes(
@@ -2626,6 +2643,7 @@ def scan_with_research(
     # Eksekusi instan jika auto_execute aktif
     executions = []
     deployed = 0.0
+    skipped_timeout: list[str] = []
     accounts = summary.get("balance", [])
     available = float(accounts[0]["balance_available"]) if accounts else 0.0
     target_deploy = available * (1.0 - MIN_BUFFER_PCT)  # 15% cash buffer dijaga
@@ -2657,7 +2675,7 @@ def scan_with_research(
             raw_opps = []
         else:
             raw_opps = summary.get("_raw_opportunities", [])
-        for opp in raw_opps:
+        for opp_idx, opp in enumerate(raw_opps):
             if active_slot_count >= max_slots:
                 log.info(f"  Slot maksimal tercapai ({active_slot_count}/{max_slots}), hentikan alokasi.")
                 break
@@ -2764,6 +2782,20 @@ def scan_with_research(
                     active_slot_count += 1
                     continue
 
+                if not has_enough_job_time():
+                    rem_min = get_job_remaining_minutes()
+                    remaining_assets = [o.base_asset for o in raw_opps[opp_idx:]]
+                    skipped_timeout.extend(remaining_assets)
+                    log.warning(
+                        f"⏳ Sisa waktu job tinggal {rem_min:.1f} menit, "
+                        f"{len(remaining_assets)} kandidat dilewati ({', '.join(remaining_assets)})"
+                    )
+                    send_telegram(
+                        f"⏳ Sisa waktu job tinggal {rem_min:.1f} menit, "
+                        f"{len(remaining_assets)} kandidat dilewati"
+                    )
+                    break
+
                 try:
                     res = open_position(client, opp, margin=margin, leverage=MAX_LEVERAGE)
                     if res:
@@ -2825,12 +2857,16 @@ def scan_with_research(
     except Exception as e:
         log.warning(f"Logging scan/PnL to sheet failed: {e}")
 
-    return {
+    result_payload = {
         "summary": summary,
         "researches": {k: v.__dict__ for k, v in researches.items()},
         "executions": executions,
         "deployed": deployed,
     }
+    if skipped_timeout:
+        result_payload["status"] = "partial_timeout"
+        result_payload["skipped"] = skipped_timeout
+    return result_payload
 
 
 # =============================================================================
@@ -2960,6 +2996,7 @@ def market_execute(
     # Decide + execute
     executions = []
     deployed = 0.0
+    skipped_timeout: list[str] = []
     target_deploy = available * (1.0 - MIN_BUFFER_PCT)  # 15% cash buffer dijaga konsisten dari available
 
     active_slot_count = len(open_contract_ids)
@@ -2968,7 +3005,7 @@ def market_execute(
         f"Posisi Aktif {active_slot_count}/{max_slots} | Max Allowed Slots: {max_slots}"
     )
 
-    for opp in opps:
+    for opp_idx, opp in enumerate(opps):
         if active_slot_count >= max_slots:
             log.info(f"  Slot maksimal tercapai ({active_slot_count}/{max_slots}), hentikan pembukaan posisi baru.")
             break
@@ -3088,6 +3125,20 @@ def market_execute(
             active_slot_count += 1
             continue
 
+        if not has_enough_job_time():
+            rem_min = get_job_remaining_minutes()
+            remaining_assets = [o.base_asset for o in opps[opp_idx:]]
+            skipped_timeout.extend(remaining_assets)
+            log.warning(
+                f"⏳ Sisa waktu job tinggal {rem_min:.1f} menit, "
+                f"{len(remaining_assets)} kandidat dilewati ({', '.join(remaining_assets)})"
+            )
+            send_telegram(
+                f"⏳ Sisa waktu job tinggal {rem_min:.1f} menit, "
+                f"{len(remaining_assets)} kandidat dilewati"
+            )
+            break
+
         try:
             result = open_position(client, opp, margin=margin, leverage=MAX_LEVERAGE)
             if result:
@@ -3151,7 +3202,11 @@ def market_execute(
     except Exception as e:
         log.warning(f"Logging execution to sheet failed: {e}")
 
-    return {"executions": executions, "deployed": deployed, "available": available}
+    result_payload = {"executions": executions, "deployed": deployed, "available": available}
+    if skipped_timeout:
+        result_payload["status"] = "partial_timeout"
+        result_payload["skipped"] = skipped_timeout
+    return result_payload
 
 
 def crypto_execute(client: WaltClient, dry_run: bool = False) -> dict:
