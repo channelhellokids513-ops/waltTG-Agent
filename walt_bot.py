@@ -689,9 +689,9 @@ def decide_go_nogo(
         label = "crypto bluechip" if opp.base_asset in ALLOWED_CRYPTO else "komoditas"
         return "GO", f"{label}, dynamic TP/SL carry capture", 1.0
 
-    # Saham perlu research
+    # E3: Saham wajib memiliki riset segar (<= max_research_age_hours); jika tidak ada -> SKIP "riset basi"
     if research is None:
-        return "HALF", "no research data (fallback)", 0.5
+        return "SKIP", "riset basi", 0.0
 
     # Earnings risk (H-7)
     if research.days_to_earnings is not None and research.days_to_earnings <= 7:

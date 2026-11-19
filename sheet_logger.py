@@ -481,18 +481,45 @@ def log_pnl_tracker(summary: dict, filepath: str = "logs/pnl_tracker.csv") -> di
     return {"logged": True, "webhook_logged": webhook_ok, "date": date_utc, "row": row}
 
 
+def _is_research_fresh(
+    timestamp_str: Any,
+    max_age_hours: float,
+    now_utc: Optional[datetime] = None,
+) -> bool:
+    """Return True hanya jika timestamp riset valid dan umurnya <= max_age_hours."""
+    raw = str(timestamp_str or "").strip()
+    if not raw:
+        return False
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        now = now_utc or datetime.now(timezone.utc)
+        age_hours = (now - dt).total_seconds() / 3600.0
+        return 0.0 <= age_hours <= max_age_hours or age_hours < 0.0
+    except Exception:
+        return False
+
+
 def fetch_latest_research_from_sheet(
     webhook_url: Optional[str] = None,
-    csv_path: str = "logs/scan_history.csv"
+    csv_path: str = "logs/scan_history.csv",
+    max_age_hours: Optional[float] = None,
+    now_utc: Optional[datetime] = None,
 ) -> dict[str, Any]:
     """
     Mengambil ringkasan riset terbaru per aset dari:
     1. Google Sheets Webhook via GET request (online/terpusat)
     2. File CSV audit lokal (offline fallback)
-    
-    Mengembalikan dict[asset, Research] yang siap digunakan untuk decide_go_nogo.
+    Mengabaikan riset yang lebih tua dari max_age_hours (default 6 jam).
     """
     from llm_research import Research
+    if max_age_hours is None:
+        try:
+            from strategy_config import load_strategy_config
+            max_age_hours = float(load_strategy_config().get("max_research_age_hours", 6.0))
+        except Exception:
+            max_age_hours = 6.0
 
     url = _normalize_webhook_url(webhook_url or os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", DEFAULT_WEBHOOK_URL))
     if url:
@@ -503,7 +530,11 @@ def fetch_latest_research_from_sheet(
                 if isinstance(res, dict) and res.get("status") == "success":
                     data = res.get("data", {})
                     researches: dict[str, Research] = {}
+                    stale_skipped = 0
                     for asset, item in data.items():
+                        if not _is_research_fresh(item.get("timestamp"), max_age_hours, now_utc=now_utc):
+                            stale_skipped += 1
+                            continue
                         score = 0.0
                         try:
                             raw_score = str(item.get("swarm_score", "0")).replace("+", "")
@@ -542,8 +573,10 @@ def fetch_latest_research_from_sheet(
                             vendor_alignment=str(item.get("vendor_alignment") or "both_agree"),
                             p1_to_p7_scores=p1_to_p7,
                         )
+                    if stale_skipped:
+                        log.info(f"⏳ {stale_skipped} data riset dari Webhook diabaikan karena basi (> {max_age_hours:.1f} jam).")
                     if researches:
-                        log.info(f"✓ Berhasil memuat {len(researches)} data riset dari Google Sheets Webhook ({list(researches.keys())})")
+                        log.info(f"✓ Berhasil memuat {len(researches)} data riset segar dari Google Sheets Webhook ({list(researches.keys())})")
                         return researches
         except Exception as e:
             log.warning(f"Gagal mengambil riset dari Google Sheets Webhook: {e}")
@@ -554,9 +587,13 @@ def fetch_latest_research_from_sheet(
             with open(csv_path, mode="r", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 researches = {}
+                stale_skipped = 0
                 for row in reader:
                     asset = row.get("asset", "").strip().upper()
                     if not asset:
+                        continue
+                    if not _is_research_fresh(row.get("timestamp_utc"), max_age_hours, now_utc=now_utc):
+                        stale_skipped += 1
                         continue
                     score = 0.0
                     try:
@@ -569,6 +606,20 @@ def fetch_latest_research_from_sheet(
                     if sent not in ("bullish", "bearish", "neutral", "unknown"):
                         sent = "unknown"
 
+                    p1_to_p7 = {}
+                    for col_k, norm_k in (
+                        ("p1_polarity", "P1_sentiment_polarity"),
+                        ("p4_momentum", "P4_momentum_direction"),
+                        ("p5_catalysts", "P5_risk_catalysts"),
+                        ("p6_contrarian", "P6_contrarian_check"),
+                    ):
+                        raw_v = row.get(col_k)
+                        if raw_v and raw_v != "—":
+                            try:
+                                p1_to_p7[norm_k] = float(str(raw_v).replace("+", ""))
+                            except Exception:
+                                pass
+
                     researches[asset] = Research(
                         ticker=asset,
                         days_to_earnings=None,
@@ -580,9 +631,12 @@ def fetch_latest_research_from_sheet(
                         final_score=score,
                         overall_consensus_level=row.get("consensus", "SINGLE_MODEL"),
                         vendor_alignment=row.get("vendor_alignment", "both_agree"),
+                        p1_to_p7_scores=p1_to_p7,
                     )
+                if stale_skipped:
+                    log.info(f"⏳ {stale_skipped} baris riset CSV lokal diabaikan karena basi (> {max_age_hours:.1f} jam).")
                 if researches:
-                    log.info(f"✓ Berhasil memuat {len(researches)} data riset dari file CSV lokal ({list(researches.keys())})")
+                    log.info(f"✓ Berhasil memuat {len(researches)} data riset segar dari file CSV lokal ({list(researches.keys())})")
                     return researches
         except Exception as e:
             log.warning(f"Gagal membaca riset dari CSV lokal: {e}")
