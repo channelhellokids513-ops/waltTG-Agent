@@ -2,7 +2,7 @@
 
 [![GitHub Actions Status](https://github.com/channelhellokids513-ops/waltTG-Agent/actions/workflows/market-execute.yml/badge.svg)](https://github.com/channelhellokids513-ops/waltTG-Agent/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Python 3.12](https://img.shields.io/badge/Python-3.12-green.svg)](https://python.org)
+[![Python 3.14](https://img.shields.io/badge/Python-3.14-green.svg)](https://python.org)
 [![Zero-Cost Infrastructure](https://img.shields.io/badge/Infra%20Cost-%240%20(Free%20Tier)-brightgreen.svg)](#-biaya-infrastruktur-100-zero-cost)
 
 Autonomous delta-neutral & directional funding rate arbitrage trading system untuk platform **Walt Perps** (`walletbot.me`). Ditenagai oleh **Dual-AI Research Swarm (Qwen + Gemini)**, **Google Cloud Scheduler Precision Bridge**, sistem **Risk Monitor 4-Lapis**, dan pelaporan *real-time* ke **Telegram** serta **Google Sheets**.
@@ -110,12 +110,17 @@ gcloud scheduler jobs list --location=asia-southeast2
 
 | Komponen / Workflow | Trigger Resmi | Timeout / Guard | Deskripsi |
 |---|---|---|---|
-| [`daily-scan.yml`](.github/workflows/daily-scan.yml) | **Cloud Scheduler (`workflow_dispatch`)** — 07:17 & 19:17 WIB | `15m` (`JOB_TIMEOUT_MIN=15`) | Master Scan seluruh kontrak, ranking peluang funding, riset Swarm AI mendalam (Qwen+Gemini P1–P7), eksekusi order GO/HALF, simpan database ke Google Sheet & notif Telegram. |
-| [`market-execute.yml`](.github/workflows/market-execute.yml) | **Cloud Scheduler (`workflow_dispatch`)** — Tiap 2 jam (menit 43) | `15m` (`JOB_TIMEOUT_MIN=15`) | Eksekusi adaptif Saham US & Komoditas 24/7: **1 jam (Gear 2)** saat peluang funding melimpah ($\ge 3$ aset $\ge 0.5\%$/hari atau $\ge 2$ ekstrem $\ge 0.8\%$/hari), **2 jam (Gear 1)** saat normal/sepi, dan *fast-exit* saat slot penuh (Gear 0). Dilengkapi *3-hour re-entry cooldown*. |
-| [`crypto-execute.yml`](.github/workflows/crypto-execute.yml) | **Cloud Scheduler (`workflow_dispatch`)** — Tiap 2 jam (menit 11) | `15m` (`JOB_TIMEOUT_MIN=15`) | Eksekusi adaptif 10 Crypto Bluechip (`BTC`, `ETH`, `SOL`, dll) dengan sistem **Calmed Adaptive (1h / 2h)** dan *3-hour re-entry cooldown*. |
+| [`daily-scan.yml`](.github/workflows/daily-scan.yml) | **Cloud Scheduler (`workflow_dispatch`)** — 07:17 & 19:17 WIB | `12m` (`JOB_TIMEOUT_MIN=12`, guard `< 6m`) | Master Scan seluruh kontrak, ranking peluang funding, riset Swarm AI mendalam (Qwen+Gemini P1–P7), eksekusi order GO/HALF, simpan database ke Google Sheet & notif Telegram. |
+| [`market-execute.yml`](.github/workflows/market-execute.yml) | **Cloud Scheduler (`workflow_dispatch`)** — Tiap 2 jam (menit 43) | `12m` (`JOB_TIMEOUT_MIN=12`, guard `< 6m`) | Eksekusi adaptif Saham US & Komoditas 24/7: **1 jam (Gear 2)** saat peluang funding melimpah ($\ge 3$ aset $\ge 0.5\%$/hari atau $\ge 2$ ekstrem $\ge 0.8\%$/hari), **2 jam (Gear 1)** saat normal/sepi, dan *fast-exit* saat slot penuh (Gear 0). Dilengkapi *3-hour re-entry cooldown*. |
+| [`crypto-execute.yml`](.github/workflows/crypto-execute.yml) | **Cloud Scheduler (`workflow_dispatch`)** — Tiap 2 jam (menit 11) | `12m` (`JOB_TIMEOUT_MIN=12`, guard `< 6m`) | Eksekusi adaptif 10 Crypto Bluechip (`BTC`, `ETH`, `SOL`, dll) dengan sistem **Calmed Adaptive (1h / 2h)** dan *3-hour re-entry cooldown*. |
 | [`risk-monitor.yml`](.github/workflows/risk-monitor.yml) | **Cloud Scheduler (`workflow_dispatch`)** — Tiap 10 menit | `20m` (`JOB_TIMEOUT_MIN=20`, guard sisa `< 6m`) | Pengawas risiko adaptif (5–10 menit + *Smart Fast-Exit Idle*). Guard waktu otomatis melewati *sub-cycle* & *adaptive execute* jika sisa waktu job `< 6 menit` agar order tidak terpotong sebelum TP/SL terpasang. |
-| [`watchdog.yml`](.github/workflows/watchdog.yml) | **GitHub Cron (`0 * * * *`)** + `workflow_dispatch` | `3m` (`walt-watchdog`) | Pengaman pengganti cron: mengecek apakah `Walt Risk Monitor` sukses dalam 30 menit terakhir. Jika tidak, mengirim alert Telegram dan memicu 1x `workflow_dispatch` fallback (tanpa akses Walt API). |
-| [`tests.yml`](.github/workflows/tests.yml) | **Push / PR ke `main`** | `5m` (`walt-tests`) | CI otomatis menjalankan `pytest -q` dan validasi sintaks seluruh file `.github/workflows/*.yml` tanpa secrets. |
+| [`watchdog.yml`](.github/workflows/watchdog.yml) | **GitHub Cron (`0 * * * *`)** + `workflow_dispatch` | `3m` (`walt-watchdog`) | Pengaman pengganti cron: mengecek apakah `Walt Risk Monitor` sukses dalam 30 menit terakhir. Jika tidak, mengirim alert Telegram dan memicu 1x `workflow_dispatch` fallback (hanya bila belum ada run `queued`/`in_progress` untuk menghindari antrean ganda; tanpa akses Walt API). |
+| [`tests.yml`](.github/workflows/tests.yml) | **Push / PR ke `main`** | `5m` (`walt-tests`) | CI otomatis menjalankan import check modul inti, `pytest -q`, dan validasi sintaks seluruh file `.github/workflows/*.yml` tanpa secrets. |
+
+### Trade-Off Concurrency & Anti-Kelaparan Risk Monitor
+Keempat workflow trading (`daily-scan.yml`, `market-execute.yml`, `crypto-execute.yml`, dan `risk-monitor.yml`) sengaja berbagi satu concurrency group `walt-trading-account` dengan `cancel-in-progress: false` untuk mencegah *race condition* pembukaan order ganda dan konflik state akun:
+- **Trade-off sadar:** eksekusi workflow diantri, bukan paralel; konsekuensinya `risk-monitor` dapat tertunda maksimum **12 menit** saat mengantre di belakang `daily-scan`, `market-execute`, atau `crypto-execute` (`timeout-minutes: 12`, `JOB_TIMEOUT_MIN=12`, masih memiliki ruang aman di atas `JOB_TIME_GUARD_MIN=6` menit).
+- **Anti-antrean ganda:** `watchdog.yml` memeriksa keberadaan run `risk-monitor.yml` berstatus `queued`/`in_progress` sebelum memicu *fallback dispatch* agar tidak memperpanjang antrean.
 
 ---
 

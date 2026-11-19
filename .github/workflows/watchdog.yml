@@ -83,6 +83,27 @@ jobs:
               except Exception as exc:
                   print(f"Gagal kirim alert Telegram: {exc}")
 
+          # Sebelum memicu fallback dispatch, cek apakah sudah ada run risk-monitor yang
+          # masih queued atau in_progress agar tidak menumpuk antrean pada concurrency group.
+          active_raw = subprocess.check_output(
+              [
+                  "gh", "run", "list",
+                  "--workflow", "risk-monitor.yml",
+                  "--limit", "10",
+                  "--json", "status,databaseId",
+              ],
+              text=True,
+          )
+          active_runs = json.loads(active_raw or "[]")
+          if any(
+              str(r.get("status", "")).lower() in ("queued", "in_progress", "waiting", "pending")
+              for r in active_runs
+          ):
+              print(
+                  "SKIP fallback dispatch: risk-monitor sudah berstatus queued/in_progress — menghindari antrean ganda."
+              )
+              raise SystemExit(0)
+
           subprocess.check_call(["gh", "workflow", "run", "risk-monitor.yml"])
           print("Fallback risk-monitor.yml workflow_dispatch dipicu.")
           PY
