@@ -28,11 +28,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Restore and persist logs/snapshot cache
-        uses: actions/cache@v4
+      - name: Restore logs/snapshot cache
+        uses: actions/cache/restore@v4
         with:
           path: logs/
-          key: walt-logs-state-${{ github.run_id }}
+          key: walt-logs-state-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             walt-logs-state-
 
@@ -52,8 +52,16 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           JOB_TIMEOUT_MIN: "15"
         run: |
+          mkdir -p logs
           set -o pipefail
           python walt_bot.py market_execute 2>&1 | tee execute_output.log
+
+      - name: Save logs/snapshot cache (always)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: logs/
+          key: walt-logs-state-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload Logs Artifact
         if: always()
