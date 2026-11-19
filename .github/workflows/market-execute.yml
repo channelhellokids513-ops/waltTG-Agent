@@ -52,6 +52,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           JOB_TIMEOUT_MIN: "15"
           LOG_REDACT: "true"
+          STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}
         run: |
           mkdir -p logs
           set -o pipefail

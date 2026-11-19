@@ -208,8 +208,10 @@ try:
     DEFAULT_CALM_TP_PCT = float(_rt_cfg.get("tp_calm_pct", DEFAULT_CALM_TP_PCT))
     MIN_FUNDING_DAILY = float(_rt_cfg.get("min_funding_daily", MIN_FUNDING_DAILY))
     REENTRY_COOLDOWN_SEC = int(float(_rt_cfg.get("reentry_cooldown_hours", 3.0)) * 3600)
-except Exception:
-    pass
+except Exception as _cfg_exc:
+    logging.getLogger("walt-bot").warning(
+        f"Gagal memuat konfigurasi strategi bersama ({_cfg_exc}); fallback ke DEFAULT_STRATEGY_CONFIG."
+    )
 
 # Tangga Trailing Stop (True Zero-Risk — surplus bersih setelah fee 0.18% + spread)
 TRAILING_TIERS = [

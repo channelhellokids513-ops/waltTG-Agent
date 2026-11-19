@@ -30,6 +30,7 @@ from strategy_config import (
     load_strategy_config,
     reset_strategy_config,
     set_user_default_mode,
+    sync_strategy_config_to_github,
     toggle_user_pack,
     update_strategy_param,
     update_user_custom_param,
@@ -400,8 +401,15 @@ class WaltTelegramBot:
                 return
             try:
                 cfg = update_strategy_param(args[0], args[1], updated_by=f"{user.get('google_email')} ({user.get('role')})")
-                self.auth.log_audit("UPDATE_STRATEGY", tg_id, username=username, role=user.get("role", ""), detail=f"{args[0]}={args[1]}")
-                self.api.send_message(chat_id, f"✅ Parameter `{args[0]}` diperbarui menjadi `{cfg[args[0].lower()]}`.\nGunakan `/strategy` untuk melihat semua konfigurasi.")
+                synced, sync_msg = sync_strategy_config_to_github(cfg)
+                self.auth.log_audit("UPDATE_STRATEGY", tg_id, username=username, role=user.get("role", ""), detail=f"{args[0]}={args[1]} | sync={synced}")
+                sync_icon = "☁️" if synced else "⚠️"
+                self.api.send_message(
+                    chat_id,
+                    f"✅ Parameter `{args[0]}` diperbarui menjadi `{cfg[args[0].lower()]}`.\n"
+                    f"{sync_icon} {sync_msg}\n"
+                    f"Gunakan `/strategy` untuk melihat semua konfigurasi.",
+                )
             except Exception as e:
                 self.api.send_message(chat_id, f"❌ Gagal update strategi: {e}")
             return
@@ -410,9 +418,14 @@ class WaltTelegramBot:
             user = self._require(tg_id, chat_id, username, "edit_strategy")
             if not user:
                 return
-            reset_strategy_config(updated_by=f"{user.get('google_email')} ({user.get('role')})")
-            self.auth.log_audit("RESET_STRATEGY", tg_id, username=username, role=user.get("role", ""))
-            self.api.send_message(chat_id, "♻️ Strategi dikembalikan ke standar **True Funding Carry + Asymmetric R:R**.")
+            cfg = reset_strategy_config(updated_by=f"{user.get('google_email')} ({user.get('role')})")
+            synced, sync_msg = sync_strategy_config_to_github(cfg)
+            self.auth.log_audit("RESET_STRATEGY", tg_id, username=username, role=user.get("role", ""), detail=f"sync={synced}")
+            sync_icon = "☁️" if synced else "⚠️"
+            self.api.send_message(
+                chat_id,
+                f"♻️ Strategi dikembalikan ke standar **True Funding Carry + Asymmetric R:R**.\n{sync_icon} {sync_msg}",
+            )
             return
 
         if cmd == "/users":

@@ -6,11 +6,18 @@ Digunakan oleh walt_bot.py dan dapat diatur oleh Administrator / Planner lewat B
 from __future__ import annotations
 
 import json
+import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import httpx
+
+log = logging.getLogger("strategy_config")
+
 STRATEGY_CONFIG_FILE = Path("logs") / "strategy_config.json"
+SHARED_STRATEGY_VAR_NAME = "STRATEGY_CONFIG_JSON"
 
 DEFAULT_STRATEGY_CONFIG: dict[str, Any] = {
     "default_sl_pct": 0.015,        # 1.5%
@@ -34,22 +41,158 @@ STRATEGY_PARAM_SPECS: dict[str, dict[str, Any]] = {
 }
 
 
-def load_strategy_config(config_path: Path = STRATEGY_CONFIG_FILE) -> dict[str, Any]:
-    """Muat konfigurasi strategi runtime dengan fallback aman ke nilai default."""
-    cfg = dict(DEFAULT_STRATEGY_CONFIG)
-    if config_path.exists():
+def validate_strategy_dict(raw: dict[str, Any], strict: bool = False) -> dict[str, Any]:
+    """
+    Validasi kamus konfigurasi terhadap STRATEGY_PARAM_SPECS.
+    - Jika strict=True, nilai di luar batas/tipe salah melempar ValueError.
+    - Jika strict=False, nilai tidak valid ditolak dengan log warning dan diganti default aman.
+    """
+    validated = dict(DEFAULT_STRATEGY_CONFIG)
+    if not isinstance(raw, dict):
+        if strict:
+            raise ValueError("Konfigurasi strategi harus berupa JSON object.")
+        log.warning("Konfigurasi strategi tidak valid (bukan dict), fallback ke DEFAULT_STRATEGY_CONFIG.")
+        return validated
+
+    for k, spec in STRATEGY_PARAM_SPECS.items():
+        if k not in raw:
+            continue
+        val = raw[k]
+        ptype = spec["type"]
         try:
-            raw = json.loads(config_path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                for k, spec in STRATEGY_PARAM_SPECS.items():
-                    if k in raw:
-                        cfg[k] = raw[k]
-                if "updated_by" in raw:
-                    cfg["updated_by"] = raw["updated_by"]
-                if "updated_at" in raw:
-                    cfg["updated_at"] = raw["updated_at"]
-        except Exception:
-            pass
+            if ptype == "float":
+                if isinstance(val, bool):
+                    raise ValueError(f"{k} bukan float")
+                fval = float(val)
+                if not (spec["min"] <= fval <= spec["max"]):
+                    raise ValueError(f"Nilai {k}={fval} di luar batas [{spec['min']}, {spec['max']}]")
+                validated[k] = round(fval, 6)
+            elif ptype == "int":
+                if isinstance(val, bool):
+                    raise ValueError(f"{k} bukan int")
+                ival = int(val)
+                if not (spec["min"] <= ival <= spec["max"]):
+                    raise ValueError(f"Nilai {k}={ival} di luar batas [{spec['min']}, {spec['max']}]")
+                validated[k] = ival
+            elif ptype == "bool":
+                if isinstance(val, bool):
+                    validated[k] = val
+                elif isinstance(val, str) and val.strip().lower() in {"true", "1", "yes", "on"}:
+                    validated[k] = True
+                elif isinstance(val, str) and val.strip().lower() in {"false", "0", "no", "off"}:
+                    validated[k] = False
+                else:
+                    raise ValueError(f"Nilai {k}={val} bukan bool")
+        except Exception as exc:
+            if strict:
+                raise ValueError(str(exc)) from exc
+            log.warning(f"Parameter strategi '{k}' ditolak ({exc}) — pakai default {DEFAULT_STRATEGY_CONFIG[k]}.")
+
+    if "updated_at" in raw and isinstance(raw["updated_at"], str):
+        validated["updated_at"] = raw["updated_at"]
+    if "updated_by" in raw and isinstance(raw["updated_by"], str):
+        validated["updated_by"] = raw["updated_by"]
+    return validated
+
+
+def serialize_shared_strategy_config(cfg: dict[str, Any]) -> str:
+    """
+    Serialisasi konfigurasi strategi aman untuk GitHub Repository Variable STRATEGY_CONFIG_JSON.
+    HANYA menyertakan parameter numerik/boolean di STRATEGY_PARAM_SPECS + updated_at
+    (TIDAK menyertakan ID Telegram, email, atau data user_strategies.json).
+    """
+    clean = validate_strategy_dict(cfg, strict=True)
+    payload: dict[str, Any] = {k: clean[k] for k in STRATEGY_PARAM_SPECS}
+    if "updated_at" in clean:
+        payload["updated_at"] = clean["updated_at"]
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+
+def sync_strategy_config_to_github(
+    cfg: dict[str, Any],
+    repo: str | None = None,
+    token: str | None = None,
+) -> tuple[bool, str]:
+    """
+    Sinkronkan konfigurasi strategi aktif ke GitHub Repository Variable `STRATEGY_CONFIG_JSON`
+    agar langsung terbaca oleh GitHub Actions pada run berikutnya.
+    """
+    gh_token = (
+        token
+        or os.environ.get("GH_PAT")
+        or os.environ.get("GH_PATH")
+        or os.environ.get("GITHUB_PAT")
+        or ""
+    ).strip()
+    gh_repo = (repo or os.environ.get("GITHUB_REPOSITORY") or "").strip()
+    if not gh_token or not gh_repo:
+        return False, "GH_PAT atau GITHUB_REPOSITORY belum disetel (hanya tersimpan lokal)."
+
+    value_json = serialize_shared_strategy_config(cfg)
+    headers = {
+        "Authorization": f"Bearer {gh_token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    var_url = f"https://api.github.com/repos/{gh_repo}/actions/variables/{SHARED_STRATEGY_VAR_NAME}"
+    create_url = f"https://api.github.com/repos/{gh_repo}/actions/variables"
+
+    try:
+        r = httpx.patch(
+            var_url,
+            headers=headers,
+            json={"name": SHARED_STRATEGY_VAR_NAME, "value": value_json},
+            timeout=15.0,
+        )
+        if r.status_code == 404:
+            r = httpx.post(
+                create_url,
+                headers=headers,
+                json={"name": SHARED_STRATEGY_VAR_NAME, "value": value_json},
+                timeout=15.0,
+            )
+        if r.status_code in (200, 201, 204):
+            return True, f"Tersinkron ke GitHub Variable `{SHARED_STRATEGY_VAR_NAME}` (aktif mulai run berikutnya)."
+        return False, f"GitHub API HTTP {r.status_code}: {r.text[:160]}"
+    except Exception as exc:
+        return False, f"Gagal sync GitHub Variable: {exc}"
+
+
+def load_strategy_config(
+    config_path: Path | None = None,
+    env_json: str | None = None,
+) -> dict[str, Any]:
+    """
+    Muat konfigurasi strategi runtime:
+    1. Prioritas utama: sumber bersama `STRATEGY_CONFIG_JSON` (GitHub Repository Variable).
+    2. Fallback lokal: `logs/strategy_config.json`.
+    3. Fallback aman: `DEFAULT_STRATEGY_CONFIG` dengan log warning bila parsing gagal.
+    """
+    shared_raw = os.environ.get(SHARED_STRATEGY_VAR_NAME) if env_json is None else env_json
+    if shared_raw and shared_raw.lstrip("\ufeff").strip():
+        try:
+            parsed = json.loads(shared_raw.lstrip("\ufeff").strip())
+            cfg = validate_strategy_dict(parsed, strict=False)
+            cfg["source"] = "github_variable"
+            return cfg
+        except Exception as exc:
+            log.warning(
+                f"Gagal parse sumber bersama {SHARED_STRATEGY_VAR_NAME} ({exc}); "
+                "fallback ke file lokal / DEFAULT_STRATEGY_CONFIG."
+            )
+
+    target = config_path or STRATEGY_CONFIG_FILE
+    if target.exists():
+        try:
+            raw = json.loads(target.read_text(encoding="utf-8"))
+            cfg = validate_strategy_dict(raw, strict=False)
+            cfg["source"] = "local_file"
+            return cfg
+        except Exception as exc:
+            log.warning(f"Gagal parse {target} ({exc}); fallback ke DEFAULT_STRATEGY_CONFIG.")
+
+    cfg = dict(DEFAULT_STRATEGY_CONFIG)
+    cfg["source"] = "default"
     return cfg
 
 
