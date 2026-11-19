@@ -258,9 +258,28 @@ _REDACT_PATTERNS = [
 ]
 
 
-def redact_sensitive_text(text: str) -> str:
-    """Samarkan angka saldo/margin/PnL/order_id/email pada log stdout saat LOG_REDACT=true."""
+_SECRET_REDACT_PATTERNS = [
+    (_re.compile(r"(?i)([?&](?:key|api_key|token|access_token|secret)=)([^&\s'\"]+)"), r"\1***"),
+    (_re.compile(r"(?i)(\bBearer\s+)([A-Za-z0-9._~+/=-]{8,})"), r"\1***"),
+    (_re.compile(r"\bAIza[0-9A-Za-z_-]{20,}\b"), "AIza***"),
+    (_re.compile(r"\bsk-[0-9A-Za-z_-]{16,}\b"), "sk-***"),
+    (_re.compile(r"\b(?:ghp|gho|ghu|ghs)_[0-9A-Za-z]{20,}\b"), "gh_***"),
+    (_re.compile(r"\bgithub_pat_[0-9A-Za-z_]{20,}\b"), "github_pat_***"),
+    (_re.compile(r"\bbot\d{6,}:[0-9A-Za-z_-]{20,}\b"), "bot***"),
+]
+
+
+def redact_secrets(text: str) -> str:
+    """Selalu sensor pola mirip API key / Bearer token / bot token di log stdout."""
     out = text
+    for pat, repl in _SECRET_REDACT_PATTERNS:
+        out = pat.sub(repl, out)
+    return out
+
+
+def redact_sensitive_text(text: str) -> str:
+    """Samarkan angka saldo/margin/PnL/order_id/email + secret pada log stdout."""
+    out = redact_secrets(text)
     for pat, repl in _REDACT_PATTERNS:
         out = pat.sub(repl, out)
     return out
@@ -269,6 +288,7 @@ def redact_sensitive_text(text: str) -> str:
 class _RedactingFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         rendered = super().format(record)
+        rendered = redact_secrets(rendered)
         return redact_sensitive_text(rendered) if is_log_redact_enabled() else rendered
 
 

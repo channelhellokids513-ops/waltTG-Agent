@@ -161,10 +161,10 @@ class GeminiClient:
     def chat_json(self, prompt: str, system_instruction: Optional[str] = None, model: Optional[str] = None) -> dict:
         """Kirim prompt ke Gemini generateContent API."""
         target_model = self._clean_model_name(model or self.model)
-        url = f"{GEMINI_BASE}/models/{target_model}:generateContent?key={self.api_key}"
+        url = f"{GEMINI_BASE}/models/{target_model}:generateContent"
         headers = {
             "Content-Type": "application/json",
-            "X-goog-api-key": self.api_key,
+            "x-goog-api-key": self.api_key,
         }
         
         contents_text = prompt
