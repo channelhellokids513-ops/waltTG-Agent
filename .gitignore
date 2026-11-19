@@ -13,3 +13,5 @@ logs/*.json
 .DS_Store
 .vscode/
 .idea/
+Antigravity_prompt.md
+Antigravity_prompt_archive_*.md
