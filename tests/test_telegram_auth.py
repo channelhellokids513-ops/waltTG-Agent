@@ -104,3 +104,54 @@ def test_market_chart_indicators_and_sources():
     assert compute_rsi(prices, 14) == 100.0
     assert "hyperliquid.xyz/trade/BTC" in get_actual_price_sources("BTC")
     assert "finance.yahoo.com/quote/GC%3DF" in get_actual_price_sources("XAU")
+
+
+def test_end_user_can_toggle_strategy_packs_and_set_own_strategy(tmp_path, monkeypatch):
+    import strategy_config
+
+    user_strat_path = tmp_path / "user_strategies.json"
+    global_strat_path = tmp_path / "strategy_config.json"
+    monkeypatch.setattr(strategy_config, "USER_STRATEGIES_FILE", user_strat_path)
+    monkeypatch.setattr(strategy_config, "STRATEGY_CONFIG_FILE", global_strat_path)
+
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1001")
+    monkeypatch.setenv("REQUIRE_GOOGLE_AUTH", "false")
+    auth = AuthManager(auth_file=tmp_path / "auth.json", audit_file=tmp_path / "audit.jsonl")
+    auth.add_or_update_user("enduser@example.com", "end_user", telegram_id=3003)
+
+    # End user punya izin select_strategy_pack & edit_own_strategy, tapi tetap diblokir dari global edit_strategy
+    assert auth.authorize(3003, "select_strategy_pack")[0] is True
+    assert auth.authorize(3003, "edit_own_strategy")[0] is True
+    assert auth.authorize(3003, "edit_strategy")[0] is False
+
+    # Default awal: True Funding Carry
+    eff0 = strategy_config.get_effective_user_strategy(3003, user_path=user_strat_path, global_path=global_strat_path)
+    assert eff0["active_pack"] == "true_funding_carry"
+    assert eff0["default_sl_pct"] == 0.015
+
+    # End user aktifkan paket conservative_income (ON)
+    prof1 = strategy_config.toggle_user_pack(3003, "conservative_income", enable=True, path=user_strat_path)
+    assert "conservative_income" in prof1["enabled_packs"]
+    assert prof1["active_pack"] == "conservative_income"
+    eff1 = strategy_config.get_effective_user_strategy(3003, user_path=user_strat_path, global_path=global_strat_path)
+    assert eff1["default_sl_pct"] == 0.012
+    assert eff1["min_funding_daily"] == 0.006
+
+    # End user matikan semua paket -> otomatis fallback ke Default Terbaik (true_funding_carry)
+    strategy_config.toggle_user_pack(3003, "conservative_income", enable=False, path=user_strat_path)
+    prof2 = strategy_config.toggle_user_pack(3003, "true_funding_carry", enable=False, path=user_strat_path)
+    assert prof2["active_pack"] == "true_funding_carry"
+    assert prof2["use_default"] is True
+
+    # End user set parameter custom sendiri via Telegram /my_strategy set
+    api = MagicMock()
+    bot = WaltTelegramBot(api=api, auth=auth)
+    bot.handle_text(3003, 3003, "enduser", "/my_strategy set default_sl_pct 1.8%")
+    eff2 = strategy_config.get_effective_user_strategy(3003, user_path=user_strat_path, global_path=global_strat_path)
+    assert eff2["default_sl_pct"] == 0.018
+
+    # End user kembalikan ke default terbaik
+    bot.handle_text(3003, 3003, "enduser", "/my_strategy default")
+    eff3 = strategy_config.get_effective_user_strategy(3003, user_path=user_strat_path, global_path=global_strat_path)
+    assert eff3["active_pack"] == "true_funding_carry"
+    assert eff3["default_sl_pct"] == 0.015

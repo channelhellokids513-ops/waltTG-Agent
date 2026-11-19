@@ -27,6 +27,8 @@ ROLE_PERMISSIONS: dict[Role, set[str]] = {
         "view_finance",
         "view_chart",
         "view_strategy",
+        "select_strategy_pack",
+        "edit_own_strategy",
         "edit_strategy",
         "manage_users",
         "trade_control",
@@ -36,12 +38,16 @@ ROLE_PERMISSIONS: dict[Role, set[str]] = {
         "view_finance",
         "view_chart",
         "view_strategy",
+        "select_strategy_pack",
+        "edit_own_strategy",
         "edit_strategy",
     },
     "end_user": {
         "view_finance",
         "view_chart",
         "view_strategy",
+        "select_strategy_pack",
+        "edit_own_strategy",
     },
 }
 

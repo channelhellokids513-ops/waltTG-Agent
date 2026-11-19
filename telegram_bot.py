@@ -23,10 +23,16 @@ import httpx
 
 from market_chart import analyze_market_chart, get_actual_price_sources
 from strategy_config import (
+    STRATEGY_PACKS,
     STRATEGY_PARAM_SPECS,
+    get_effective_user_strategy,
+    get_user_strategy_profile,
     load_strategy_config,
     reset_strategy_config,
+    set_user_default_mode,
+    toggle_user_pack,
     update_strategy_param,
+    update_user_custom_param,
 )
 from telegram_auth import (
     ROLE_LABELS,
@@ -154,9 +160,13 @@ def _build_main_menu(role: str) -> dict[str, Any]:
             {"text": "📈 Chart BTC", "callback_data": "cmd:/chart BTC 1h"},
         ],
         [
-            {"text": "⚙️ Strategi", "callback_data": "cmd:/strategy"},
-            {"text": "📜 Histori", "callback_data": "cmd:/history"},
+            {"text": "📦 Paket Strategi", "callback_data": "cmd:/packs"},
+            {"text": "🎯 Strategi Saya", "callback_data": "cmd:/my_strategy"},
             {"text": "🔍 Cek Harga", "callback_data": "cmd:/sources"},
+        ],
+        [
+            {"text": "⚙️ Strategi Global", "callback_data": "cmd:/strategy"},
+            {"text": "📜 Histori", "callback_data": "cmd:/history"},
         ],
     ]
     if role == "admin":
@@ -214,6 +224,24 @@ class WaltTelegramBot:
             self.api.answer_callback(cb_id)
             if data.startswith("cmd:"):
                 self.handle_text(tg_id, chat_id, username, data[4:])
+            elif data.startswith("toggle_pack:"):
+                user = self._require(tg_id, chat_id, username, "select_strategy_pack")
+                if not user:
+                    return
+                pack_id = data.split(":", 1)[1]
+                try:
+                    prof = toggle_user_pack(tg_id, pack_id)
+                    self.auth.log_audit("USER_TOGGLE_PACK", tg_id, username=username, role=user.get("role", ""), detail=f"{pack_id} -> active={prof.get('active_pack')}")
+                    self._cmd_packs(tg_id, chat_id)
+                except Exception as e:
+                    self.api.send_message(chat_id, f"❌ Gagal toggle paket: {e}")
+            elif data == "use_default_strategy":
+                user = self._require(tg_id, chat_id, username, "select_strategy_pack")
+                if not user:
+                    return
+                set_user_default_mode(tg_id)
+                self.auth.log_audit("USER_USE_DEFAULT_STRATEGY", tg_id, username=username, role=user.get("role", ""))
+                self._cmd_packs(tg_id, chat_id)
             elif data.startswith("confirm_close:"):
                 asset = data.split(":", 1)[1]
                 self._exec_close_asset(tg_id, chat_id, username, asset)
@@ -324,6 +352,42 @@ class WaltTelegramBot:
             if not user:
                 return
             self._cmd_strategy(chat_id, user.get("role", "end_user"))
+            return
+
+        if cmd in {"/packs", "/pack"}:
+            user = self._require(tg_id, chat_id, username, "select_strategy_pack")
+            if not user:
+                return
+            if len(args) >= 2 and args[1].lower() in {"on", "off"}:
+                try:
+                    prof = toggle_user_pack(tg_id, args[0], enable=(args[1].lower() == "on"))
+                    self.auth.log_audit("USER_TOGGLE_PACK", tg_id, username=username, role=user.get("role", ""), detail=f"{args[0]}={args[1]}")
+                    self.api.send_message(chat_id, f"✅ Paket `{args[0]}` diset `{args[1].upper()}`. Paket aktif: `{prof.get('active_pack')}`.")
+                except Exception as e:
+                    self.api.send_message(chat_id, f"❌ Error: {e}")
+                    return
+            self._cmd_packs(tg_id, chat_id)
+            return
+
+        if cmd == "/my_strategy":
+            user = self._require(tg_id, chat_id, username, "edit_own_strategy")
+            if not user:
+                return
+            if args and args[0].lower() == "default":
+                set_user_default_mode(tg_id)
+                self.auth.log_audit("USER_USE_DEFAULT_STRATEGY", tg_id, username=username, role=user.get("role", ""))
+                self.api.send_message(chat_id, "⭐ Strategi pribadi Anda dikembalikan ke **Default Terbaik (True Funding Carry)**.")
+                self._cmd_my_strategy(tg_id, chat_id)
+                return
+            if args and args[0].lower() == "set" and len(args) >= 3:
+                try:
+                    update_user_custom_param(tg_id, args[1], args[2])
+                    self.auth.log_audit("USER_SET_CUSTOM_STRATEGY", tg_id, username=username, role=user.get("role", ""), detail=f"{args[1]}={args[2]}")
+                    self.api.send_message(chat_id, f"✅ Parameter strategi Anda `{args[1]}` diubah ke `{args[2]}`.")
+                except Exception as e:
+                    self.api.send_message(chat_id, f"❌ Gagal ubah strategi pribadi: {e}")
+                    return
+            self._cmd_my_strategy(tg_id, chat_id)
             return
 
         if cmd == "/set_strategy":
@@ -575,7 +639,9 @@ class WaltTelegramBot:
             "• `/chart <ASET> [15m|1h|4h|1d]` — Chart visual + RSI & EMA",
             "• `/price <ASET>` — Harga aktual & funding rate di Walt",
             "• `/sources [ASET]` — Rekomendasi situs cek harga aktual",
-            "• `/strategy` — Lihat parameter strategi aktif",
+            "• `/packs` — Set ON/OFF Paket Strategi pilihan Anda",
+            "• `/my_strategy` — Lihat/atur strategi pribadi (atau kembali ke Default Terbaik)",
+            "• `/strategy` — Lihat parameter strategi global bot",
             "• `/whoami`, `/login`, `/logout` — Info & sesi Google Auth",
         ]
         if "edit_strategy" in perms:
@@ -747,9 +813,9 @@ class WaltTelegramBot:
 
     def _cmd_strategy(self, chat_id: int, role: str) -> None:
         cfg = load_strategy_config()
-        editable = "✅ Anda dapat mengubah lewat `/set_strategy <param> <nilai>`." if role in {"admin", "planner"} else "🔒 Mode baca saja (khusus Admin/Planner)."
+        editable = "✅ Anda dapat mengubah global via `/set_strategy <param> <nilai>`." if role in {"admin", "planner"} else "💡 Untuk mengatur strategi Anda sendiri, gunakan `/packs` atau `/my_strategy`."
         msg = (
-            f"⚙️ *Konfigurasi Strategi Aktif (True Funding Carry)*\n"
+            f"⚙️ *Konfigurasi Strategi Global (True Funding Carry)*\n"
             f"• `default_sl_pct`: `{cfg['default_sl_pct']*100:.2f}%` (`{cfg['default_sl_pct']}`)\n"
             f"• `tp_calm_pct` (ETF & Crypto): `{cfg['tp_calm_pct']*100:.2f}%` (`{cfg['tp_calm_pct']}`)\n"
             f"• `tp_volatile_pct` (Komoditas & Saham): `{cfg['tp_volatile_pct']*100:.2f}%` (`{cfg['tp_volatile_pct']}`)\n"
@@ -759,6 +825,55 @@ class WaltTelegramBot:
             f"• `dry_run`: `{cfg['dry_run']}`\n\n"
             f"Diubah terakhir oleh: `{cfg.get('updated_by', 'default')}`\n"
             f"{editable}"
+        )
+        self.api.send_message(chat_id, msg)
+
+    def _cmd_packs(self, tg_id: int, chat_id: int) -> None:
+        prof = get_user_strategy_profile(tg_id)
+        enabled = set(prof.get("enabled_packs") or [])
+        active = prof.get("active_pack") or "true_funding_carry"
+
+        lines = [
+            "📦 *Paket Strategi Tersedia (Set ON / OFF)*",
+            f"Paket Aktif Anda: *{STRATEGY_PACKS.get(active, {}).get('name', active)}*\n",
+        ]
+        buttons: list[list[dict[str, str]]] = []
+        for pid, pack in STRATEGY_PACKS.items():
+            is_on = pid in enabled
+            status_icon = "🟢 ON" if is_on else "⚪ OFF"
+            active_tag = " *(AKTIF)*" if pid == active else ""
+            lines.append(
+                f"{pack['badge']} *{pack['name']}*{active_tag} — `{status_icon}`\n"
+                f"   _{pack['description']}_"
+            )
+            buttons.append([
+                {
+                    "text": f"{status_icon} — {pack['badge']} {pack['name']}",
+                    "callback_data": f"toggle_pack:{pid}",
+                }
+            ])
+        buttons.append([{"text": "⭐ Gunakan Default Terbaik", "callback_data": "use_default_strategy"}])
+        lines.append("\nKetuk tombol di bawah untuk mengaktifkan/menonaktifkan paket, atau ketik `/pack <id> on|off`.")
+        self.api.send_message(chat_id, "\n".join(lines), reply_markup={"inline_keyboard": buttons})
+
+    def _cmd_my_strategy(self, tg_id: int, chat_id: int) -> None:
+        eff = get_effective_user_strategy(tg_id)
+        custom = eff.get("custom_params") or {}
+        custom_txt = ", ".join(f"`{k}={v}`" for k, v in custom.items()) if custom else "_Tidak ada (mengikuti paket/default)_"
+        msg = (
+            f"🎯 *Strategi Pribadi Anda*\n"
+            f"• Mode Aktif: *{eff['mode_label']}*\n"
+            f"• Paket ON: `{', '.join(eff.get('enabled_packs') or [])}`\n"
+            f"• Custom Override: {custom_txt}\n\n"
+            f"*Parameter Efektif:*\n"
+            f"• SL (`default_sl_pct`): `{eff['default_sl_pct']*100:.2f}%`\n"
+            f"• TP ETF/Crypto (`tp_calm_pct`): `{eff['tp_calm_pct']*100:.2f}%`\n"
+            f"• TP Komoditas/Saham (`tp_volatile_pct`): `{eff['tp_volatile_pct']*100:.2f}%`\n"
+            f"• Min Funding (`min_funding_daily`): `{eff['min_funding_daily']*100:.2f}%/hari`\n"
+            f"• Cooldown (`reentry_cooldown_hours`): `{eff['reentry_cooldown_hours']} jam`\n"
+            f"• Max Slots (`max_slots_cap`): `{eff['max_slots_cap']}`\n\n"
+            f"Ubah sendiri: `/my_strategy set <param> <nilai>`\n"
+            f"Kembali ke default: `/my_strategy default` | Pilih paket: `/packs`"
         )
         self.api.send_message(chat_id, msg)
 
