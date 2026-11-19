@@ -1013,6 +1013,53 @@ def check_funding_vs_fee_gate(
     return passed, round(exp_funding, 6), round(cost, 6), note
 
 
+def _close_executed_ok(res: Any) -> bool:
+    """
+    Validasi hasil client.execute() untuk penutupan posisi (P0-2).
+    Return False jika res None, atau dict dengan ok==False, memuat key 'error', atau status=='failed'.
+    """
+    if res is None:
+        return False
+    if isinstance(res, dict):
+        if res.get("ok") is False:
+            return False
+        if "error" in res and res.get("error") is not None:
+            return False
+        if str(res.get("status", "")).strip().lower() == "failed":
+            return False
+    return True
+
+
+def _execute_validated_close(
+    client: WaltClient,
+    pos: Position,
+    preview: Any,
+    reason: str,
+    detail: Optional[str] = None,
+) -> Optional[dict]:
+    """Eksekusi penutupan posisi dan validasi hasilnya sebelum mencatat close/cooldown."""
+    if not (preview and preview.get("ok")):
+        return None
+    res = client.execute(preview["confirmationToken"])
+    if not _close_executed_ok(res):
+        res_summary = redact_sensitive_text(str(res))[:200]
+        log.error(f"⚠️ GAGAL TUTUP {pos.base_asset} ({reason}): {res_summary}")
+        send_telegram(f"⚠️ GAGAL TUTUP: {pos.base_asset} — posisi masih terbuka")
+        return {
+            "action": "FAILED",
+            "detail": f"Gagal tutup ({reason}): {res_summary}",
+            "reason": reason,
+            "result": res,
+        }
+    _record_position_close(pos, reason)
+    return {
+        "action": "CLOSE",
+        "detail": detail or reason,
+        "reason": reason,
+        "result": res,
+    }
+
+
 def _record_position_close(pos: Position, reason: str):
     """Catat penutupan posisi ke Closed_Positions (Google Sheet), logs/closed_history.csv, closed_ids, dan set cooldown."""
     pos_key = make_position_dedupe_key({
@@ -1072,16 +1119,9 @@ def evaluate_and_apply_position_risk(
             f"{FUNDING_FLIP_CLOSE_THRESHOLD*100:.2f}%) → tutup posisi riil"
         )
         preview = client.preview_close(pos.contract_id)
-        if preview and preview.get("ok"):
-            res = client.execute(preview["confirmationToken"])
-            _record_position_close(pos, "Funding Flip Sign")
-            return {
-                "action": "CLOSE",
-                "detail": "Funding Flip Sign → Close Posisi",
-                "reason": "Funding Flip Sign",
-                "result": res,
-            }
-        return None
+        return _execute_validated_close(
+            client, pos, preview, reason="Funding Flip Sign", detail="Funding Flip Sign → Close Posisi"
+        )
 
     # --- 2. Evaluasi Target TP (Lapis 1 Baseline & Windfall) ---
     target_tp, target_sl = compute_baseline_tpsl(
@@ -1187,16 +1227,9 @@ def evaluate_and_apply_position_risk(
             f"[GUARD] {pos.base_asset}: SL 1.5% breached (current=${pos.current_price:.4f}, sl=${sl_check:.4f}) → tutup posisi"
         )
         preview = client.preview_close(pos.contract_id)
-        if preview and preview.get("ok"):
-            res = client.execute(preview["confirmationToken"])
-            _record_position_close(pos, "SL 1.5% breached (migrasi)")
-            return {
-                "action": "CLOSE",
-                "detail": "SL 1.5% breached (migrasi)",
-                "reason": "SL 1.5% breached (migrasi)",
-                "result": res,
-            }
-        return None
+        return _execute_validated_close(
+            client, pos, preview, reason="SL 1.5% breached (migrasi)"
+        )
 
     tp_check = final_tp if final_tp is not None else (pos.tp if pos.tp is not None else target_tp)
     tp_breached = (
@@ -1208,16 +1241,7 @@ def evaluate_and_apply_position_risk(
             f"[GUARD] {pos.base_asset}: TP breached (current=${pos.current_price:.4f}, tp=${tp_check:.4f}) → tutup posisi"
         )
         preview = client.preview_close(pos.contract_id)
-        if preview and preview.get("ok"):
-            res = client.execute(preview["confirmationToken"])
-            _record_position_close(pos, "TP breached")
-            return {
-                "action": "CLOSE",
-                "detail": "TP breached",
-                "reason": "TP breached",
-                "result": res,
-            }
-        return None
+        return _execute_validated_close(client, pos, preview, reason="TP breached")
 
     if final_tp is None and final_sl is None:
         return None
