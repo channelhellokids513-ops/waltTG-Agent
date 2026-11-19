@@ -198,6 +198,18 @@ MONTHLY_TARGET = 100.0      # USDC
 # Risk management parameters (True Funding Carry + Asymmetric R:R)
 DEFAULT_SL_PCT = 0.015      # 1.5% default SL (beri ruang napas noise intraday, R:R >= 1:1.33)
 DEFAULT_TP_PCT = 0.025      # 2.5% default TP (biarkan profit berlari & tutup fee jauh)
+DEFAULT_CALM_TP_PCT = 0.020 # 2.0% default TP ETF & Crypto
+
+try:
+    from strategy_config import load_strategy_config as _load_strategy_config
+    _rt_cfg = _load_strategy_config()
+    DEFAULT_SL_PCT = float(_rt_cfg.get("default_sl_pct", DEFAULT_SL_PCT))
+    DEFAULT_TP_PCT = float(_rt_cfg.get("tp_volatile_pct", DEFAULT_TP_PCT))
+    DEFAULT_CALM_TP_PCT = float(_rt_cfg.get("tp_calm_pct", DEFAULT_CALM_TP_PCT))
+    MIN_FUNDING_DAILY = float(_rt_cfg.get("min_funding_daily", MIN_FUNDING_DAILY))
+    REENTRY_COOLDOWN_SEC = int(float(_rt_cfg.get("reentry_cooldown_hours", 3.0)) * 3600)
+except Exception:
+    pass
 
 # Tangga Trailing Stop (True Zero-Risk — surplus bersih setelah fee 0.18% + spread)
 TRAILING_TIERS = [
@@ -217,16 +229,16 @@ def get_asset_baseline_tpsl_pct(asset: Optional[str] = None) -> tuple[float, flo
     - Saham Volatil (NVDA, TSLA, MSTR, CRCL, SNDK, VVV, dll): TP +2.5%, SL 1.5%
     """
     if not asset:
-        return 0.025, 0.015
+        return DEFAULT_TP_PCT, DEFAULT_SL_PCT
     asset_up = asset.upper()
     if asset_up in {"SPY", "US100", "AAPL"}:
-        return 0.020, 0.015
+        return DEFAULT_CALM_TP_PCT, DEFAULT_SL_PCT
     elif asset_up in ALLOWED_CRYPTO:
-        return 0.020, 0.015
+        return DEFAULT_CALM_TP_PCT, DEFAULT_SL_PCT
     elif asset_up in ALLOWED_COMMODITIES:
-        return 0.025, 0.015
+        return DEFAULT_TP_PCT, DEFAULT_SL_PCT
     else:
-        return 0.025, 0.015
+        return DEFAULT_TP_PCT, DEFAULT_SL_PCT
 
 # Logging
 logging.basicConfig(
