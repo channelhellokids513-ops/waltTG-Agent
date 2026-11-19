@@ -22,6 +22,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MAINTENANCE_MODE: ${{ vars.MAINTENANCE_MODE || 'false' }}
         run: |
           python3 - <<'PY'
           import json
@@ -30,6 +31,10 @@ jobs:
           import urllib.parse
           import urllib.request
           from datetime import datetime, timezone
+
+          if (os.environ.get("MAINTENANCE_MODE") or "").strip().lower() == "true":
+              print("MAINTENANCE_MODE=true aktif — watchdog melewati alert Telegram dan fallback dispatch.")
+              raise SystemExit(0)
 
           raw = subprocess.check_output(
               [

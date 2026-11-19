@@ -122,6 +122,32 @@ Keempat workflow trading (`daily-scan.yml`, `market-execute.yml`, `crypto-execut
 - **Trade-off sadar:** eksekusi workflow diantri, bukan paralel; konsekuensinya `risk-monitor` dapat tertunda maksimum **12 menit** saat mengantre di belakang `daily-scan`, `market-execute`, atau `crypto-execute` (`timeout-minutes: 12`, `JOB_TIMEOUT_MIN=12`, masih memiliki ruang aman di atas `JOB_TIME_GUARD_MIN=6` menit).
 - **Anti-antrean ganda:** `watchdog.yml` memeriksa keberadaan run `risk-monitor.yml` berstatus `queued`/`in_progress` sebelum memicu *fallback dispatch* agar tidak memperpanjang antrean.
 
+### Jendela Pemeliharaan & Pemulihan Kredensial (`MAINTENANCE_MODE`)
+GitHub Actions me-rotate `WALT_REFRESH_TOKEN` secara otomatis (± setiap jam) dan menulis ulang GitHub Secret. Karena secret tidak bisa dibaca kembali ke mesin lokal, menjalankan bot secara lokal berbarengan dengan CI dapat memicu tabrakan rotasi (`invalid_grant`).
+
+> **Penting:** Kill-switch `MAINTENANCE_MODE` berfungsi untuk **menghindari tabrakan dua penulis** (CI vs lokal) atas satu refresh token, **bukan** untuk memperbaiki token yang sudah kedaluwarsa.
+
+Langkah pemeliharaan aman:
+1. Aktifkan kill-switch (menghentikan job API `daily-scan`, `market-execute`, `crypto-execute`, `risk-monitor`, serta membungkam alarm palsu `watchdog.yml`):
+   ```bash
+   gh variable set MAINTENANCE_MODE --body "true"
+   ```
+2. Tunggu seluruh run yang sedang berjalan selesai secara alami (jangan membatalkan run yang mungkin sedang memasang order/TP/SL).
+3. Jalankan operasi lokal sekali (atau jalankan `diagnostics.yml` dari GitHub Actions yang sengaja tetap aktif selama maintenance):
+   ```bash
+   python walt_bot.py dump_closed
+   ```
+   Satu refresh sukses di lokal akan me-rotate token dan otomatis menulis ulang GitHub Secret bila token GitHub tersedia.
+4. Matikan kill-switch setelah selesai:
+   ```bash
+   gh variable set MAINTENANCE_MODE --body "false"
+   # atau: gh variable delete MAINTENANCE_MODE
+   ```
+5. Bila `GH_PAT`/alias tidak tersedia di lingkungan lokal, perbarui secret secara manual sebelum menyalakan ulang bot:
+   ```bash
+   gh secret set WALT_REFRESH_TOKEN
+   ```
+
 ---
 
 ## 🔒 Kebijakan Privasi Log (Repo Publik) & Alur Konfigurasi Strategi

@@ -213,3 +213,75 @@ def test_r4_3_minor_failures_do_not_alert(monkeypatch, caplog):
     assert tg_calls == []
 
 
+def test_r4_4_api_touching_workflows_are_maintenance_gated():
+    from pathlib import Path
+    import yaml
+
+    wf_dir = Path(__file__).resolve().parent.parent / ".github" / "workflows"
+    api_workflows = [
+        "daily-scan.yml",
+        "market-execute.yml",
+        "crypto-execute.yml",
+        "risk-monitor.yml",
+    ]
+    for fname in api_workflows:
+        raw = (wf_dir / fname).read_text(encoding="utf-8")
+        doc = yaml.safe_load(raw)
+        jobs = doc.get("jobs") or {}
+        assert jobs, f"{fname} tidak memiliki jobs"
+        for job_name, job_cfg in jobs.items():
+            cond = str(job_cfg.get("if", ""))
+            assert "MAINTENANCE_MODE" in cond, f"{fname} job '{job_name}' wajib memiliki guard MAINTENANCE_MODE"
+
+    # tests.yml TIDAK boleh di-gate oleh MAINTENANCE_MODE
+    tests_raw = (wf_dir / "tests.yml").read_text(encoding="utf-8")
+    assert "MAINTENANCE_MODE" not in tests_raw
+
+    # watchdog.yml wajib berhenti sebelum alert/dispatch saat MAINTENANCE_MODE aktif
+    watchdog_raw = (wf_dir / "watchdog.yml").read_text(encoding="utf-8")
+    assert "MAINTENANCE_MODE" in watchdog_raw
+    maint_pos = watchdog_raw.find("MAINTENANCE_MODE")
+    dispatch_pos = watchdog_raw.find("gh\", \"workflow\", \"run\"")
+    alert_pos = watchdog_raw.find("sendMessage")
+    assert maint_pos != -1 and alert_pos != -1 and dispatch_pos != -1
+    assert maint_pos < alert_pos and maint_pos < dispatch_pos
+
+    # diagnostics.yml ada, read-only (hanya workflow_dispatch), tanpa job-level if MAINTENANCE_MODE
+    diag_path = wf_dir / "diagnostics.yml"
+    assert diag_path.exists(), "diagnostics.yml harus ada"
+    diag_doc = yaml.safe_load(diag_path.read_text(encoding="utf-8"))
+    on_block = diag_doc.get("on") or diag_doc.get(True) or {}
+    assert "workflow_dispatch" in on_block and "schedule" not in on_block
+    for job_cfg in (diag_doc.get("jobs") or {}).values():
+        assert "MAINTENANCE_MODE" not in str(job_cfg.get("if", ""))
+
+
+def test_r4_4_invalid_grant_sends_one_actionable_alert_then_raises(monkeypatch):
+    import httpx
+    import notifier
+    import token_manager
+
+    tg_calls = []
+    monkeypatch.setattr(notifier, "send_telegram", lambda msg, **kw: tg_calls.append(msg))
+
+    secret_rt = "rt_super_secret_should_never_leak_999"
+    req = httpx.Request("POST", token_manager.TOKEN_URL)
+    resp = httpx.Response(
+        400,
+        json={"error": "invalid_grant", "error_description": "Refresh token is invalid or expired."},
+        request=req,
+    )
+    monkeypatch.setattr(token_manager.httpx, "post", lambda *a, **kw: resp)
+
+    tm = token_manager.TokenManager(client_id="cid_test", refresh_token=secret_rt)
+    with pytest.raises(httpx.HTTPStatusError):
+        tm._refresh()
+
+    assert len(tg_calls) == 1
+    alert = tg_calls[0]
+    assert "invalid_grant" in alert.lower()
+    assert "Jendela Pemeliharaan" in alert or "README" in alert
+    assert secret_rt not in alert
+
+
+

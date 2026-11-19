@@ -121,6 +121,13 @@ class TokenManager:
         except httpx.HTTPStatusError as e:
             snippet = _redact_oauth_snippet(e.response.text, limit=200)
             log.error(f"TokenManager._refresh HTTP {e.response.status_code}: {snippet}")
+            if e.response.status_code == 400 and "invalid_grant" in (e.response.text or "").lower():
+                _notify_telegram_safe(
+                    "⚠️ *ALERT OAUTH `invalid_grant`*: Refresh token Walt ditolak (HTTP 400). "
+                    "Kemungkinan `WALT_REFRESH_TOKEN` pada secret/`.env` tertinggal satu rotasi "
+                    "akibat tabrakan rotasi CI vs lokal. Ikuti runbook README bagian "
+                    "*Jendela Pemeliharaan & Pemulihan Kredensial* (set `MAINTENANCE_MODE=true` dulu)."
+                )
             raise
         try:
             data = r.json()
