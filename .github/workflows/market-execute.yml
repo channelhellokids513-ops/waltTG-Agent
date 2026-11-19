@@ -1,10 +1,8 @@
 name: Walt Market Execute (24/7 Saham US & Komoditas)
 
+# Trigger resmi berasal dari Google Cloud Scheduler (memanggil workflow_dispatch).
+# Cron GitHub Actions dihapus untuk mencegah eksekusi dobel / terlambat berjam-jam.
 on:
-  schedule:
-    # Berjalan setiap 2 jam di menit ke-43 UTC (24/7 Saham US & Komoditas):
-    # (WIB: 08:43, 10:43, 12:43, 14:43, 16:43, 18:43, 20:43, 22:43, 00:43, 02:43, 04:43, 06:43 WIB)
-    - cron: '43 */2 * * *'
   workflow_dispatch:
     inputs:
       dry_run:

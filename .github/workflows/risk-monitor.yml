@@ -1,9 +1,8 @@
 name: Walt Risk Monitor (10-Min Smart Guard)
 
+# Trigger resmi berasal dari Google Cloud Scheduler (memanggil workflow_dispatch).
+# Cron GitHub Actions dihapus untuk mencegah eksekusi dobel / terlambat berjam-jam.
 on:
-  schedule:
-    # Berjalan tiap 10 menit dengan fitur Smart Fast-Exit Idle
-    - cron: '*/10 * * * *'
   workflow_dispatch:
 
 concurrency:

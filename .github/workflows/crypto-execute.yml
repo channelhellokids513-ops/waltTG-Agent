@@ -1,10 +1,8 @@
 name: Walt Crypto Execute (Tier-1 Large Cap & Bluechip)
 
+# Trigger resmi berasal dari Google Cloud Scheduler (memanggil workflow_dispatch).
+# Cron GitHub Actions dihapus untuk mencegah eksekusi dobel / terlambat berjam-jam.
 on:
-  schedule:
-    # Berjalan setiap 2 jam di menit ke-11 UTC:
-    # (WIB: 08:11, 10:11, 12:11, 14:11, 16:11, 18:11, 20:11, 22:11, 00:11, 02:11, 04:11, 06:11 WIB)
-    - cron: '11 */2 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
