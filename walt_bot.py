@@ -985,10 +985,19 @@ def open_position(
 # RISK MONITOR — 4 LAPIS
 # =============================================================================
 
+# Registrasi handler untuk tier lock string di TRAILING_TIERS: {action_name: (lock_pct, label)}
+# Satu-satunya tempat untuk mendaftarkan parameter lock tier string baru.
+_TRAILING_HANDLERS: dict[str, tuple[float, str]] = {
+    "lock_0035": (0.0035, "L4 True Zero-Risk"),
+    "lock_0085": (0.0085, "L4 Lock Cuan"),
+}
+
+
 def _resolve_trailing_sl(pos: Position, profit: float) -> Optional[tuple[float, str]]:
     """
     Hitung target SL dan deskripsi alasan dari tangga TRAILING_TIERS (sumber tunggal).
-    Mengembalikan (round(sl_price, 4), deskripsi_reason) atau None jika profit di bawah tier pertama.
+    Mengembalikan (round(sl_price, 4), deskripsi_reason) atau None jika profit di bawah tier pertama
+    atau action tier tidak dikenal (mencatat log.error tanpa raise/Telegram agar monitor tidak crash).
     """
     if not TRAILING_TIERS or profit < TRAILING_TIERS[0][0]:
         return None
@@ -999,13 +1008,15 @@ def _resolve_trailing_sl(pos: Position, profit: float) -> Optional[tuple[float, 
     if active_tier is None:
         return None
     _threshold, action = active_tier
-    if action == "lock_0035":
-        sl_price = pos.entry_price * 1.0035 if pos.side == "long" else pos.entry_price * 0.9965
-        tier_desc = f"L4 True Zero-Risk +0.35% (Profit {profit*100:+.2f}%)"
-    elif action == "lock_0085":
-        sl_price = pos.entry_price * 1.0085 if pos.side == "long" else pos.entry_price * 0.9915
-        tier_desc = f"L4 Lock Cuan +0.85% (Profit {profit*100:+.2f}%)"
-    elif isinstance(action, (int, float)):
+    if action == "lock_0035" or (isinstance(action, str) and action in _TRAILING_HANDLERS):
+        lock_pct, label = _TRAILING_HANDLERS[action]
+        sl_price = (
+            pos.entry_price * (1.0 + lock_pct)
+            if pos.side == "long"
+            else pos.entry_price * (1.0 - lock_pct)
+        )
+        tier_desc = f"{label} +{lock_pct*100:.2f}% (Profit {profit*100:+.2f}%)"
+    elif isinstance(action, (int, float)) and not isinstance(action, bool):
         trailing_pct = float(action)
         sl_price = (
             pos.current_price * (1.0 - trailing_pct)
@@ -1014,6 +1025,10 @@ def _resolve_trailing_sl(pos: Position, profit: float) -> Optional[tuple[float, 
         )
         tier_desc = f"L4 Trailing {trailing_pct*100:.1f}% (Profit {profit*100:+.2f}%)"
     else:
+        log.error(
+            f"Trailing tier action tidak dikenal: action={action!r} "
+            f"(asset={pos.base_asset}, profit={profit*100:+.2f}%, TRAILING_TIERS={TRAILING_TIERS!r})"
+        )
         return None
     return round(sl_price, 4), tier_desc
 

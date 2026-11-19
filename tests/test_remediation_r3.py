@@ -129,3 +129,28 @@ def test_r3_1_close_reason_strings_unchanged(monkeypatch):
         f"SL {walt_bot.DEFAULT_SL_PCT*100:.2f}% breached (migrasi)",
         "TP breached",
     ]
+
+
+def test_r3_2_every_configured_tier_action_is_handled():
+    for threshold, action in walt_bot.TRAILING_TIERS:
+        for side in ("long", "short"):
+            entry = 100.0
+            current = round(entry * (1.0 + threshold), 6) if side == "long" else round(entry * (1.0 - threshold), 6)
+            pos = _pos(side=side, entry=entry, current=current)
+            resolved = walt_bot._resolve_trailing_sl(pos, threshold)
+            assert resolved is not None, f"Tier ({threshold}, {action!r}) gagal ditangani untuk side={side}"
+
+
+def test_r3_2_unknown_tier_action_logs_error_and_returns_none(monkeypatch, caplog):
+    monkeypatch.setattr(walt_bot, "TRAILING_TIERS", [(0.0080, "lock_unknown_tier")])
+    pos = _pos(side="long", entry=100.0, current=101.0, asset="NVDA")
+    with caplog.at_level("ERROR", logger="walt-bot"):
+        resolved = walt_bot._resolve_trailing_sl(pos, 0.0100)
+    assert resolved is None
+    assert any(
+        rec.levelname == "ERROR"
+        and "lock_unknown_tier" in rec.message
+        and "NVDA" in rec.message
+        for rec in caplog.records
+    )
+
