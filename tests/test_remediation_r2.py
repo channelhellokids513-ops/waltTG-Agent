@@ -164,4 +164,70 @@ def test_p0_1_open_position_always_attempts_autoclose_after_order_filled(monkeyp
     assert client_low.execute.call_count == 0
 
 
+def test_p1_1_single_margin_resolution_per_order_and_over_buffer_flag(monkeypatch):
+    monkeypatch.setattr(walt_bot, "has_enough_job_time", lambda *a, **kw: True)
+    monkeypatch.setattr(walt_bot, "_update_regime_state", lambda *a, **kw: ("GEAR_1_CONSERVATIVE_120M", 120, "ok"))
+    monkeypatch.setattr(walt_bot, "check_daily_circuit_breaker", lambda *a, **kw: (False, "OK"))
+    monkeypatch.setattr(walt_bot, "_is_asset_in_cooldown", lambda *a, **kw: (False, 0.0))
+    monkeypatch.setattr(walt_bot, "check_entry_frequency_limits", lambda *a, **kw: (True, "OK"))
+    monkeypatch.setattr(walt_bot, "_record_open_position_verdict", lambda *a, **kw: None)
+    monkeypatch.setattr(walt_bot, "record_entry_execution", lambda *a, **kw: None)
+
+    tg_calls = []
+    monkeypatch.setattr(walt_bot, "send_telegram", lambda msg, **kw: tg_calls.append(msg))
+
+    import sheet_logger
+    monkeypatch.setattr(sheet_logger, "fetch_latest_research_from_sheet", lambda **kw: {})
+    monkeypatch.setattr(sheet_logger, "log_execution", lambda *a, **kw: {"executions_count": 1})
+
+    prices = iter([100.0, 200.0, 300.0])
+    rate_calls = []
+
+    client = MagicMock()
+    client.balance.return_value = {"accounts": [{"balance_available": "15.0"}]}
+    client.list_contracts.return_value = {
+        "contracts": [{
+            "contract_id": 1,
+            "base_asset": "XAU",
+            "volume_24h_usd": "50000000",
+            "funding_rate_hourly": "0.0005",
+            "max_leverage": 2,
+            "min_size_base": "0.01",
+            "price_slippage": "0.0002",
+        }]
+    }
+    client.list_positions.return_value = {"positions": []}
+
+    def fake_latest_rate(cid):
+        p = next(prices)
+        rate_calls.append(p)
+        return {"rate": str(p)}
+
+    client.latest_rate.side_effect = fake_latest_rate
+    client.preview_order.return_value = {
+        "ok": True,
+        "confirmationToken": "tok_open",
+        "action": {"request": {"autoClose": {"tp": 97.5, "sl": 101.5}}},
+    }
+    client.execute.return_value = {"ok": True, "order": {"order_id": "ord_single"}}
+
+    res = walt_bot.market_execute(client, dry_run=False)
+    assert len(rate_calls) == 1, f"latest_rate harus dipanggil tepat 1x, aktual {len(rate_calls)}"
+    assert any(e.get("verdict") == "EXECUTED" for e in res["executions"])
+
+    # Kasus over_buffer: open_position mengembalikan actual_margin melebihi target_deploy
+    tg_calls.clear()
+    monkeypatch.setattr(walt_bot, "resolve_order_margin", lambda *a, **kw: (2.5, 100.0))
+    monkeypatch.setattr(
+        walt_bot,
+        "open_position",
+        lambda *a, **kw: {"ok": True, "actual_margin": 14.0, "price": 100.0, "tp": 97.5, "sl": 101.5, "order": {"order_id": "ord_ob"}},
+    )
+    res_ob = walt_bot.market_execute(client, dry_run=False)
+    exec_entry = [e for e in res_ob["executions"] if e.get("verdict") == "EXECUTED"][0]
+    assert exec_entry.get("over_buffer") is True
+    assert any("Buffer kas terlampaui" in m for m in tg_calls)
+
+
+
 

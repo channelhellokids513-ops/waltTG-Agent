@@ -885,11 +885,13 @@ def open_position(
     opp: Opportunity,
     margin: float = DEFAULT_MARGIN,
     leverage: int = MAX_LEVERAGE,
+    resolved: Optional[tuple[float, float]] = None,
 ) -> Optional[dict]:
     """Preview → execute buka posisi dengan Dynamic TP/SL dan minimum order size enforcement."""
-    resolved = resolve_order_margin(client, opp, margin, leverage)
     if resolved is None:
-        return None
+        resolved = resolve_order_margin(client, opp, margin, leverage)
+        if resolved is None:
+            return None
     margin, price = resolved
 
     tp, sl = compute_baseline_tpsl(opp.side, price, asset=opp.base_asset, funding_daily=opp.funding_daily)
@@ -2797,19 +2799,36 @@ def scan_with_research(
                     break
 
                 try:
-                    res = open_position(client, opp, margin=margin, leverage=MAX_LEVERAGE)
+                    res = open_position(
+                        client,
+                        opp,
+                        margin=margin,
+                        leverage=MAX_LEVERAGE,
+                        resolved=(margin, resolved_price),
+                    )
                     if res:
                         actual_margin = res.get("actual_margin", margin) if isinstance(res, dict) else margin
                         order_id = res.get("order", {}).get("order_id") if isinstance(res, dict) else None
                         order_price = res.get("price") or getattr(opp, "live_price", 0.0)
                         tp = res.get("tp")
                         sl = res.get("sl")
-                        executions.append({
+                        exec_entry = {
                             "asset": asset, "side": opp.side, "leverage": MAX_LEVERAGE, "margin": actual_margin,
                             "price": order_price, "tp": tp, "sl": sl,
                             "verdict": "EXECUTED", "reason": reason,
                             "order_id": order_id,
-                        })
+                        }
+                        if deployed + actual_margin > target_deploy:
+                            log.warning(
+                                f"⚠️ Buffer kas terlampaui pada {asset}: "
+                                f"${deployed + actual_margin:.2f} > target ${target_deploy:.2f}"
+                            )
+                            send_telegram(
+                                f"⚠️ Buffer kas terlampaui: {asset} "
+                                f"(${deployed + actual_margin:.2f} > ${target_deploy:.2f})"
+                            )
+                            exec_entry["over_buffer"] = True
+                        executions.append(exec_entry)
                         _record_open_position_verdict(
                             opp.contract_id, asset, opp.side, verdict, actual_margin, order_price
                         )
@@ -3140,7 +3159,13 @@ def market_execute(
             break
 
         try:
-            result = open_position(client, opp, margin=margin, leverage=MAX_LEVERAGE)
+            result = open_position(
+                client,
+                opp,
+                margin=margin,
+                leverage=MAX_LEVERAGE,
+                resolved=(margin, resolved_price),
+            )
             if result:
                 open_contract_ids.add(opp.contract_id)
                 active_slot_count += 1
@@ -3149,12 +3174,23 @@ def market_execute(
                 order_price = result.get("price") or getattr(opp, "live_price", 0.0)
                 tp = result.get("tp")
                 sl = result.get("sl")
-                executions.append({
+                exec_entry = {
                     "asset": opp.base_asset, "side": opp.side, "leverage": MAX_LEVERAGE, "margin": actual_margin,
                     "price": order_price, "tp": tp, "sl": sl,
                     "verdict": "EXECUTED", "reason": reason,
                     "order_id": order_id,
-                })
+                }
+                if deployed + actual_margin > target_deploy:
+                    log.warning(
+                        f"⚠️ Buffer kas terlampaui pada {opp.base_asset}: "
+                        f"${deployed + actual_margin:.2f} > target ${target_deploy:.2f}"
+                    )
+                    send_telegram(
+                        f"⚠️ Buffer kas terlampaui: {opp.base_asset} "
+                        f"(${deployed + actual_margin:.2f} > ${target_deploy:.2f})"
+                    )
+                    exec_entry["over_buffer"] = True
+                executions.append(exec_entry)
                 _record_open_position_verdict(
                     opp.contract_id, opp.base_asset, opp.side, verdict, actual_margin, order_price
                 )
