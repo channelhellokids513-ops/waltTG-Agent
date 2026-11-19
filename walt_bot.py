@@ -331,20 +331,81 @@ class WaltClient:
             "Authorization": f"Bearer {self.tokens.get_access_token(force_refresh=force_refresh)}",
         }
 
+    _RETRYABLE_EXCEPTIONS = (
+        httpx.ConnectError,
+        httpx.ReadTimeout,
+        httpx.WriteTimeout,
+        httpx.PoolTimeout,
+    )
+    _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+    def _post_mcp_with_retry(self, tool_label: str, payload: dict, _auth_retried: bool = False) -> httpx.Response:
+        """
+        Kirim HTTP POST ke MCP relay dengan retry eksponensial (maks 3 percobaan, jeda 1s lalu 2s)
+        untuk error jaringan dan HTTP 429/5xx. Hormati Retry-After (cap 20s) dan pertahankan
+        auto-refresh sekali untuk HTTP 401. Tidak pernah mencetak header Authorization / token.
+        """
+        backoff_delays = (1, 2)
+        last_err: str = "unknown error"
+
+        for attempt in range(1, 4):
+            try:
+                r = self.client.post(self.base_url, json=payload, headers=self._headers())
+            except self._RETRYABLE_EXCEPTIONS as exc:
+                last_err = f"{type(exc).__name__}: {redact_secrets(str(exc))}"
+                if attempt < 3:
+                    delay = backoff_delays[attempt - 1]
+                    log.warning(
+                        f"WaltClient._post_mcp_with_retry({tool_label}) attempt {attempt}/3 gagal ({type(exc).__name__}); retry {delay}s"
+                    )
+                    time.sleep(delay)
+                    continue
+                raise RuntimeError(
+                    f"Walt MCP network error ({tool_label}) setelah 3 percobaan: {last_err}"
+                ) from exc
+
+            if r.status_code == 401 and not _auth_retried:
+                self.tokens.get_access_token(force_refresh=True)
+                return self._post_mcp_with_retry(tool_label, payload, _auth_retried=True)
+
+            if r.status_code in self._RETRYABLE_STATUS_CODES:
+                last_err = f"HTTP {r.status_code}"
+                if attempt < 3:
+                    delay: float = backoff_delays[attempt - 1]
+                    if r.status_code == 429:
+                        ra = (r.headers.get("Retry-After") or "").strip()
+                        try:
+                            if ra:
+                                delay = min(20.0, max(0.0, float(ra)))
+                        except ValueError:
+                            delay = backoff_delays[attempt - 1]
+                    log.warning(
+                        f"WaltClient._post_mcp_with_retry({tool_label}) HTTP {r.status_code} (attempt {attempt}/3); retry {delay}s"
+                    )
+                    time.sleep(delay)
+                    continue
+                raise RuntimeError(
+                    f"Walt MCP HTTP error ({tool_label}) setelah 3 percobaan: {last_err}"
+                )
+
+            if r.status_code >= 400:
+                raise RuntimeError(
+                    f"Walt MCP HTTP error ({tool_label}): HTTP {r.status_code}"
+                )
+
+            return r
+
+        raise RuntimeError(f"Walt MCP error ({tool_label}): {last_err}")
+
     def _call(self, tool: str, args: dict | None = None, _retry: bool = False) -> Any:
-        """Panggil satu tool MCP via JSON-RPC. Auto-retry sekali kalau 401."""
+        """Panggil satu tool MCP via JSON-RPC dengan retry jaringan/5xx/429 dan auto-refresh 401."""
         payload = {
             "jsonrpc": "2.0",
             "id": int(time.time() * 1000),
             "method": "tools/call",
             "params": {"name": tool, "arguments": args or {}},
         }
-        r = self.client.post(self.base_url, json=payload, headers=self._headers())
-        if r.status_code == 401 and not _retry:
-            # Access token mungkin expired, force refresh + retry
-            self.tokens.get_access_token(force_refresh=True)
-            return self._call(tool, args, _retry=True)
-        r.raise_for_status()
+        r = self._post_mcp_with_retry(tool, payload, _auth_retried=_retry)
         data = r.json()
         if "error" in data:
             raise RuntimeError(f"Walt error: {data['error']}")
@@ -372,11 +433,7 @@ class WaltClient:
             "method": "tools/list",
             "params": {},
         }
-        r = self.client.post(self.base_url, json=payload, headers=self._headers())
-        if r.status_code == 401:
-            self.tokens.get_access_token(force_refresh=True)
-            r = self.client.post(self.base_url, json=payload, headers=self._headers())
-        r.raise_for_status()
+        r = self._post_mcp_with_retry("tools/list", payload)
         data = r.json()
         return (data.get("result") or {}).get("tools", [])
 
