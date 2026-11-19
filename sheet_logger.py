@@ -42,17 +42,25 @@ def _normalize_webhook_url(url: str) -> str:
     return url
 
 
+DAILY_SCANS_HEADERS = [
+    "timestamp_utc", "balance_usdc", "open_positions", "asset", "side",
+    "funding_daily_pct", "price", "swarm_score", "sentiment", "consensus",
+    "vendor_alignment", "p1_polarity", "p4_momentum", "p5_catalysts", "p6_contrarian",
+    "verdict", "margin_allocated", "reason", "narrative"
+]
+
+EXECUTIONS_LOG_HEADERS = [
+    "Timestamp (UTC)", "Asset", "Sisi", "Order Type", "Leverage", "Margin ($)",
+    "Entry Price ($)", "TP ($)", "SL ($)", "Order ID", "Status", "Keterangan"
+]
+
+
 def log_scan_to_csv(summary: dict, researches: dict[str, Any], filepath: str = "logs/scan_history.csv"):
     """Catat baris scan ke file CSV lokal."""
     _ensure_dir(filepath)
     file_exists = os.path.exists(filepath)
 
-    headers = [
-        "timestamp_utc", "balance_usdc", "open_positions", "asset", "side",
-        "funding_daily_pct", "price", "swarm_score", "sentiment", "consensus",
-        "vendor_alignment", "p1_polarity", "p4_momentum", "p5_catalysts", "p6_contrarian",
-        "verdict", "margin_allocated", "reason", "narrative"
-    ]
+    headers = DAILY_SCANS_HEADERS
 
     ts = summary.get("ts") or datetime.now(timezone.utc).isoformat()
     balance = "0.0"
@@ -108,7 +116,12 @@ def log_scan_via_webhook(rows: list[list[Any]], webhook_url: str) -> bool:
     if not url:
         return False
     try:
-        payload = {"action": "log_scan", "sheet": "Daily_Scans", "rows": rows}
+        payload = {
+            "action": "log_scan",
+            "sheet": "Daily_Scans",
+            "header": DAILY_SCANS_HEADERS,
+            "rows": rows,
+        }
         r = httpx.post(url, json=payload, follow_redirects=True, timeout=20.0)
         log.info(f"Google Sheet Webhook response status: {r.status_code}")
         return r.status_code in (200, 302)
@@ -182,10 +195,7 @@ def log_execution(executions: list[dict], filepath: str = "logs/executions_histo
     _ensure_dir(filepath)
     file_exists = os.path.exists(filepath)
 
-    headers = [
-        "Timestamp (UTC)", "Asset", "Sisi", "Order Type", "Leverage", "Margin ($)",
-        "Entry Price ($)", "TP ($)", "SL ($)", "Order ID", "Status", "Keterangan"
-    ]
+    headers = EXECUTIONS_LOG_HEADERS
 
     ts = datetime.now(timezone.utc).isoformat()
     rows = []
@@ -215,7 +225,17 @@ def log_execution(executions: list[dict], filepath: str = "logs/executions_histo
     webhook_url = _normalize_webhook_url(os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", DEFAULT_WEBHOOK_URL))
     if webhook_url and rows:
         try:
-            httpx.post(webhook_url, json={"action": "log_execution", "sheet": "Executions_Log", "rows": rows}, follow_redirects=True, timeout=20.0)
+            httpx.post(
+                webhook_url,
+                json={
+                    "action": "log_execution",
+                    "sheet": "Executions_Log",
+                    "header": EXECUTIONS_LOG_HEADERS,
+                    "rows": rows,
+                },
+                follow_redirects=True,
+                timeout=20.0,
+            )
         except Exception as e:
             log.warning(f"Gagal kirim eksekusi ke Google Sheets Webhook: {e}")
 
@@ -315,15 +335,15 @@ def log_close(
     webhook_ok = False
     webhook_url = _normalize_webhook_url(os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", DEFAULT_WEBHOOK_URL))
     if webhook_url:
-        existing_rows = fetch_sheet_csv_rows(
-            "Closed_Positions",
-            expected_col_name="Exit Price ($)",
-        )
-        rows_to_send = [row] if existing_rows else [CLOSED_POSITIONS_HEADERS, row]
         try:
             r = httpx.post(
                 webhook_url,
-                json={"action": "log_close", "sheet": "Closed_Positions", "rows": rows_to_send},
+                json={
+                    "action": "log_close",
+                    "sheet": "Closed_Positions",
+                    "header": CLOSED_POSITIONS_HEADERS,
+                    "rows": [row],
+                },
                 follow_redirects=True,
                 timeout=20.0,
             )
@@ -433,15 +453,15 @@ def log_pnl_tracker(summary: dict, filepath: str = "logs/pnl_tracker.csv") -> di
     webhook_ok = False
     webhook_url = _normalize_webhook_url(os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", DEFAULT_WEBHOOK_URL))
     if webhook_url:
-        has_header = bool(
-            existing_rows
-            and any("ekuitas" in str(c).lower() or "tanggal" in str(c).lower() for c in existing_rows[0])
-        )
-        rows_to_send = [row] if (existing_rows and has_header) else ([row] if existing_rows else [PNL_TRACKER_HEADERS, row])
         try:
             r = httpx.post(
                 webhook_url,
-                json={"action": "log_pnl", "sheet": "PnL_Tracker", "rows": rows_to_send},
+                json={
+                    "action": "log_pnl",
+                    "sheet": "PnL_Tracker",
+                    "header": PNL_TRACKER_HEADERS,
+                    "rows": [row],
+                },
                 follow_redirects=True,
                 timeout=20.0,
             )
