@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import csv
+import math
 import time
 import json
 import random
@@ -1085,6 +1086,59 @@ def _close_executed_ok(res: Any) -> bool:
     return True
 
 
+def _parse_positive_finite_price(raw: Any) -> Optional[float]:
+    """Konversi nilai harga ke float positif terhingga (round 4 desimal), atau None jika tidak valid."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(val) or val <= 0.0:
+        return None
+    return round(val, 4)
+
+
+def _extract_close_exit_price(res: Any, pos: Position) -> tuple[float, str]:
+    """
+    Ekstrak harga keluar dengan rantai fallback eksplisit (dari paling akurat ke paling lemah):
+      1. exchange_fill     : harga fill riil dari objek order/top-level respons execute close.
+      2. response_position : harga posisi penutupan pada respons close (jika dikembalikan API).
+      3. snapshot_estimate : pos.current_price (estimasi snapshot, bukan fill riil).
+    """
+    if isinstance(res, dict):
+        # 1. Harga fill riil dari objek order hasil close (pola result["order"] / result["price"] seperti open_position)
+        order_obj = res.get("order")
+        if isinstance(order_obj, dict):
+            for key in ("avg_fill_price", "fill_price", "execution_price", "price"):
+                parsed = _parse_positive_finite_price(order_obj.get(key))
+                if parsed is not None:
+                    return parsed, "exchange_fill"
+        for key in ("avg_fill_price", "fill_price", "execution_price", "price"):
+            parsed = _parse_positive_finite_price(res.get(key))
+            if parsed is not None:
+                return parsed, "exchange_fill"
+
+        # 2. Harga posisi yang dikembalikan pada respons close (jika ada)
+        pos_obj = res.get("position")
+        if isinstance(pos_obj, dict):
+            for key in ("avg_close_price", "close_price", "exit_price", "mark_price"):
+                parsed = _parse_positive_finite_price(pos_obj.get(key))
+                if parsed is not None:
+                    return parsed, "response_position"
+        for key in ("avg_close_price", "close_price", "exit_price"):
+            parsed = _parse_positive_finite_price(res.get(key))
+            if parsed is not None:
+                return parsed, "response_position"
+
+    # 3. Fallback lama: pos.current_price  # estimasi snapshot, bukan fill riil
+    snap_price = _parse_positive_finite_price(pos.current_price)  # estimasi snapshot, bukan fill riil
+    if snap_price is not None:
+        return snap_price, "snapshot_estimate"
+    entry_fallback = _parse_positive_finite_price(pos.entry_price)
+    return (entry_fallback if entry_fallback is not None else round(float(pos.current_price), 4)), "snapshot_estimate"
+
+
 def _execute_validated_close(
     client: WaltClient,
     pos: Position,
@@ -1106,7 +1160,11 @@ def _execute_validated_close(
             "reason": reason,
             "result": res,
         }
-    _record_position_close(pos, reason)
+    final_exit_price, exit_price_source = _extract_close_exit_price(res, pos)
+    log.debug(
+        f"Close exit price {pos.base_asset}: {final_exit_price:.4f} (sumber={exit_price_source})"
+    )
+    _record_position_close(pos, reason, exit_price=final_exit_price)
     return {
         "action": "CLOSE",
         "detail": detail or reason,
@@ -1115,7 +1173,11 @@ def _execute_validated_close(
     }
 
 
-def _record_position_close(pos: Position, reason: str):
+def _record_position_close(
+    pos: Position,
+    reason: str,
+    exit_price: Optional[float] = None,
+) -> None:
     """Catat penutupan posisi ke Closed_Positions (Google Sheet), logs/closed_history.csv, closed_ids, dan set cooldown."""
     pos_key = make_position_dedupe_key({
         "position_id": pos.position_id,
@@ -1123,15 +1185,28 @@ def _record_position_close(pos: Position, reason: str):
         "entry_price": pos.entry_price,
         "opened_at": pos.opened_at,
     })
+    resolved_exit_price = _parse_positive_finite_price(exit_price)
+    if resolved_exit_price is None:
+        resolved_exit_price = _parse_positive_finite_price(pos.current_price)  # estimasi snapshot, bukan fill riil
+    if resolved_exit_price is None:
+        resolved_exit_price = _parse_positive_finite_price(pos.entry_price)
     try:
         from sheet_logger import log_close
-        pnl_quote = pos.pnl_pct_margin * pos.margin
+        if resolved_exit_price is not None and pos.entry_price > 0:
+            move = (
+                (resolved_exit_price - pos.entry_price) / pos.entry_price
+                if pos.side == "long"
+                else (pos.entry_price - resolved_exit_price) / pos.entry_price
+            )
+            pnl_quote = move * pos.leverage * pos.margin
+        else:
+            pnl_quote = pos.pnl_pct_margin * pos.margin
         log_close(
             asset=pos.base_asset,
             side=pos.side,
             contract_id=pos.contract_id,
             entry_price=pos.entry_price,
-            exit_price=pos.current_price,
+            exit_price=resolved_exit_price,
             margin=pos.margin,
             pnl_quote=pnl_quote,
             funding_quote=pos.funding_paid,
