@@ -27,6 +27,7 @@ DEFAULT_STRATEGY_CONFIG: dict[str, Any] = {
     "min_funding_daily": 0.005,     # 0.50%/hari
     "reentry_cooldown_hours": 3.0,  # 3 jam
     "max_slots_cap": 15,            # batas atas slot elastis
+    "max_p5_risk": 0.70,            # E2: P5_risk_catalysts >= 0.70 -> SKIP
     "dry_run": False,
 }
 
@@ -38,6 +39,7 @@ STRATEGY_PARAM_SPECS: dict[str, dict[str, Any]] = {
     "min_funding_daily": {"type": "float", "min": 0.001, "max": 0.05, "desc": "Minimal |funding/hari| (mis. 0.005 = 0.50%)"},
     "reentry_cooldown_hours": {"type": "float", "min": 0.0, "max": 24.0, "desc": "Cooldown re-entry pasca-close (jam)"},
     "max_slots_cap": {"type": "int", "min": 1, "max": 15, "desc": "Batas maksimal slot posisi terbuka (1-15)"},
+    "max_p5_risk": {"type": "float", "min": 0.3, "max": 1.0, "desc": "Ambang P5_risk_catalysts untuk SKIP (0.3-1.0)"},
     "dry_run": {"type": "bool", "desc": "Mode simulasi tanpa order riil (true/false)"},
 }
 

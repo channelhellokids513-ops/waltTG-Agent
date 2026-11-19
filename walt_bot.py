@@ -203,6 +203,7 @@ MONTHLY_TARGET = 100.0      # USDC
 DEFAULT_SL_PCT = 0.015      # 1.5% default SL (beri ruang napas noise intraday, R:R >= 1:1.33)
 DEFAULT_TP_PCT = 0.025      # 2.5% default TP (biarkan profit berlari & tutup fee jauh)
 DEFAULT_CALM_TP_PCT = 0.020 # 2.0% default TP ETF & Crypto
+MAX_P5_RISK = 0.70          # E2: P5_risk_catalysts >= 0.70 -> SKIP
 
 try:
     from strategy_config import load_strategy_config as _load_strategy_config
@@ -212,6 +213,7 @@ try:
     DEFAULT_CALM_TP_PCT = float(_rt_cfg.get("tp_calm_pct", DEFAULT_CALM_TP_PCT))
     MIN_FUNDING_DAILY = float(_rt_cfg.get("min_funding_daily", MIN_FUNDING_DAILY))
     REENTRY_COOLDOWN_SEC = int(float(_rt_cfg.get("reentry_cooldown_hours", 3.0)) * 3600)
+    MAX_P5_RISK = float(_rt_cfg.get("max_p5_risk", MAX_P5_RISK))
 except Exception as _cfg_exc:
     logging.getLogger("walt-bot").warning(
         f"Gagal memuat konfigurasi strategi bersama ({_cfg_exc}); fallback ke DEFAULT_STRATEGY_CONFIG."
@@ -699,10 +701,10 @@ def decide_go_nogo(
     if research.consensus == "NO_DATA" or research.news_sentiment == "unknown":
         return "HALF", "tidak ada berita/headlines → proteksi HALF size (panen yield funding konservatif)", 0.5
 
-    # P5 Risk Catalysts Check (katalis event resiko tinggi >= 0.70)
+    # E2: P5 Risk Catalysts Check (katalis event resiko tinggi >= max_p5_risk -> SKIP)
     p5_risk = research.p1_to_p7_scores.get("P5_risk_catalysts", 0.0) if research.p1_to_p7_scores else 0.0
-    if p5_risk >= 0.70:
-        return "HALF", f"High Risk Catalyst (P5={p5_risk:.2f} >= 0.70) → proteksi HALF size", 0.5
+    if p5_risk >= MAX_P5_RISK:
+        return "SKIP", f"High Risk Catalyst (P5={p5_risk:.2f} >= {MAX_P5_RISK:.2f}) → SKIP", 0.0
 
     # Proteksi Divergensi Konsensus (SPLIT atau Vendor Conflict)
     if (
