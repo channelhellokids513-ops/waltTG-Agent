@@ -228,6 +228,8 @@ except Exception as _cfg_exc:
     )
 
 # Tangga Trailing Stop (True Zero-Risk — surplus bersih setelah fee 0.18% + spread)
+# Arah monoton: diurutkan naik berdasarkan ambang profit; semakin tinggi profit, semakin ketat SL terkunci
+# (LONG semakin naik di atas entry, SHORT semakin turun di bawah entry).
 TRAILING_TIERS = [
     (0.0080, "lock_0035"),  # Tier 1: profit >= +0.80% → SL di entry +0.35% (surplus bersih setelah fee)
     (0.0140, "lock_0085"),  # Tier 2: profit >= +1.40% → SL di entry +0.85% (kunci cuan menengah)
@@ -980,6 +982,39 @@ def open_position(
 # RISK MONITOR — 4 LAPIS
 # =============================================================================
 
+def _resolve_trailing_sl(pos: Position, profit: float) -> Optional[tuple[float, str]]:
+    """
+    Hitung target SL dan deskripsi alasan dari tangga TRAILING_TIERS (sumber tunggal).
+    Mengembalikan (round(sl_price, 4), deskripsi_reason) atau None jika profit di bawah tier pertama.
+    """
+    if not TRAILING_TIERS or profit < TRAILING_TIERS[0][0]:
+        return None
+    active_tier = None
+    for threshold, action in TRAILING_TIERS:
+        if profit >= threshold:
+            active_tier = (threshold, action)
+    if active_tier is None:
+        return None
+    _threshold, action = active_tier
+    if action == "lock_0035":
+        sl_price = pos.entry_price * 1.0035 if pos.side == "long" else pos.entry_price * 0.9965
+        tier_desc = f"L4 True Zero-Risk +0.35% (Profit {profit*100:+.2f}%)"
+    elif action == "lock_0085":
+        sl_price = pos.entry_price * 1.0085 if pos.side == "long" else pos.entry_price * 0.9915
+        tier_desc = f"L4 Lock Cuan +0.85% (Profit {profit*100:+.2f}%)"
+    elif isinstance(action, (int, float)):
+        trailing_pct = float(action)
+        sl_price = (
+            pos.current_price * (1.0 - trailing_pct)
+            if pos.side == "long"
+            else pos.current_price * (1.0 + trailing_pct)
+        )
+        tier_desc = f"L4 Trailing {trailing_pct*100:.1f}% (Profit {profit*100:+.2f}%)"
+    else:
+        return None
+    return round(sl_price, 4), tier_desc
+
+
 def _sl_is_better(side: str, new_sl: float, old_sl: Optional[float]) -> bool:
     """Cek apakah new_sl memberikan proteksi risiko yang lebih baik dibanding old_sl."""
     if old_sl is None:
@@ -1182,51 +1217,12 @@ def evaluate_and_apply_position_risk(
 
     # D. Kandidat dari Trailing Stop (Lapis 4 — True Zero-Risk surplus bersih setelah fee)
     profit = pos.profit_pct_price
-    if profit >= TRAILING_TIERS[0][0]:
-        active_tier = None
-        for threshold, action in TRAILING_TIERS:
-            if profit >= threshold:
-                active_tier = (threshold, action)
-        if active_tier:
-            threshold, action = active_tier
-            # Cabang aktif True Zero-Risk: LONG di atas entry, SHORT di bawah entry
-            if action == "lock_0035":
-                l4_sl = pos.entry_price * 1.0035 if pos.side == "long" else pos.entry_price * 0.9965
-                tier_desc = f"L4 True Zero-Risk +0.35% (Profit {profit*100:+.2f}%)"
-            elif action == "lock_0085":
-                l4_sl = pos.entry_price * 1.0085 if pos.side == "long" else pos.entry_price * 0.9915
-                tier_desc = f"L4 Lock Cuan +0.85% (Profit {profit*100:+.2f}%)"
-            # Cabang lama dipertahankan untuk kompatibilitas mundur
-            elif action == "lock_0010":
-                l4_sl = pos.entry_price * 1.0010 if pos.side == "long" else pos.entry_price * 0.9990
-                tier_desc = f"L4 Zero-Risk +0.10% (Profit {profit*100:+.2f}%)"
-            elif action == "lock_0022":
-                l4_sl = pos.entry_price * 1.0022 if pos.side == "long" else pos.entry_price * 0.9978
-                tier_desc = f"L4 Lock +0.22% (Profit {profit*100:+.2f}%)"
-            elif action == "lock_0030":
-                l4_sl = pos.entry_price * 1.0030 if pos.side == "long" else pos.entry_price * 0.9970
-                tier_desc = f"L4 Lock Cuan +0.30% (Profit {profit*100:+.2f}%)"
-            elif action in ("lock_0020", "lock_0025"):
-                l4_sl = pos.entry_price * 1.0020 if pos.side == "long" else pos.entry_price * 0.9980
-                tier_desc = f"L4 Zero-Risk +0.20% (Profit {profit*100:+.2f}%)"
-            elif action in ("lock_0050", "lock_008"):
-                l4_sl = pos.entry_price * 1.0050 if pos.side == "long" else pos.entry_price * 0.9950
-                tier_desc = f"L4 Lock Cuan +0.50% (Profit {profit*100:+.2f}%)"
-            elif action in ("lock_0100", "lock_015"):
-                l4_sl = pos.entry_price * 1.0100 if pos.side == "long" else pos.entry_price * 0.9900
-                tier_desc = f"L4 Lock Cuan +1.00% (Profit {profit*100:+.2f}%)"
-            elif isinstance(action, (int, float)):
-                trailing_pct = action
-                l4_sl = pos.current_price * (1 - trailing_pct) if pos.side == "long" else pos.current_price * (1 + trailing_pct)
-                tier_desc = f"L4 Trailing {trailing_pct*100:.1f}% (Profit {profit*100:+.2f}%)"
-            else:
-                l4_sl = pos.entry_price
-                tier_desc = "L4 Breakeven"
-
-            l4_sl = round(l4_sl, 4)
-            if _sl_is_better(pos.side, l4_sl, candidate_sl) and _sl_is_improvement(pos, l4_sl):
-                candidate_sl = l4_sl
-                sl_reason = tier_desc
+    trailing_res = _resolve_trailing_sl(pos, profit)
+    if trailing_res is not None:
+        l4_sl, tier_desc = trailing_res
+        if _sl_is_better(pos.side, l4_sl, candidate_sl) and _sl_is_improvement(pos, l4_sl):
+            candidate_sl = l4_sl
+            sl_reason = tier_desc
 
     # Pastikan candidate_sl adalah improvement nyata dibanding pos.sl saat ini
     final_sl = candidate_sl if (candidate_sl is not None and _sl_is_improvement(pos, candidate_sl)) else None
@@ -1331,40 +1327,10 @@ def apply_layer3_volatility(client: WaltClient, pos: Position) -> Optional[dict]
 
 def apply_layer4_trailing(client: WaltClient, pos: Position) -> Optional[dict]:
     """Lapis 4: Trailing stop progresif (wrapper kompatibilitas)."""
-    profit = pos.profit_pct_price
-    if profit < TRAILING_TIERS[0][0]:
+    resolved = _resolve_trailing_sl(pos, pos.profit_pct_price)
+    if resolved is None:
         return None
-    active_tier = None
-    for threshold, action in TRAILING_TIERS:
-        if profit >= threshold:
-            active_tier = (threshold, action)
-    if active_tier is None:
-        return None
-    threshold, action = active_tier
-    # Cabang aktif True Zero-Risk: LONG di atas entry, SHORT di bawah entry
-    if action == "lock_0035":
-        new_sl = pos.entry_price * 1.0035 if pos.side == "long" else pos.entry_price * 0.9965
-    elif action == "lock_0085":
-        new_sl = pos.entry_price * 1.0085 if pos.side == "long" else pos.entry_price * 0.9915
-    elif action == "lock_0010":
-        new_sl = pos.entry_price * 1.0010 if pos.side == "long" else pos.entry_price * 0.9990
-    elif action == "lock_0022":
-        new_sl = pos.entry_price * 1.0022 if pos.side == "long" else pos.entry_price * 0.9978
-    elif action == "lock_0030":
-        new_sl = pos.entry_price * 1.0030 if pos.side == "long" else pos.entry_price * 0.9970
-    # Cabang lama dipertahankan untuk kompatibilitas mundur
-    elif action in ("lock_0020", "lock_0025"):
-        new_sl = pos.entry_price * 1.0020 if pos.side == "long" else pos.entry_price * 0.9980
-    elif action in ("lock_0050", "lock_008"):
-        new_sl = pos.entry_price * 1.0050 if pos.side == "long" else pos.entry_price * 0.9950
-    elif action in ("lock_0100", "lock_015"):
-        new_sl = pos.entry_price * 1.0100 if pos.side == "long" else pos.entry_price * 0.9900
-    elif isinstance(action, (int, float)):
-        trailing_pct = action
-        new_sl = pos.current_price * (1 - trailing_pct) if pos.side == "long" else pos.current_price * (1 + trailing_pct)
-    else:
-        new_sl = pos.entry_price
-    new_sl = round(new_sl, 4)
+    new_sl, _desc = resolved
     if not _sl_is_improvement(pos, new_sl, buffer=0.0005):
         return None
     preview = client.preview_auto_close(pos.contract_id, sl=new_sl)

@@ -275,6 +275,38 @@ def test_p1_2_sheet_webhook_retries_then_succeeds_and_fallback_csv(monkeypatch, 
     assert "Asset" in content and "NVDA" in content
 
 
+@pytest.mark.parametrize(
+    "side,profit_pct,expected_sl",
+    [
+        ("long", 0.0079, None),
+        ("short", 0.0079, None),
+        ("long", 0.0080, 100.35),
+        ("short", 0.0080, 99.65),
+        ("long", 0.0139, 100.35),
+        ("short", 0.0139, 99.65),
+        ("long", 0.0140, 100.85),
+        ("short", 0.0140, 99.15),
+        ("long", 0.0200, round(102.0 * 0.9940, 4)),
+        ("short", 0.0200, round(98.0 * 1.0060, 4)),
+        ("long", 0.0250, round(102.5 * 0.9940, 4)),
+        ("short", 0.0250, round(97.5 * 1.0060, 4)),
+    ],
+)
+def test_p2_1_unified_trailing_sl_12_cases(side, profit_pct, expected_sl):
+    entry = 100.0
+    current = round(entry * (1.0 + profit_pct), 6) if side == "long" else round(entry * (1.0 - profit_pct), 6)
+    pos = _pos(side=side, entry=entry, current=current, tp=105.0 if side == "long" else 95.0, sl=98.5 if side == "long" else 101.5)
+    resolved = walt_bot._resolve_trailing_sl(pos, profit_pct)
+    if expected_sl is None:
+        assert resolved is None
+    else:
+        assert resolved is not None
+        sl_price, desc = resolved
+        assert sl_price == pytest.approx(expected_sl, abs=1e-4)
+        assert "L4" in desc
+
+
+
 
 
 
