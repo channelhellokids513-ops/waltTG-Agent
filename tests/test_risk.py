@@ -143,7 +143,7 @@ def test_guard_migrates_old_sl_and_closes_when_sl_15pct_breached_long(monkeypatc
 
     assert res is not None
     assert res["action"] == "CLOSE"
-    assert res["detail"] == "SL 1.5% breached (migrasi)"
+    assert res["detail"] == "SL 1.50% breached (migrasi)"
     client.preview_close.assert_called_once_with(pos.contract_id)
     client.preview_auto_close.assert_not_called()
 
@@ -158,7 +158,7 @@ def test_guard_closes_when_sl_15pct_breached_short(monkeypatch):
 
     assert res is not None
     assert res["action"] == "CLOSE"
-    assert res["detail"] == "SL 1.5% breached (migrasi)"
+    assert res["detail"] == "SL 1.50% breached (migrasi)"
     client.preview_close.assert_called_once_with(pos.contract_id)
     client.preview_auto_close.assert_not_called()
 

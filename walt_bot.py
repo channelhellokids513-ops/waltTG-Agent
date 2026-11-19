@@ -823,14 +823,16 @@ def compute_baseline_tpsl(
 ) -> tuple[float, float]:
     """
     Return (tp, sl) dinamis disesuaikan dengan profil volatilitas aset & windfall funding:
-    - Asymmetric R:R: TP +2.0% s/d +2.5% vs SL 1.5% agar surplus bersih jauh melampaui fee 0.18%
-    - Windfall Take Profit: Jika 2.5x funding harian berada di 1.5% <= windfall < tp_pct, TP dimajukan
+    - Asymmetric R:R: TP +2.0% s/d +2.5% vs SL DEFAULT_SL_PCT agar surplus bersih melampaui fee 0.18%
+    - Windfall Take Profit: Jika abs(funding_daily) >= MIN_FUNDING_DAILY dan
+      DEFAULT_SL_PCT <= 2.5x funding harian < tp_pct, TP dimajukan
     """
     tp_pct, sl_pct = get_asset_baseline_tpsl_pct(asset)
 
-    if abs(funding_daily) >= 0.005:
+    # MIN_FUNDING_DAILY & DEFAULT_SL_PCT keduanya ikut konfigurasi STRATEGY_CONFIG_JSON
+    if abs(funding_daily) >= MIN_FUNDING_DAILY:
         windfall_tp = round(abs(funding_daily) * 2.5, 4)
-        if 0.015 <= windfall_tp < tp_pct:
+        if DEFAULT_SL_PCT <= windfall_tp < tp_pct:
             tp_pct = windfall_tp
 
     if side == "long":
@@ -1154,7 +1156,7 @@ def evaluate_and_apply_position_risk(
     1. Lapis 2 (Funding Flip Sign): Jika funding berbalik arah negatif → TUTUP POSISI SEGERA.
     2. TP Dinamis: Ambil target TP baseline/windfall, perketat jika target baru lebih dekat ke entry.
     3. SL Dinamis: Komparasikan kandidat SL dari:
-       - Baseline 1% (Lapis 1)
+       - Baseline DEFAULT_SL_PCT (Lapis 1)
        - Funding rendah <0.1%/hari (Lapis 2)
        - Progressive Trailing Stop / Early Zero-Risk Lock (Lapis 4)
        Pilih SL yang paling aman & menguntungkan (strictly better).
@@ -1199,7 +1201,7 @@ def evaluate_and_apply_position_risk(
     candidate_sl = None
     sl_reason = None
 
-    # A. Kandidat dari Baseline 1% (Lapis 1)
+    # A. Kandidat dari Baseline DEFAULT_SL_PCT (Lapis 1)
     if not pos.sl or _sl_is_improvement(pos, target_sl):
         candidate_sl = target_sl
         sl_reason = "L1 Baseline"
@@ -1237,12 +1239,13 @@ def evaluate_and_apply_position_risk(
         or (pos.side == "short" and sl_check <= pos.current_price)
     )
     if sl_breached:
+        sl_breach_label = f"SL {DEFAULT_SL_PCT*100:.2f}% breached (migrasi)"
         log.warning(
-            f"[GUARD] {pos.base_asset}: SL 1.5% breached (current=${pos.current_price:.4f}, sl=${sl_check:.4f}) → tutup posisi"
+            f"[GUARD] {pos.base_asset}: {sl_breach_label} (current=${pos.current_price:.4f}, sl=${sl_check:.4f}) → tutup posisi"
         )
         preview = client.preview_close(pos.contract_id)
         return _execute_validated_close(
-            client, pos, preview, reason="SL 1.5% breached (migrasi)"
+            client, pos, preview, reason=sl_breach_label, detail=sl_breach_label
         )
 
     tp_check = final_tp if final_tp is not None else (pos.tp if pos.tp is not None else target_tp)
@@ -1321,7 +1324,7 @@ def apply_layer2_funding(
 
 
 def apply_layer3_volatility(client: WaltClient, pos: Position) -> Optional[dict]:
-    """deprecated: digantikan SL baseline 1%"""
+    """deprecated: digantikan SL baseline DEFAULT_SL_PCT"""
     return None
 
 

@@ -306,6 +306,37 @@ def test_p2_1_unified_trailing_sl_12_cases(side, profit_pct, expected_sl):
         assert "L4" in desc
 
 
+def test_p2_2_3_4_dynamic_sl_label_and_config_constants(monkeypatch):
+    import sheet_logger
+
+    logged_reasons = []
+    monkeypatch.setattr(sheet_logger, "log_close", lambda **kw: logged_reasons.append(kw.get("reason", "")))
+    monkeypatch.setattr(walt_bot, "_set_asset_cooldown", lambda *a, **kw: None)
+    monkeypatch.setattr(walt_bot, "_record_closed_id", lambda *a, **kw: None)
+    monkeypatch.setattr(walt_bot, "DEFAULT_SL_PCT", 0.020)
+    monkeypatch.setattr(walt_bot, "MIN_FUNDING_DAILY", 0.008)
+
+    # compute_baseline_tpsl harus mengikuti MIN_FUNDING_DAILY (0.008) dan DEFAULT_SL_PCT (0.020)
+    tp_no_wf, sl_20 = walt_bot.compute_baseline_tpsl("long", 100.0, asset="NVDA", funding_daily=0.007)
+    assert sl_20 == pytest.approx(98.0, abs=1e-4)
+    assert tp_no_wf == pytest.approx(102.5, abs=1e-4)  # 0.007 < MIN_FUNDING_DAILY (0.008) -> tidak windfall
+
+    tp_wf, _ = walt_bot.compute_baseline_tpsl("long", 100.0, asset="NVDA", funding_daily=0.009)
+    assert tp_wf == pytest.approx(102.25, abs=1e-4)  # 0.009 * 2.5 = 0.0225 >= DEFAULT_SL_PCT (0.020) & < 0.025
+
+    # SL breached label harus dinamis mengikuti DEFAULT_SL_PCT ("2.00%", BUKAN "1.5%")
+    client = MagicMock()
+    client.preview_close.return_value = {"ok": True, "confirmationToken": "tok_sl"}
+    client.execute.return_value = {"ok": True}
+    pos = _pos(side="long", entry=100.0, current=97.5, tp=102.5, sl=98.0)
+    res = walt_bot.evaluate_and_apply_position_risk(client, pos, current_funding_daily=-0.006)
+    assert res["action"] == "CLOSE"
+    assert "2.00%" in res["detail"] and "1.5%" not in res["detail"]
+    assert len(logged_reasons) == 1
+    assert "2.00%" in logged_reasons[0] and "1.5%" not in logged_reasons[0]
+
+
+
 
 
 
