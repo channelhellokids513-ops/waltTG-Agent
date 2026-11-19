@@ -1,0 +1,88 @@
+name: Walt Risk Monitor Watchdog
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: walt-watchdog
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Check latest Walt Risk Monitor success within 30 minutes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          import urllib.parse
+          import urllib.request
+          from datetime import datetime, timezone
+
+          raw = subprocess.check_output(
+              [
+                  "gh", "run", "list",
+                  "--workflow", "risk-monitor.yml",
+                  "--status", "success",
+                  "--limit", "5",
+                  "--json", "createdAt,updatedAt,databaseId",
+              ],
+              text=True,
+          )
+          runs = json.loads(raw or "[]")
+          now = datetime.now(timezone.utc)
+          recent_ok = False
+          latest_age_min = None
+
+          for r in runs:
+              ts_str = r.get("updatedAt") or r.get("createdAt")
+              if not ts_str:
+                  continue
+              dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+              age_min = (now - dt).total_seconds() / 60.0
+              if latest_age_min is None or age_min < latest_age_min:
+                  latest_age_min = age_min
+              if age_min <= 30.0:
+                  recent_ok = True
+                  break
+
+          if recent_ok:
+              print(f"OK: Walt Risk Monitor sukses {latest_age_min:.1f} menit lalu (<= 30 menit).")
+              raise SystemExit(0)
+
+          age_label = f"{latest_age_min:.1f} menit lalu" if latest_age_min is not None else "belum pernah sukses"
+          print(f"ALERT: Walt Risk Monitor terakhir sukses {age_label}. Mengirim alert Telegram dan memicu fallback run...")
+
+          bot_token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
+          chat_id = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+          if bot_token.startswith("bot"):
+              bot_token = bot_token[3:]
+          if bot_token and chat_id:
+              msg = "⚠️ Risk monitor tidak jalan >30 menit — cek Cloud Scheduler"
+              data = urllib.parse.urlencode({"chat_id": chat_id, "text": msg}).encode("utf-8")
+              req = urllib.request.Request(
+                  f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                  data=data,
+                  method="POST",
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=15) as resp:
+                      print(f"Telegram alert status: {resp.status}")
+              except Exception as exc:
+                  print(f"Gagal kirim alert Telegram: {exc}")
+
+          subprocess.check_call(["gh", "workflow", "run", "risk-monitor.yml"])
+          print("Fallback risk-monitor.yml workflow_dispatch dipicu.")
+          PY
