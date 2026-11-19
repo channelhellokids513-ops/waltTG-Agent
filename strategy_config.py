@@ -5,6 +5,7 @@ Digunakan oleh walt_bot.py dan dapat diatur oleh Administrator / Planner lewat B
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -106,6 +107,14 @@ def serialize_shared_strategy_config(cfg: dict[str, Any]) -> str:
     if "updated_at" in clean:
         payload["updated_at"] = clean["updated_at"]
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+
+def get_strategy_version_hash(cfg: dict[str, Any] | None = None) -> str:
+    """Hash pendek (8 char hex) dari konfigurasi strategi aktif untuk pelacakan versi."""
+    active = cfg if cfg is not None else load_strategy_config()
+    clean = validate_strategy_dict(active, strict=False)
+    canonical = json.dumps({k: clean[k] for k in STRATEGY_PARAM_SPECS}, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:8]
 
 
 def sync_strategy_config_to_github(

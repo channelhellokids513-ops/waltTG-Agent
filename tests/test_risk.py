@@ -373,11 +373,13 @@ def test_log_execution_writes_exact_12_columns(tmp_path, monkeypatch):
     assert len(rows) == 3  # 1 header + 2 data rows
     expected_headers = [
         "Timestamp (UTC)", "Asset", "Sisi", "Order Type", "Leverage", "Margin ($)",
-        "Entry Price ($)", "TP ($)", "SL ($)", "Order ID", "Status", "Keterangan"
+        "Entry Price ($)", "TP ($)", "SL ($)", "Order ID", "Status", "Keterangan",
+        "Strategy Version"
     ]
     assert rows[0] == expected_headers
     for row in rows[1:]:
-        assert len(row) == 12
+        assert len(row) == 13
+        assert len(row[12]) == 8
     assert rows[1][1:12] == [
         "NVDA", "SHORT", "MARKET", "2", "2.5", "140.25", "138.57", "141.65", "ord_abc", "EXECUTED", "Swarm Strong Consensus"
     ]

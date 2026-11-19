@@ -51,7 +51,8 @@ DAILY_SCANS_HEADERS = [
 
 EXECUTIONS_LOG_HEADERS = [
     "Timestamp (UTC)", "Asset", "Sisi", "Order Type", "Leverage", "Margin ($)",
-    "Entry Price ($)", "TP ($)", "SL ($)", "Order ID", "Status", "Keterangan"
+    "Entry Price ($)", "TP ($)", "SL ($)", "Order ID", "Status", "Keterangan",
+    "Strategy Version"
 ]
 
 
@@ -197,6 +198,9 @@ def log_execution(executions: list[dict], filepath: str = "logs/executions_histo
 
     headers = EXECUTIONS_LOG_HEADERS
 
+    from strategy_config import get_strategy_version_hash
+    strat_ver = get_strategy_version_hash()
+
     ts = datetime.now(timezone.utc).isoformat()
     rows = []
     for ex in executions:
@@ -214,6 +218,7 @@ def log_execution(executions: list[dict], filepath: str = "logs/executions_histo
             ex.get("order_id", ""),
             ex.get("verdict", ""),
             ex.get("reason", ""),
+            ex.get("strategy_version") or strat_ver,
         ])
 
     with open(filepath, "a", newline="", encoding="utf-8") as f:
@@ -245,7 +250,7 @@ def log_execution(executions: list[dict], filepath: str = "logs/executions_histo
 CLOSED_POSITIONS_HEADERS = [
     "Timestamp (UTC)", "Asset", "Sisi", "Contract ID", "Entry Price ($)",
     "Exit Price ($)", "Margin ($)", "PnL ($)", "Funding ($)", "Alasan Close",
-    "Position ID", "Closed At (exchange)"
+    "Position ID", "Closed At (exchange)", "Strategy Version"
 ]
 
 
@@ -308,6 +313,9 @@ def log_close(
     _ensure_dir(filepath)
     file_exists = os.path.exists(filepath) and os.path.getsize(filepath) > 0
 
+    from strategy_config import get_strategy_version_hash
+    strat_ver = get_strategy_version_hash()
+
     ts = datetime.now(timezone.utc).isoformat()
     exit_cell: Any = "" if exit_price is None else round(float(exit_price), 6)
     pnl_cell: Any = "" if pnl_quote is None else round(float(pnl_quote), 4)
@@ -324,6 +332,7 @@ def log_close(
         reason,
         str(position_id or ""),
         str(closed_at or ""),
+        strat_ver,
     ]
 
     with open(filepath, "a", newline="", encoding="utf-8") as f:

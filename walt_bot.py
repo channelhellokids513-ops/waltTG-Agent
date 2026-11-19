@@ -2827,14 +2827,15 @@ def crypto_execute(client: WaltClient, dry_run: bool = False) -> dict:
 
 def compute_closed_stats(
     csv_path: str = "logs/closed_history.csv",
+    pnl_tracker_path: str = "logs/pnl_tracker.csv",
     send_tg: bool = True,
 ) -> dict:
     """
     Baca logs/closed_history.csv (atau sheet Closed_Positions via fetch CSV) dan hitung:
-    - jumlah trade, win-rate, rata-rata win dan rata-rata loss (USD dan %);
-    - estimasi fee (0.09%/sisi × notional), total funding, net PnL;
-    - breakdown per alasan close (TP / SL / trailing / funding flip / migrasi).
-    Kirim ringkasannya ke Telegram.
+    - dedupe dengan kunci D2 (Position ID atau Asset+ContractID+EntryPrice);
+    - kecualikan baris UNKNOWN dari win-rate (tampilkan terpisah di unknown_count);
+    - pembanding perubahan ekuitas riil dari PnL_Tracker;
+    - estimasi fee (0.09%/sisi × notional), total funding, net PnL, breakdown alasan close.
     """
     from sheet_logger import fetch_sheet_csv_rows
 
@@ -2849,25 +2850,48 @@ def compute_closed_stats(
         data_rows = rows[1:] if ("timestamp" in first_cell or "asset" in str(rows[0]).lower()) else rows
 
     trades = []
+    unknown_count = 0
+    seen_keys: set[str] = set()
     reason_breakdown: dict[str, int] = {
         "TP": 0,
         "SL": 0,
         "trailing": 0,
         "funding flip": 0,
         "migrasi": 0,
+        "UNKNOWN": 0,
     }
 
     for r in data_rows:
         if len(r) < 10:
             continue
-        try:
-            margin = float(r[6] or 0.0)
-            pnl_usd = float(r[7] or 0.0)
-            funding_usd = float(r[8] or 0.0)
-        except Exception:
+        if str(r[0]).strip().lower() == "timestamp (utc)" or str(r[1]).strip().upper() == "ASSET":
             continue
+
+        pos_id = str(r[10]).strip() if len(r) > 10 else ""
+        dedupe_key = pos_id if pos_id else f"{str(r[1]).strip().upper()}|{str(r[3]).strip()}|{str(r[4]).strip()}"
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+
         reason_raw = str(r[9] or "").strip()
         reason_low = reason_raw.lower()
+        raw_exit = str(r[5]).strip()
+        raw_pnl = str(r[7]).strip()
+
+        is_unknown = ("unknown" in reason_low) or (raw_exit == "" and raw_pnl == "")
+        if is_unknown:
+            unknown_count += 1
+            reason_breakdown["UNKNOWN"] = reason_breakdown.get("UNKNOWN", 0) + 1
+            continue
+
+        try:
+            margin = float(r[6] or 0.0)
+            pnl_usd = float(raw_pnl or 0.0)
+            funding_usd = float(r[8] or 0.0)
+        except Exception:
+            unknown_count += 1
+            reason_breakdown["UNKNOWN"] = reason_breakdown.get("UNKNOWN", 0) + 1
+            continue
 
         if "migrasi" in reason_low:
             cat = "migrasi"
@@ -2898,7 +2922,30 @@ def compute_closed_stats(
             "fee_usd": fee_usd,
             "reason": reason_raw,
             "category": cat,
+            "position_id": pos_id,
+            "closed_at": str(r[11]).strip() if len(r) > 11 else "",
+            "timestamp_utc": str(r[0]).strip(),
         })
+
+    # Pembanding perubahan ekuitas dari PnL_Tracker
+    equity_start: Optional[float] = None
+    equity_latest: Optional[float] = None
+    equity_change: Optional[float] = None
+    pnl_rows = fetch_sheet_csv_rows("PnL_Tracker", local_csv_fallback=pnl_tracker_path)
+    eq_vals: list[float] = []
+    for pr in pnl_rows:
+        if len(pr) < 2:
+            continue
+        if str(pr[0]).strip().lower() in ("tanggal", "date"):
+            continue
+        try:
+            eq_vals.append(float(str(pr[1]).replace("$", "").strip()))
+        except Exception:
+            continue
+    if eq_vals:
+        equity_start = round(eq_vals[0], 4)
+        equity_latest = round(eq_vals[-1], 4)
+        equity_change = round(equity_latest - equity_start, 4)
 
     total_trades = len(trades)
     wins = [t for t in trades if t["pnl_usd"] > 0]
@@ -2915,8 +2962,10 @@ def compute_closed_stats(
     estimated_fee_usd = sum(t["fee_usd"] for t in trades)
     net_pnl_usd = gross_pnl_usd + total_funding_usd - estimated_fee_usd
 
+    from strategy_config import get_strategy_version_hash
     stats = {
         "total_trades": total_trades,
+        "unknown_count": unknown_count,
         "wins": len(wins),
         "losses": len(losses),
         "win_rate_pct": round(win_rate_pct, 2),
@@ -2928,13 +2977,23 @@ def compute_closed_stats(
         "total_funding_usd": round(total_funding_usd, 4),
         "estimated_fee_usd": round(estimated_fee_usd, 4),
         "net_pnl_usd": round(net_pnl_usd, 4),
+        "equity_start_usd": equity_start,
+        "equity_latest_usd": equity_latest,
+        "equity_change_usd": equity_change,
+        "strategy_version": get_strategy_version_hash(),
         "breakdown_by_reason": reason_breakdown,
     }
 
+    eq_line = (
+        f"Perubahan Ekuitas (PnL\\_Tracker): `${equity_change:+.4f}` (`${equity_start:.2f}` → `${equity_latest:.2f}`)"
+        if equity_change is not None
+        else "Perubahan Ekuitas (PnL\\_Tracker): `N/A`"
+    )
     msg_lines = [
-        "*📈 Walt Perps — Closed Positions Stats*",
-        f"Total Trade: *{total_trades}* (Win: {len(wins)} | Loss: {len(losses)})",
-        f"Win Rate: *{win_rate_pct:.1f}%*",
+        f"*📈 Walt Perps — Closed Positions Stats* (Ver: `{stats['strategy_version']}`)",
+        f"Total Trade Valid: *{total_trades}* (Win: {len(wins)} | Loss: {len(losses)}) | UNKNOWN: *{unknown_count}*",
+        f"Win Rate (tanpa UNKNOWN): *{win_rate_pct:.1f}%*",
+        eq_line,
         f"Avg Win: `${avg_win_usd:+.4f}` (`{avg_win_pct:+.2f}%`)",
         f"Avg Loss: `${avg_loss_usd:+.4f}` (`{avg_loss_pct:+.2f}%`)",
         f"Gross Price PnL: `${gross_pnl_usd:+.4f}`",
