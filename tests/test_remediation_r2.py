@@ -229,5 +229,52 @@ def test_p1_1_single_margin_resolution_per_order_and_over_buffer_flag(monkeypatc
     assert any("Buffer kas terlampaui" in m for m in tg_calls)
 
 
+def test_p1_2_sheet_webhook_retries_then_succeeds_and_fallback_csv(monkeypatch, tmp_path):
+    import sheet_logger
+
+    assert hasattr(sheet_logger, "_post_webhook"), "_post_webhook helper harus ada di sheet_logger"
+    monkeypatch.setattr(sheet_logger.time, "sleep", lambda s: None)
+    monkeypatch.setattr(sheet_logger, "FALLBACK_LOG_DIR", str(tmp_path))
+
+    class _Resp:
+        def __init__(self, code):
+            self.status_code = code
+
+    calls_ok = []
+    codes = iter([500, 500, 200])
+
+    def fake_post_retry(url, **kw):
+        calls_ok.append((url, kw))
+        return _Resp(next(codes))
+
+    monkeypatch.setattr(sheet_logger.httpx, "post", fake_post_retry)
+    payload = {
+        "action": "log_close",
+        "sheet": "Closed_Positions",
+        "header": sheet_logger.CLOSED_POSITIONS_HEADERS,
+        "rows": [["2026-11-19T00:00:00+00:00", "NVDA", "LONG", 1, 100.0, 102.0, 2.5, 0.1, 0.01, "TP", "p1", "", "v1", ""]],
+    }
+    ok = sheet_logger._post_webhook(payload, "https://script.google.com/macros/s/test/exec")
+    assert ok is True
+    assert len(calls_ok) == 3
+
+    # Gagal total 3x -> False & tulis file CSV fallback di FALLBACK_LOG_DIR
+    calls_fail = []
+
+    def fake_post_fail(url, **kw):
+        calls_fail.append(url)
+        return _Resp(500)
+
+    monkeypatch.setattr(sheet_logger.httpx, "post", fake_post_fail)
+    ok_fail = sheet_logger._post_webhook(payload, "https://script.google.com/macros/s/test/exec")
+    assert ok_fail is False
+    assert len(calls_fail) == 3
+    fallback_files = list(tmp_path.glob("*closed_positions*fallback*.csv"))
+    assert len(fallback_files) == 1
+    content = fallback_files[0].read_text(encoding="utf-8")
+    assert "Asset" in content and "NVDA" in content
+
+
+
 
 

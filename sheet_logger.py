@@ -10,6 +10,7 @@ import os
 import io
 import csv
 import json
+import time
 import logging
 import subprocess
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ log = logging.getLogger("sheet_logger")
 
 DEFAULT_SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID", "1ag6MqYnOLdZgkFwk_cs3W-22EOX5e5DGQTVvPWENHTg")
 DEFAULT_WEBHOOK_URL = os.getenv("GOOGLE_SHEET_WEBHOOK_URL", "")
+FALLBACK_LOG_DIR = "logs"
 
 
 def _ensure_dir(path: str):
@@ -111,24 +113,85 @@ def log_scan_to_csv(summary: dict, researches: dict[str, Any], filepath: str = "
     return rows
 
 
+def _write_webhook_fallback_csv(payload: dict) -> Optional[str]:
+    """Tulis baris gagal kirim webhook ke CSV lokal fallback agar jejak audit tidak hilang."""
+    rows = payload.get("rows") or []
+    if not rows:
+        return None
+    sheet_name = str(payload.get("sheet") or payload.get("action") or "webhook").strip()
+    sheet_slug = "".join(c.lower() if c.isalnum() or c == "_" else "_" for c in sheet_name).strip("_") or "webhook"
+    fallback_path = os.path.join(FALLBACK_LOG_DIR, f"{sheet_slug}_fallback.csv")
+    try:
+        _ensure_dir(fallback_path)
+        file_exists = os.path.exists(fallback_path) and os.path.getsize(fallback_path) > 0
+        header = payload.get("header")
+        with open(fallback_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if not file_exists and header:
+                writer.writerow(header)
+            writer.writerows(rows)
+        log.warning(
+            f"_write_webhook_fallback_csv: {len(rows)} baris sheet '{sheet_name}' "
+            f"disimpan ke fallback lokal {fallback_path}"
+        )
+        return fallback_path
+    except Exception as e:
+        log.warning(
+            f"_write_webhook_fallback_csv gagal menulis {fallback_path} ({type(e).__name__}): {e}"
+        )
+        return None
+
+
+def _post_webhook(payload: dict, url: str) -> bool:
+    """
+    Kirim payload ke Google Sheets Webhook dengan maks 3 percobaan (jeda 1s lalu 2s).
+    Bila semua percobaan gagal, tulis baris ke CSV lokal fallback di FALLBACK_LOG_DIR dan kembalikan False.
+    """
+    norm_url = _normalize_webhook_url(url)
+    if not norm_url:
+        return False
+
+    backoff_delays = (1, 2)
+    sheet_label = str(payload.get("sheet") or payload.get("action") or "unknown")
+    last_err = "unknown"
+
+    for attempt in range(1, 4):
+        try:
+            r = httpx.post(norm_url, json=payload, follow_redirects=True, timeout=20.0)
+            if r.status_code in (200, 302):
+                log.info(f"Google Sheet Webhook ({sheet_label}) status: {r.status_code}")
+                return True
+            last_err = f"HTTP {r.status_code}"
+            log.warning(
+                f"_post_webhook({sheet_label}) attempt {attempt}/3 gagal ({last_err})"
+            )
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            log.warning(
+                f"_post_webhook({sheet_label}) attempt {attempt}/3 error ({type(e).__name__}): {e}"
+            )
+        if attempt < 3:
+            time.sleep(backoff_delays[attempt - 1])
+
+    log.warning(
+        f"_post_webhook({sheet_label}) gagal setelah 3 percobaan ({last_err}); menulis fallback CSV lokal"
+    )
+    _write_webhook_fallback_csv(payload)
+    return False
+
+
 def log_scan_via_webhook(rows: list[list[Any]], webhook_url: str) -> bool:
     """Kirim data scan ke Google Sheets melalui Google Apps Script Web App."""
     url = _normalize_webhook_url(webhook_url)
     if not url:
         return False
-    try:
-        payload = {
-            "action": "log_scan",
-            "sheet": "Daily_Scans",
-            "header": DAILY_SCANS_HEADERS,
-            "rows": rows,
-        }
-        r = httpx.post(url, json=payload, follow_redirects=True, timeout=20.0)
-        log.info(f"Google Sheet Webhook response status: {r.status_code}")
-        return r.status_code in (200, 302)
-    except Exception as e:
-        log.warning(f"Gagal kirim ke Google Sheets Webhook ({url[:35]}...): {e}")
-        return False
+    payload = {
+        "action": "log_scan",
+        "sheet": "Daily_Scans",
+        "header": DAILY_SCANS_HEADERS,
+        "rows": rows,
+    }
+    return _post_webhook(payload, url)
 
 
 def log_scan_via_gsheets_cli(rows: list[list[Any]], spreadsheet_id: str) -> bool:
@@ -156,8 +219,8 @@ def log_scan_via_gsheets_cli(rows: list[list[Any]], spreadsheet_id: str) -> bool
         if os.path.exists(tmp_json):
             try:
                 os.remove(tmp_json)
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning(f"log_scan_via_gsheets_cli gagal hapus tmp file ({type(e).__name__}): {e}")
 
 
 def log_scan(summary: dict, researches: dict[str, Any]) -> dict:
@@ -227,24 +290,20 @@ def log_execution(executions: list[dict], filepath: str = "logs/executions_histo
             writer.writerow(headers)
         writer.writerows(rows)
 
+    webhook_ok = False
     webhook_url = _normalize_webhook_url(os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", DEFAULT_WEBHOOK_URL))
     if webhook_url and rows:
-        try:
-            httpx.post(
-                webhook_url,
-                json={
-                    "action": "log_execution",
-                    "sheet": "Executions_Log",
-                    "header": EXECUTIONS_LOG_HEADERS,
-                    "rows": rows,
-                },
-                follow_redirects=True,
-                timeout=20.0,
-            )
-        except Exception as e:
-            log.warning(f"Gagal kirim eksekusi ke Google Sheets Webhook: {e}")
+        webhook_ok = _post_webhook(
+            {
+                "action": "log_execution",
+                "sheet": "Executions_Log",
+                "header": EXECUTIONS_LOG_HEADERS,
+                "rows": rows,
+            },
+            webhook_url,
+        )
 
-    return {"executions_count": len(rows), "csv_logged": True}
+    return {"executions_count": len(rows), "csv_logged": True, "webhook_logged": webhook_ok}
 
 
 CLOSED_POSITIONS_HEADERS = [
@@ -346,21 +405,15 @@ def log_close(
     webhook_ok = False
     webhook_url = _normalize_webhook_url(os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", DEFAULT_WEBHOOK_URL))
     if webhook_url:
-        try:
-            r = httpx.post(
-                webhook_url,
-                json={
-                    "action": "log_close",
-                    "sheet": "Closed_Positions",
-                    "header": CLOSED_POSITIONS_HEADERS,
-                    "rows": [row],
-                },
-                follow_redirects=True,
-                timeout=20.0,
-            )
-            webhook_ok = r.status_code in (200, 302)
-        except Exception as e:
-            log.warning(f"Gagal kirim log_close ke Google Sheets Webhook: {e}")
+        webhook_ok = _post_webhook(
+            {
+                "action": "log_close",
+                "sheet": "Closed_Positions",
+                "header": CLOSED_POSITIONS_HEADERS,
+                "rows": [row],
+            },
+            webhook_url,
+        )
 
     return {"csv_logged": True, "webhook_logged": webhook_ok, "row": row}
 
@@ -410,8 +463,8 @@ def get_closed_funding_current_month(
             try:
                 raw_f = str(r[funding_idx]).replace("$", "").replace("+", "").strip()
                 total += float(raw_f) if raw_f else 0.0
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning(f"get_closed_funding_current_month gagal parse funding ({type(e).__name__}): {e}")
     return round(total, 6)
 
 
@@ -464,21 +517,15 @@ def log_pnl_tracker(summary: dict, filepath: str = "logs/pnl_tracker.csv") -> di
     webhook_ok = False
     webhook_url = _normalize_webhook_url(os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", DEFAULT_WEBHOOK_URL))
     if webhook_url:
-        try:
-            r = httpx.post(
-                webhook_url,
-                json={
-                    "action": "log_pnl",
-                    "sheet": "PnL_Tracker",
-                    "header": PNL_TRACKER_HEADERS,
-                    "rows": [row],
-                },
-                follow_redirects=True,
-                timeout=20.0,
-            )
-            webhook_ok = r.status_code in (200, 302)
-        except Exception as e:
-            log.warning(f"Gagal kirim PnL_Tracker ke Google Sheets Webhook: {e}")
+        webhook_ok = _post_webhook(
+            {
+                "action": "log_pnl",
+                "sheet": "PnL_Tracker",
+                "header": PNL_TRACKER_HEADERS,
+                "rows": [row],
+            },
+            webhook_url,
+        )
 
     return {"logged": True, "webhook_logged": webhook_ok, "date": date_utc, "row": row}
 
@@ -499,7 +546,8 @@ def _is_research_fresh(
         now = now_utc or datetime.now(timezone.utc)
         age_hours = (now - dt).total_seconds() / 3600.0
         return 0.0 <= age_hours <= max_age_hours or age_hours < 0.0
-    except Exception:
+    except Exception as e:
+        log.warning(f"_is_research_fresh gagal parse timestamp '{raw}' ({type(e).__name__}): {e}")
         return False
 
 
@@ -520,7 +568,8 @@ def fetch_latest_research_from_sheet(
         try:
             from strategy_config import load_strategy_config
             max_age_hours = float(load_strategy_config().get("max_research_age_hours", 6.0))
-        except Exception:
+        except Exception as e:
+            log.warning(f"fetch_latest_research_from_sheet gagal baca max_research_age_hours ({type(e).__name__}): {e}")
             max_age_hours = 6.0
 
     url = _normalize_webhook_url(webhook_url or os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", DEFAULT_WEBHOOK_URL))
@@ -541,7 +590,8 @@ def fetch_latest_research_from_sheet(
                         try:
                             raw_score = str(item.get("swarm_score", "0")).replace("+", "")
                             score = float(raw_score) if raw_score and raw_score != "—" else 0.0
-                        except Exception:
+                        except Exception as e:
+                            log.warning(f"fetch_latest_research_from_sheet gagal parse swarm_score {asset} ({type(e).__name__}): {e}")
                             score = 0.0
                         
                         sent = str(item.get("sentiment") or "unknown").lower()
@@ -559,8 +609,8 @@ def fetch_latest_research_from_sheet(
                                         )
                                     )
                                     p1_to_p7[clean_k] = float(str(val).replace("+", ""))
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    log.warning(f"fetch_latest_research_from_sheet gagal parse {p_key} {asset} ({type(e).__name__}): {e}")
 
                         researches[asset] = Research(
                             ticker=asset,
@@ -601,7 +651,8 @@ def fetch_latest_research_from_sheet(
                     try:
                         raw = row.get("swarm_score", "0").replace("+", "")
                         score = float(raw) if raw and raw != "—" else 0.0
-                    except Exception:
+                    except Exception as e:
+                        log.warning(f"fetch_latest_research_from_sheet(csv) gagal parse swarm_score {asset} ({type(e).__name__}): {e}")
                         score = 0.0
                     
                     sent = (row.get("sentiment") or "unknown").lower()
@@ -619,8 +670,8 @@ def fetch_latest_research_from_sheet(
                         if raw_v and raw_v != "—":
                             try:
                                 p1_to_p7[norm_k] = float(str(raw_v).replace("+", ""))
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                log.warning(f"fetch_latest_research_from_sheet(csv) gagal parse {col_k} {asset} ({type(e).__name__}): {e}")
 
                     researches[asset] = Research(
                         ticker=asset,
