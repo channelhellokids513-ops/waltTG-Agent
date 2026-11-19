@@ -330,6 +330,22 @@ class WaltClient:
         return data.get("result")
 
     # --- READ-only ---
+    def list_tools(self) -> list[dict]:
+        """Panggil MCP tools/list untuk inspeksi tool yang tersedia di relay Walt."""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": int(time.time() * 1000),
+            "method": "tools/list",
+            "params": {},
+        }
+        r = self.client.post(self.base_url, json=payload, headers=self._headers())
+        if r.status_code == 401:
+            self.tokens.get_access_token(force_refresh=True)
+            r = self.client.post(self.base_url, json=payload, headers=self._headers())
+        r.raise_for_status()
+        data = r.json()
+        return (data.get("result") or {}).get("tools", [])
+
     def list_contracts(self):
         return self._call("perps_list_contracts")
 
@@ -2811,6 +2827,41 @@ def _emit_cli_result(command: str, result: Any) -> None:
         print(json.dumps(result, indent=2, default=str))
 
 
+def dump_closed_schema(client: WaltClient, limit: int = 3) -> dict[str, Any]:
+    """
+    Inspeksi struktur field posisi closed dari Walt tanpa mencetak nilai sensitif.
+    Mencetak nama KEY dan tipe data dari <= 3 posisi pertama; jika kosong, inspeksi MCP tools/list.
+    """
+    resp = client.list_positions(statuses=["closed"])
+    positions = resp.get("positions", resp) if isinstance(resp, dict) else (resp or [])
+    if not isinstance(positions, list):
+        positions = []
+
+    sample_schemas = []
+    for idx, p in enumerate(positions[:limit]):
+        if isinstance(p, dict):
+            sample_schemas.append({
+                "index": idx,
+                "keys": {k: type(v).__name__ for k, v in sorted(p.items())},
+            })
+
+    out: dict[str, Any] = {
+        "closed_positions_count": len(positions),
+        "sample_schemas": sample_schemas,
+    }
+    if not positions:
+        try:
+            tools = client.list_tools()
+            out["mcp_tools"] = [
+                {"name": t.get("name"), "description": str(t.get("description", ""))[:120]}
+                for t in tools
+                if isinstance(t, dict)
+            ]
+        except Exception as e:
+            out["mcp_tools_error"] = str(e)
+    return out
+
+
 def main(command: str = "scan"):
     """
     CLI entry point.
@@ -2833,6 +2884,11 @@ def main(command: str = "scan"):
         return
 
     client = WaltClient()
+
+    if command == "dump_closed":
+        schema = dump_closed_schema(client)
+        print(json.dumps(schema, indent=2, default=str))
+        return
 
     if command == "scan":
         result = daily_scan(client)
