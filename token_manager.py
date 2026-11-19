@@ -7,21 +7,46 @@ Dipakai oleh walt_bot.py di GitHub Actions. Butuh env:
 """
 
 import os
+import re
 import time
 import base64
+import logging
 import threading
+from pathlib import Path
 import httpx
+
+log = logging.getLogger("token_manager")
 
 AUTH_SERVER = "https://walletbot.me/bot-relay/public-api"
 TOKEN_URL = f"{AUTH_SERVER}/oauth/v1/token"
+
+
+def _redact_oauth_snippet(text: str, limit: int = 200) -> str:
+    """Redaksi nilai token pada potongan respons OAuth dan potong maks `limit` karakter."""
+    cleaned = re.sub(
+        r'(?i)("(?:access_token|refresh_token|id_token|token|secret)"\s*:\s*")([^"]+)(")',
+        r"\1***\3",
+        str(text or ""),
+    )
+    cleaned = re.sub(r"(?i)(\bBearer\s+)([A-Za-z0-9._~+/=-]{8,})", r"\1***", cleaned)
+    return cleaned[:limit]
+
+
+def _notify_telegram_safe(msg: str) -> None:
+    try:
+        import notifier
+        notifier.send_telegram(msg)
+    except Exception as err:
+        log.warning(f"token_manager._notify_telegram_safe gagal ({type(err).__name__}): {err}")
 
 
 def update_github_secret(repo: str, secret_name: str, secret_value: str, pat: str) -> bool:
     """Auto-update repository secret di GitHub menggunakan PyNaCl (libsodium)."""
     try:
         from nacl import encoding, public
-    except ImportError:
-        print("[WARN] pynacl belum terinstall, skip auto-update GitHub Secret.")
+    except ImportError as e:
+        log.warning(f"update_github_secret: pynacl tidak terpasang ({type(e).__name__}): {e}")
+        _notify_telegram_safe("⚠️ pynacl tidak terpasang — auto-sync GitHub Secret mati")
         return False
 
     headers = {
@@ -94,15 +119,28 @@ class TokenManager:
             r = httpx.post(TOKEN_URL, data=body, timeout=30.0)
             r.raise_for_status()
         except httpx.HTTPStatusError as e:
-            print(f"❌ Gagal refresh token Walt (HTTP {e.response.status_code}): {e.response.text}")
+            snippet = _redact_oauth_snippet(e.response.text, limit=200)
+            log.error(f"TokenManager._refresh HTTP {e.response.status_code}: {snippet}")
             raise
-        data = r.json()
-        self._access_token = data["access_token"]
+        try:
+            data = r.json()
+        except Exception as e:
+            snippet = _redact_oauth_snippet(getattr(r, "text", ""), limit=200)
+            raise RuntimeError(
+                f"Respons OAuth bukan JSON valid ({type(e).__name__}): {snippet}"
+            ) from e
+        if not isinstance(data, dict):
+            snippet = _redact_oauth_snippet(getattr(r, "text", ""), limit=200)
+            raise RuntimeError(f"Respons OAuth bukan objek JSON: {snippet}")
+        access = data.get("access_token")
+        if not access:
+            raise RuntimeError(f"Respons OAuth tanpa access_token: keys={list(data)}")
+        self._access_token = access
         self._expires_at = time.time() + int(data.get("expires_in", 3600))
         # Rotate refresh_token kalau ada (RFC 6749 §6)
         if "refresh_token" in data and data["refresh_token"] != self.refresh_token:
             self.refresh_token = data["refresh_token"]
-            print("[WARN] Refresh token di-rotate oleh Walt.")
+            log.warning("TokenManager._refresh: refresh_token di-rotate oleh Walt.")
 
             # 1. Update file .env lokal jika ada
             self._update_local_env(self.refresh_token)
@@ -115,35 +153,54 @@ class TokenManager:
                 synced = update_github_secret(repo, "WALT_REFRESH_TOKEN", self.refresh_token, pat)
             else:
                 if not pat:
-                    print("⚠️  [AUTO-SYNC GAGAL] Secret 'GH_PAT' belum ada di GitHub Secrets!")
-                    print("   Silakan buat secret baru bernama 'GH_PAT' di GitHub Settings -> Secrets.")
+                    log.warning("[AUTO-SYNC GAGAL] Secret 'GH_PAT' belum ada di GitHub Secrets.")
                 if not repo:
-                    print("⚠️  [AUTO-SYNC GAGAL] GITHUB_REPOSITORY tidak terdeteksi.")
+                    log.warning("[AUTO-SYNC GAGAL] GITHUB_REPOSITORY tidak terdeteksi.")
 
             if not synced:
-                try:
-                    from notifier import send_telegram
-                    send_telegram(
-                        "⚠️ *ALERT TOKEN ROTATION*: `WALT_REFRESH_TOKEN` telah di-rotate oleh Walt, "
-                        "tetapi auto-update GitHub Secret gagal atau `GH_PAT` tidak tersedia. "
-                        "Harap perbarui secret `WALT_REFRESH_TOKEN` secara manual!"
-                    )
-                except Exception as err:
-                    print(f"⚠️  Gagal mengirim alert rotasi token ke Telegram: {err}")
+                _notify_telegram_safe(
+                    "⚠️ *ALERT TOKEN ROTATION*: `WALT_REFRESH_TOKEN` telah di-rotate oleh Walt, "
+                    "tetapi auto-update GitHub Secret gagal atau `GH_PAT` tidak tersedia. "
+                    "Harap perbarui secret `WALT_REFRESH_TOKEN` secara manual!"
+                )
 
     def _update_local_env(self, new_token: str):
+        env_path = Path(__file__).resolve().parent / ".env"
         try:
-            env_path = ".env"
-            if os.path.exists(env_path):
-                with open(env_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                import re
-                content = re.sub(r"^WALT_REFRESH_TOKEN=.*", f"WALT_REFRESH_TOKEN={new_token}", content, flags=re.M)
-                with open(env_path, "w", encoding="utf-8") as f:
-                    f.write(content)
-                print("💾 File .env lokal telah disinkronkan.")
-        except Exception:
-            pass
+            if not env_path.exists():
+                log.warning(
+                    f"TokenManager._update_local_env: file .env tidak ditemukan di {env_path}"
+                )
+                _notify_telegram_safe(
+                    "⚠️ *TOKEN ROTATION*: file `.env` lokal tidak ditemukan sehingga "
+                    "`WALT_REFRESH_TOKEN` lokal tidak tersinkron."
+                )
+                return
+            content = env_path.read_text(encoding="utf-8")
+            new_content, count = re.subn(
+                r"^WALT_REFRESH_TOKEN=.*",
+                lambda _m: f"WALT_REFRESH_TOKEN={new_token}",
+                content,
+                flags=re.M,
+            )
+            if count == 0:
+                log.warning(
+                    f"TokenManager._update_local_env: kunci WALT_REFRESH_TOKEN tidak ditemukan di {env_path}"
+                )
+                _notify_telegram_safe(
+                    "⚠️ *TOKEN ROTATION*: kunci `WALT_REFRESH_TOKEN` tidak ditemukan di `.env` lokal "
+                    "sehingga file lokal tidak tersinkron."
+                )
+                return
+            env_path.write_text(new_content, encoding="utf-8")
+            log.info("TokenManager._update_local_env: file .env lokal telah disinkronkan.")
+        except OSError as e:
+            log.warning(
+                f"TokenManager._update_local_env gagal I/O ({type(e).__name__}): {e}"
+            )
+            _notify_telegram_safe(
+                "⚠️ *TOKEN ROTATION*: gagal menulis `.env` lokal sehingga `WALT_REFRESH_TOKEN` lokal tidak tersinkron."
+            )
 
 
 if __name__ == "__main__":
