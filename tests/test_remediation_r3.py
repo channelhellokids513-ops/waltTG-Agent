@@ -203,3 +203,17 @@ def test_r3_3_all_env_keys_read_by_code_are_documented(tmp_path):
     assert any("FOO_TEST_KEY" in item and "dummy_mod.py:2" in item for item in dummy_missing)
 
 
+def test_r4_no_bare_except_exception_in_walt_bot():
+    import re
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent / "walt_bot.py").read_text(encoding="utf-8")
+    bare_lines = [
+        f"walt_bot.py:{lineno}: {line.strip()}"
+        for lineno, line in enumerate(src.splitlines(), start=1)
+        if re.search(r"\bexcept\s+Exception\s*:", line)
+    ]
+    assert bare_lines == [], f"Ditemukan except Exception: tanpa variabel di walt_bot.py: {bare_lines}"
+
+
+

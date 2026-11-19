@@ -1448,8 +1448,10 @@ def _infer_position_verdict(base_asset: str, exec_csv_path: str = "logs/executio
                 if any(k in reason_low for k in ("half", "high risk catalyst", "split", "mixed", "neutral", "no research", "tidak ada berita")):
                     return "HALF"
                 return "GO"
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning(
+            f"Gagal baca verdict historis {base_asset} dari {exec_csv_path} ({type(exc).__name__}): {exc}"
+        )
     return "GO"
 
 
@@ -1827,8 +1829,8 @@ def _load_closed_ids(path: str = CLOSED_IDS_PATH) -> list[str]:
             data = json.load(f)
             if isinstance(data, list):
                 return [str(x) for x in data if x]
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning(f"Gagal memuat daftar closed_ids dari {path} ({type(exc).__name__}): {exc}")
     return []
 
 
@@ -2500,7 +2502,8 @@ def daily_scan(client: WaltClient) -> dict:
         try:
             r = client.latest_rate(f"{opp.base_asset}-USD-PERP")
             opp_price = float(r["rate"])
-        except Exception:
+        except Exception as exc:
+            log.warning(f"Gagal fetch latest_rate untuk {opp.base_asset} ({type(exc).__name__}): {exc}")
             opp_price = 0.0
         setattr(opp, "live_price", opp_price)
         if opp_price > 0 and opp.min_size_base > 0:
@@ -3377,7 +3380,11 @@ def compute_closed_stats(
             margin = float(r[6] or 0.0)
             pnl_usd = float(raw_pnl or 0.0)
             funding_usd = float(r[8] or 0.0)
-        except Exception:
+        except Exception as exc:
+            asset_lbl = r[1] if len(r) > 1 else "?"
+            log.debug(
+                f"Gagal parse angka trade {asset_lbl} pada Closed_Positions ({type(exc).__name__}): {exc}"
+            )
             unknown_count += 1
             reason_breakdown["UNKNOWN"] = reason_breakdown.get("UNKNOWN", 0) + 1
             continue
@@ -3435,7 +3442,8 @@ def compute_closed_stats(
             diff_h = (c_dt - o_dt).total_seconds() / 3600.0
             if diff_h >= 0:
                 hold_hours_samples.append(diff_h)
-        except Exception:
+        except Exception as exc:
+            log.debug(f"Gagal parse durasi hold Closed_Positions ({type(exc).__name__}): {exc}")
             continue
     median_hold_hours: Optional[float] = (
         round(float(_statistics.median(hold_hours_samples)), 2) if hold_hours_samples else None
@@ -3461,7 +3469,8 @@ def compute_closed_stats(
             continue
         try:
             eq_vals.append(float(str(pr[1]).replace("$", "").strip()))
-        except Exception:
+        except Exception as exc:
+            log.debug(f"Gagal parse ekuitas PnL_Tracker tanggal {pr[0]} ({type(exc).__name__}): {exc}")
             continue
     if eq_vals:
         equity_start = round(eq_vals[0], 4)
@@ -3577,8 +3586,10 @@ def _emit_cli_result(command: str, result: Any) -> None:
         os.makedirs("logs", exist_ok=True)
         with open("logs/last_safe_summary.json", "w", encoding="utf-8") as f:
             json.dump(safe_summary, f, indent=2, ensure_ascii=False)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.warning(
+            f"Gagal menulis logs/last_safe_summary.json untuk command={command} ({type(exc).__name__}): {exc}"
+        )
     if is_log_redact_enabled():
         print(json.dumps(safe_summary, indent=2, default=str))
     else:
