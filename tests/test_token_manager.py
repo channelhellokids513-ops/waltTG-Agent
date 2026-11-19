@@ -34,10 +34,17 @@ def test_p1_4_update_local_env_lambda_and_missing_file_or_key_alerts(monkeypatch
     monkeypatch.setattr(notifier, "send_telegram", lambda msg, **kw: tg_calls.append(msg))
 
     # Simulasi lokasi modul di tmp_path agar tidak menyentuh .env asli repo
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     fake_mod_file = tmp_path / "token_manager.py"
     monkeypatch.setattr(token_manager, "__file__", str(fake_mod_file))
 
     tm = token_manager.TokenManager(client_id="cid", refresh_token="old_tok")
+
+    # 0. Di GitHub Actions tanpa .env lokal -> normal, TIDAK boleh kirim alert Telegram
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    tm._update_local_env("rt_ci_secret")
+    assert tg_calls == []
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
 
     # 1. File .env tidak ada -> alert Telegram tanpa membocorkan token
     secret_tok = r"rt_special_\1\g<0>/abc"

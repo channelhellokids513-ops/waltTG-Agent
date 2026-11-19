@@ -166,6 +166,11 @@ class TokenManager:
 
     def _update_local_env(self, new_token: str):
         env_path = Path(__file__).resolve().parent / ".env"
+        if os.environ.get("GITHUB_ACTIONS", "").strip().lower() == "true" and not env_path.exists():
+            log.info(
+                "TokenManager._update_local_env: berjalan di GitHub Actions tanpa .env lokal (normal — sinkronisasi via GitHub Secret)."
+            )
+            return
         try:
             if not env_path.exists():
                 log.warning(
