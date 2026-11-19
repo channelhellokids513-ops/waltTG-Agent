@@ -224,7 +224,8 @@ def log_execution(executions: list[dict], filepath: str = "logs/executions_histo
 
 CLOSED_POSITIONS_HEADERS = [
     "Timestamp (UTC)", "Asset", "Sisi", "Contract ID", "Entry Price ($)",
-    "Exit Price ($)", "Margin ($)", "PnL ($)", "Funding ($)", "Alasan Close"
+    "Exit Price ($)", "Margin ($)", "PnL ($)", "Funding ($)", "Alasan Close",
+    "Position ID", "Closed At (exchange)"
 ]
 
 
@@ -271,32 +272,38 @@ def log_close(
     side: str,
     contract_id: int,
     entry_price: float,
-    exit_price: float,
+    exit_price: Optional[float],
     margin: float,
-    pnl_quote: float,
+    pnl_quote: Optional[float],
     funding_quote: float,
     reason: str,
+    position_id: str = "",
+    closed_at: str = "",
     filepath: str = "logs/closed_history.csv",
 ) -> dict:
     """
     Catat penutupan posisi ke sheet 'Closed_Positions' via webhook dan ke logs/closed_history.csv.
-    Mengecek keberadaan header di sheet Closed_Positions melalui CSV export terlebih dahulu.
+    Jika exit_price / pnl_quote None (data close tidak tersedia), kolom ditulis kosong ("").
     """
     _ensure_dir(filepath)
     file_exists = os.path.exists(filepath) and os.path.getsize(filepath) > 0
 
     ts = datetime.now(timezone.utc).isoformat()
+    exit_cell: Any = "" if exit_price is None else round(float(exit_price), 6)
+    pnl_cell: Any = "" if pnl_quote is None else round(float(pnl_quote), 4)
     row = [
         ts,
         asset,
         str(side or "").upper(),
         contract_id,
         round(float(entry_price or 0.0), 6),
-        round(float(exit_price or 0.0), 6),
+        exit_cell,
         round(float(margin or 0.0), 4),
-        round(float(pnl_quote or 0.0), 4),
+        pnl_cell,
         round(float(funding_quote or 0.0), 4),
         reason,
+        str(position_id or ""),
+        str(closed_at or ""),
     ]
 
     with open(filepath, "a", newline="", encoding="utf-8") as f:

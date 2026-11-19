@@ -450,6 +450,8 @@ class Position:
     sl: Optional[float]
     funding_paid: float
     liquidation_price: float
+    position_id: str = ""
+    opened_at: str = ""
 
     @property
     def pnl_pct_margin(self) -> float:
@@ -894,7 +896,13 @@ def _sl_is_improvement(pos: Position, new_sl: float, buffer: float = 0.0005) -> 
 
 
 def _record_position_close(pos: Position, reason: str):
-    """Catat penutupan posisi ke Closed_Positions (Google Sheet), logs/closed_history.csv, dan set cooldown."""
+    """Catat penutupan posisi ke Closed_Positions (Google Sheet), logs/closed_history.csv, closed_ids, dan set cooldown."""
+    pos_key = make_position_dedupe_key({
+        "position_id": pos.position_id,
+        "contract_id": pos.contract_id,
+        "entry_price": pos.entry_price,
+        "opened_at": pos.opened_at,
+    })
     try:
         from sheet_logger import log_close
         pnl_quote = pos.pnl_pct_margin * pos.margin
@@ -908,7 +916,10 @@ def _record_position_close(pos: Position, reason: str):
             pnl_quote=pnl_quote,
             funding_quote=pos.funding_paid,
             reason=reason,
+            position_id=pos_key,
+            closed_at=datetime.now(timezone.utc).isoformat(),
         )
+        _record_closed_id(pos_key)
     except Exception as e:
         log.warning(f"Gagal mencatat log_close untuk {pos.base_asset}: {e}")
     _set_asset_cooldown(pos.base_asset)
@@ -1441,18 +1452,125 @@ def _update_regime_state(
     return gear, interval_min, reason
 
 
+CLOSED_IDS_PATH = "logs/closed_ids.json"
+MAX_CLOSED_IDS = 500
+
+
+def make_position_dedupe_key(pos_dict: dict) -> str:
+    """
+    Kunci dedupe unik posisi: prioritaskan ID posisi dari exchange (position_id/id/uuid).
+    Jika tidak ada, fallback ke (contract_id, entry_price, opened_at).
+    """
+    for field in ("position_id", "id", "uuid", "pos_id"):
+        val = pos_dict.get(field)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    cid = str(pos_dict.get("contract_id", "0"))
+    entry = round(float(pos_dict.get("avg_entry_price") or pos_dict.get("entry_price") or 0.0), 6)
+    opened = str(
+        pos_dict.get("opened_at")
+        or pos_dict.get("created_at")
+        or pos_dict.get("open_timestamp")
+        or ""
+    ).strip()
+    return f"{cid}:{entry}:{opened}"
+
+
+def _load_closed_ids(path: str = CLOSED_IDS_PATH) -> list[str]:
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return [str(x) for x in data if x]
+    except Exception:
+        pass
+    return []
+
+
+def _record_closed_id(pos_key: str, path: str = CLOSED_IDS_PATH) -> None:
+    if not pos_key:
+        return
+    ids = _load_closed_ids(path)
+    if pos_key in ids:
+        return
+    ids.append(pos_key)
+    ids = ids[-MAX_CLOSED_IDS:]
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(ids, f, indent=2)
+    except Exception as e:
+        log.warning(f"Gagal menyimpan {path}: {e}")
+
+
+def _fetch_recorded_closed_ids(csv_path: str = "logs/closed_history.csv") -> set[str]:
+    """Ambil set Position ID (dan kunci fallback) yang sudah tercatat di Closed_Positions."""
+    recorded: set[str] = set()
+    try:
+        from sheet_logger import fetch_sheet_csv_rows
+        rows = fetch_sheet_csv_rows(
+            "Closed_Positions",
+            expected_col_name="Exit Price ($)",
+            local_csv_fallback=csv_path,
+        )
+        if not rows:
+            return recorded
+        header = [str(c).strip().lower() for c in rows[0]]
+        pid_idx = header.index("position id") if "position id" in header else (10 if len(header) > 10 else -1)
+        data_rows = rows[1:] if ("timestamp" in header[0] or "asset" in str(header)) else rows
+        for r in data_rows:
+            if pid_idx >= 0 and len(r) > pid_idx and str(r[pid_idx]).strip():
+                recorded.add(str(r[pid_idx]).strip())
+    except Exception as e:
+        log.debug(f"Gagal membaca Position ID dari Closed_Positions: {e}")
+    return recorded
+
+
+def _infer_close_reason_from_price(
+    side: str,
+    entry_price: float,
+    exit_price: Optional[float],
+    tp: Optional[float],
+    sl: Optional[float],
+    pnl_quote: Optional[float],
+) -> str:
+    """Tentukan alasan close HANYA dari harga keluar asli vs TP/SL atau realized PnL asli."""
+    if exit_price is None and pnl_quote is None:
+        return "UNKNOWN (data close tidak tersedia)"
+    if exit_price is not None and exit_price > 0:
+        if side == "long":
+            if tp and exit_price >= tp * 0.998:
+                return "Exchange Auto-Close TP"
+            if sl and exit_price <= sl * 1.002:
+                return "Exchange Auto-Close Trailing/Lock" if sl >= entry_price else "Exchange Auto-Close SL"
+        else:
+            if tp and exit_price <= tp * 1.002:
+                return "Exchange Auto-Close TP"
+            if sl and exit_price >= sl * 0.998:
+                return "Exchange Auto-Close Trailing/Lock" if sl <= entry_price else "Exchange Auto-Close SL"
+    if pnl_quote is not None:
+        if pnl_quote > 0:
+            return "Exchange Auto-Close TP/Trailing"
+        if pnl_quote < 0:
+            return "Exchange Auto-Close SL"
+    return "UNKNOWN (data close tidak tersedia)"
+
+
 def _detect_and_log_exchange_closes(
     client: WaltClient,
     active_positions: list[dict],
     snapshot_path: str = "logs/open_snapshot.json",
+    closed_ids_path: str = CLOSED_IDS_PATH,
+    closed_csv_path: str = "logs/closed_history.csv",
 ) -> tuple[dict[str, dict], list[dict]]:
     """
     Bandingkan posisi open saat ini dengan snapshot run sebelumnya (logs/open_snapshot.json).
-    Untuk posisi yang hilang (ditutup otomatis oleh exchange lewat TP/SL), ambil detail dari
-    client.list_positions(statuses=["closed"]) secara defensif dan catat via sheet_logger.log_close.
-    Return (current_snapshot_dict, closed_actions_list).
+    Dedupe memakai unique Position ID (bukan contract_id) + logs/closed_ids.json + sheet Closed_Positions.
+    Jika data close dari exchange tidak tersedia, catat UNKNOWN dengan exit/PnL kosong (bukan TP/PnL=0).
     """
-    os.makedirs(os.path.dirname(snapshot_path), exist_ok=True)
+    os.makedirs(os.path.dirname(snapshot_path) or ".", exist_ok=True)
     prev_snapshot: dict[str, dict] = {}
     if os.path.exists(snapshot_path):
         try:
@@ -1469,11 +1587,17 @@ def _detect_and_log_exchange_closes(
     for p in active_positions:
         if str(p.get("status", "open")).lower() not in ("open", "active"):
             continue
+        pos_key = make_position_dedupe_key(p)
         cid_str = str(p["contract_id"])
         base_asset = p.get("contract_base_asset") or p.get("base_asset", "")
-        prev_verdict = prev_snapshot.get(cid_str, {}).get("verdict")
+        prev_info = prev_snapshot.get(pos_key) or prev_snapshot.get(cid_str) or {}
+        prev_verdict = prev_info.get("verdict")
         verdict = prev_verdict if prev_verdict in ("GO", "HALF") else _infer_position_verdict(base_asset)
-        current_snapshot[cid_str] = {
+        ac = p.get("auto_close") or {}
+        tp_val = (ac.get("take_profit") or {}).get("trigger_price_quote") or p.get("take_profit_price") or p.get("tp_price") or p.get("tp")
+        sl_val = (ac.get("stop_loss") or {}).get("trigger_price_quote") or p.get("stop_loss_price") or p.get("sl_price") or p.get("sl")
+        current_snapshot[pos_key] = {
+            "position_id": pos_key,
             "contract_id": p["contract_id"],
             "base_asset": base_asset,
             "side": p.get("side", "long"),
@@ -1481,33 +1605,55 @@ def _detect_and_log_exchange_closes(
             "margin": float(p.get("margin_quote", p.get("margin", 0.0)) or 0.0),
             "entry_price": float(p.get("avg_entry_price", p.get("entry_price", 0.0)) or 0.0),
             "funding_paid": float(p.get("funding_paid_quote", p.get("funding_paid", 0.0)) or 0.0),
+            "tp": float(tp_val) if tp_val else None,
+            "sl": float(sl_val) if sl_val else None,
+            "opened_at": str(p.get("opened_at") or p.get("created_at") or prev_info.get("opened_at") or ""),
             "verdict": verdict,
         }
 
-    missing_cids = set(prev_snapshot.keys()) - set(current_snapshot.keys())
+    # Hindari false missing jika prev_snapshot masih format lama (key = contract_id)
+    active_cids = {str(v.get("contract_id")) for v in current_snapshot.values()}
+    missing_keys = [
+        k for k in prev_snapshot.keys()
+        if k not in current_snapshot and not (k.isdigit() and k in active_cids)
+    ]
     closed_events: list[dict] = []
 
-    if missing_cids:
-        closed_by_cid: dict[str, dict] = {}
+    if missing_keys:
+        known_closed_ids = set(_load_closed_ids(closed_ids_path)) | _fetch_recorded_closed_ids(closed_csv_path)
+        closed_list: list[dict] = []
         try:
             closed_resp = client.list_positions(statuses=["closed"])
-            for cp in closed_resp.get("positions", []):
-                c_str = str(cp.get("contract_id"))
-                if c_str in missing_cids:
-                    closed_by_cid[c_str] = cp
+            closed_list = closed_resp.get("positions", []) if isinstance(closed_resp, dict) else (closed_resp or [])
         except Exception as e:
             log.warning(f"Gagal fetch closed positions untuk snapshot diff: {e}")
 
+        closed_by_key = {make_position_dedupe_key(cp): cp for cp in closed_list if isinstance(cp, dict)}
+        closed_by_cid_entry: dict[tuple[str, float], dict] = {}
+        for cp in closed_list:
+            if isinstance(cp, dict):
+                c_cid = str(cp.get("contract_id", ""))
+                c_ent = round(float(cp.get("avg_entry_price") or cp.get("entry_price") or 0.0), 6)
+                closed_by_cid_entry[(c_cid, c_ent)] = cp
+
         from sheet_logger import log_close
-        for cid_str in missing_cids:
-            prev_info = prev_snapshot.get(cid_str, {})
-            cp = closed_by_cid.get(cid_str, {})
+        for prev_key in missing_keys:
+            prev_info = prev_snapshot.get(prev_key, {})
+            cid_int = int(prev_info.get("contract_id") or (prev_key if prev_key.isdigit() else 0))
+            prev_entry = round(float(prev_info.get("entry_price") or 0.0), 6)
+
+            cp = closed_by_key.get(prev_key) or closed_by_cid_entry.get((str(cid_int), prev_entry)) or {}
+            dedupe_id = make_position_dedupe_key(cp) if cp else (prev_info.get("position_id") or prev_key)
+
+            if dedupe_id in known_closed_ids or prev_key in known_closed_ids:
+                log.info(f"  SKIP duplicate close log untuk position_id={dedupe_id}")
+                continue
 
             asset = (
                 cp.get("contract_base_asset")
                 or cp.get("base_asset")
                 or prev_info.get("base_asset")
-                or f"CID_{cid_str}"
+                or f"CID_{cid_int}"
             )
             side = str(cp.get("side") or prev_info.get("side") or "long").lower()
             entry_price = float(
@@ -1516,13 +1662,13 @@ def _detect_and_log_exchange_closes(
                 or prev_info.get("entry_price")
                 or 0.0
             )
-            exit_price = float(
+            raw_exit = (
                 cp.get("avg_close_price")
                 or cp.get("close_price")
                 or cp.get("exit_price")
-                or cp.get("mark_price")
-                or entry_price
             )
+            exit_price: Optional[float] = float(raw_exit) if raw_exit is not None and float(raw_exit) > 0 else None
+
             margin = float(
                 cp.get("margin_quote")
                 or cp.get("margin")
@@ -1536,6 +1682,7 @@ def _detect_and_log_exchange_closes(
                 or prev_info.get("funding_paid")
                 or 0.0
             )
+            closed_at = str(cp.get("closed_at") or cp.get("updated_at") or "")
 
             raw_pnl = (
                 cp.get("realized_pnl_quote")
@@ -1543,34 +1690,48 @@ def _detect_and_log_exchange_closes(
                 else (cp.get("pnl_quote") if cp.get("pnl_quote") is not None else cp.get("realized_pnl"))
             )
             if raw_pnl is not None:
-                pnl_quote = float(raw_pnl)
-            elif entry_price > 0 and exit_price > 0:
+                pnl_quote: Optional[float] = float(raw_pnl)
+            elif entry_price > 0 and exit_price is not None:
                 move = (exit_price - entry_price) / entry_price if side == "long" else (entry_price - exit_price) / entry_price
                 pnl_quote = margin * leverage * move
             else:
-                pnl_quote = 0.0
+                pnl_quote = None
 
-            reason = str(cp.get("close_reason") or cp.get("reason") or "")
+            reason = str(cp.get("close_reason") or cp.get("reason") or "").strip()
             if not reason:
-                reason = "Exchange Auto-Close TP/Trailing" if pnl_quote >= 0 else "Exchange Auto-Close SL"
+                reason = _infer_close_reason_from_price(
+                    side=side,
+                    entry_price=entry_price,
+                    exit_price=exit_price,
+                    tp=prev_info.get("tp"),
+                    sl=prev_info.get("sl"),
+                    pnl_quote=pnl_quote,
+                )
 
             try:
                 log_close(
                     asset=asset,
                     side=side,
-                    contract_id=int(cid_str) if cid_str.isdigit() else 0,
+                    contract_id=cid_int,
                     entry_price=entry_price,
                     exit_price=exit_price,
                     margin=margin,
                     pnl_quote=pnl_quote,
                     funding_quote=funding_quote,
                     reason=reason,
+                    position_id=dedupe_id,
+                    closed_at=closed_at,
+                    filepath=closed_csv_path,
                 )
+                _record_closed_id(dedupe_id, path=closed_ids_path)
+                known_closed_ids.add(dedupe_id)
                 _set_asset_cooldown(asset)
+                pnl_label = f"PnL ${pnl_quote:+.4f}" if pnl_quote is not None else "PnL N/A"
                 closed_events.append({
                     "asset": asset,
                     "action": "EXCHANGE_CLOSE_DETECTED",
-                    "detail": f"{reason} (PnL ${pnl_quote:+.4f})",
+                    "detail": f"{reason} ({pnl_label})",
+                    "position_id": dedupe_id,
                 })
             except Exception as err:
                 log.warning(f"Gagal log_close untuk {asset}: {err}")
@@ -1634,6 +1795,7 @@ def _run_single_monitor_pass(
         tp_val = ac.get("take_profit", {}).get("trigger_price_quote")
         sl_val = ac.get("stop_loss", {}).get("trigger_price_quote")
 
+        pos_key = make_position_dedupe_key(p_raw)
         pos = Position(
             contract_id=cid,
             base_asset=p_raw["contract_base_asset"],
@@ -1646,6 +1808,8 @@ def _run_single_monitor_pass(
             sl=float(sl_val) if sl_val else None,
             funding_paid=float(p_raw.get("funding_paid_quote", 0)),
             liquidation_price=float(p_raw["liquidation_price"]),
+            position_id=pos_key,
+            opened_at=str(p_raw.get("opened_at") or p_raw.get("created_at") or ""),
         )
         current_funding_daily = float(contract["funding_rate_hourly"]) * 24
 
@@ -1654,6 +1818,7 @@ def _run_single_monitor_pass(
             res = evaluate_and_apply_position_risk(client, pos, current_funding_daily)
             if res and res.get("action") != "FAILED":
                 if res.get("action") == "CLOSE":
+                    current_snapshot.pop(pos_key, None)
                     current_snapshot.pop(str(cid), None)
                     closed_now = True
                 elif res.get("action") == "UPDATE_AUTO_CLOSE":
@@ -1841,11 +2006,13 @@ def has_enough_job_time(
 
 
 def _has_recent_tp_close(actions: list[dict]) -> bool:
-    """True hanya jika ada penutupan posisi riil (CLOSE / EXCHANGE_CLOSE_DETECTED) karena TP/Trailing."""
+    """True hanya jika ada penutupan posisi riil (CLOSE / EXCHANGE_CLOSE_DETECTED) karena TP/Trailing (bukan UNKNOWN)."""
     for a in actions:
         if a.get("action") not in ("CLOSE", "EXCHANGE_CLOSE_DETECTED"):
             continue
         detail = str(a.get("detail", "")).lower()
+        if "unknown" in detail:
+            continue
         if "tp" in detail or "trailing" in detail:
             return True
     return False
@@ -1903,11 +2070,11 @@ def risk_monitor_run(
             "actions": actions,
         }
 
-    verdicts_by_cid = {
-        int(cid): str(info.get("verdict", "GO")).upper()
-        for cid, info in current_snapshot.items()
-        if str(cid).isdigit()
-    }
+    verdicts_by_cid = {}
+    for cid_k, info in current_snapshot.items():
+        raw_cid = info.get("contract_id", cid_k)
+        if str(raw_cid).isdigit():
+            verdicts_by_cid[int(raw_cid)] = str(info.get("verdict", "GO")).upper()
     should_subcycle, delay_sec, cadence_reason = decide_dynamic_monitor_cadence(
         remaining_positions, verdicts_by_cid=verdicts_by_cid, rng=rng
     )

@@ -23,13 +23,21 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Restore logs/snapshot cache
+      - name: Restore logs/state cache
         uses: actions/cache/restore@v4
         with:
           path: logs/
           key: walt-logs-state-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             walt-logs-state-
+
+      - name: Restore risk-monitor open_snapshot cache
+        uses: actions/cache/restore@v4
+        with:
+          path: logs/open_snapshot.json
+          key: walt-snapshot-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            walt-snapshot-
 
       - name: Run risk monitor
         env:
@@ -52,7 +60,14 @@ jobs:
           set -o pipefail
           python walt_bot.py monitor
 
-      - name: Save logs/snapshot cache (always)
+      - name: Save risk-monitor open_snapshot cache (always)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: logs/open_snapshot.json
+          key: walt-snapshot-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save logs/state cache (always)
         if: always()
         uses: actions/cache/save@v4
         with:

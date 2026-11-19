@@ -58,6 +58,10 @@ jobs:
           set -o pipefail
           python walt_bot.py market_execute
 
+      - name: Exclude open_snapshot.json from non-monitor cache
+        if: always()
+        run: rm -f logs/open_snapshot.json
+
       - name: Save logs/snapshot cache (always)
         if: always()
         uses: actions/cache/save@v4
