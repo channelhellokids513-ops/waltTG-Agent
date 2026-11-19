@@ -126,3 +126,90 @@ def test_r4_2_unverified_price_keys_quarantined_in_module_constants():
     assert "mark_price" not in walt_bot._CLOSE_POSITION_PRICE_KEYS
     assert "mark_price" in walt_bot._CLOSE_MARK_PRICE_KEYS
 
+
+def _make_scan_contracts(n: int) -> list[dict]:
+    assets = sorted(walt_bot.ALLOWED_ASSETS)[:n]
+    return [
+        {
+            "contract_id": idx + 1,
+            "base_asset": asset,
+            "volume_24h_usd": "50000000",
+            "funding_rate_hourly": "0.0005",
+            "max_leverage": 2,
+            "min_size_base": "0.01",
+            "price_slippage": "0.0002",
+        }
+        for idx, asset in enumerate(assets)
+    ]
+
+
+def test_r4_3_per_candidate_failures_are_aggregated(monkeypatch, caplog):
+    from unittest.mock import MagicMock
+    import sheet_logger
+
+    tg_calls = []
+    monkeypatch.setattr(walt_bot, "send_telegram", lambda msg, **kw: tg_calls.append(msg))
+    monkeypatch.setattr(walt_bot, "get_dynamic_max_slots", lambda eq: 25)
+    monkeypatch.setattr(walt_bot, "_update_regime_state", lambda *a, **kw: ("GEAR_1", 120, "ok"))
+    monkeypatch.setattr(sheet_logger, "get_closed_funding_current_month", lambda **kw: 0.0)
+
+    client = MagicMock()
+    client.readiness.return_value = {"ok": True}
+    client.balance.return_value = {"accounts": [{"balance_available": "200.0"}]}
+    client.list_positions.return_value = {"positions": []}
+    client.list_contracts.return_value = {"contracts": _make_scan_contracts(25)}
+    client.latest_rate.side_effect = RuntimeError("timeout upstream")
+
+    with caplog.at_level("DEBUG", logger="walt-bot"):
+        res = walt_bot.daily_scan(client)
+
+    assert len(res["top_opportunities"]) == 25
+    assert all(o["price"] == 0.0 for o in res["top_opportunities"])
+
+    warn_recs = [r for r in caplog.records if r.levelname == "WARNING"]
+    debug_rate_recs = [r for r in caplog.records if r.levelname == "DEBUG" and "latest_rate" in r.message]
+    assert len(warn_recs) == 1, f"Harus tepat 1 WARNING agregasi, aktual {len(warn_recs)}"
+    assert len(debug_rate_recs) == 25
+    assert "25" in warn_recs[0].message
+    assert "..." in warn_recs[0].message
+    # Maksimal 5 nama aset di pesan ringkasan
+    sample_part = warn_recs[0].message.split(":", 1)[-1]
+    assert len([x for x in sample_part.split(",") if x.strip() and x.strip() != "..."]) <= 5
+    assert len(tg_calls) in (0, 1)
+    assert len(tg_calls) == 1
+
+
+def test_r4_3_minor_failures_do_not_alert(monkeypatch, caplog):
+    from unittest.mock import MagicMock
+    import sheet_logger
+
+    tg_calls = []
+    monkeypatch.setattr(walt_bot, "send_telegram", lambda msg, **kw: tg_calls.append(msg))
+    monkeypatch.setattr(walt_bot, "get_dynamic_max_slots", lambda eq: 20)
+    monkeypatch.setattr(walt_bot, "_update_regime_state", lambda *a, **kw: ("GEAR_1", 120, "ok"))
+    monkeypatch.setattr(sheet_logger, "get_closed_funding_current_month", lambda **kw: 0.0)
+
+    client = MagicMock()
+    client.readiness.return_value = {"ok": True}
+    client.balance.return_value = {"accounts": [{"balance_available": "200.0"}]}
+    client.list_positions.return_value = {"positions": []}
+    contracts = _make_scan_contracts(20)
+    client.list_contracts.return_value = {"contracts": contracts}
+    fail_markets = {f"{contracts[0]['base_asset']}-USD-PERP", f"{contracts[1]['base_asset']}-USD-PERP"}
+
+    def fake_rate(market_id):
+        if market_id in fail_markets:
+            raise RuntimeError("transient error")
+        return {"rate": "100.0"}
+
+    client.latest_rate.side_effect = fake_rate
+
+    with caplog.at_level("DEBUG", logger="walt-bot"):
+        walt_bot.daily_scan(client)
+
+    warn_recs = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warn_recs) == 1
+    assert "2/20" in warn_recs[0].message
+    assert tg_calls == []
+
+

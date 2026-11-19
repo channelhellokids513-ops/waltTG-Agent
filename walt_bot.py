@@ -315,6 +315,34 @@ logging.basicConfig(level=logging.INFO, handlers=[_handler], force=True)
 log = logging.getLogger("walt-bot")
 
 
+def _log_failure_summary(
+    context: str,
+    failures: list[str],
+    total: int,
+    warn_ratio: float = 0.3,
+    warn_min: int = 3,
+) -> None:
+    """
+    Agregasi kegagalan per-item menjadi tepat satu baris log.warning (maks 5 contoh + '...'),
+    dan kirim maksimal satu alert Telegram bila jumlah >= warn_min dan rasio >= warn_ratio.
+    """
+    if not failures:
+        return
+    count = len(failures)
+    sample = ", ".join(failures[:5])
+    if count > 5:
+        sample = f"{sample}, ..."
+    denom = max(1, int(total))
+    ratio = count / denom
+    msg = f"[{context}] {count}/{denom} item gagal ({ratio*100:.0f}%): {sample}"
+    log.warning(msg)
+    if count >= warn_min and ratio >= warn_ratio:
+        try:
+            send_telegram(f"⚠️ {msg}")
+        except Exception as exc:
+            log.debug(f"Gagal kirim alert agregasi Telegram ({context}) ({type(exc).__name__}): {exc}")
+
+
 # =============================================================================
 # CLIENT — thin wrapper for Walt MCP over HTTP
 # =============================================================================
@@ -1469,7 +1497,11 @@ def apply_layer4_trailing(client: WaltClient, pos: Position) -> Optional[dict]:
     return None
 
 
-def _infer_position_verdict(base_asset: str, exec_csv_path: str = "logs/executions_history.csv") -> str:
+def _infer_position_verdict(
+    base_asset: str,
+    exec_csv_path: str = "logs/executions_history.csv",
+    failures: Optional[list[str]] = None,
+) -> str:
     """
     Infer kategori keputusan pembukaan posisi ('HALF' atau 'GO') dari riwayat eksekusi terakhir.
     Digunakan oleh Dynamic Risk Monitor untuk menentukan frekuensi pengawasan (5 menit vs 10 menit).
@@ -1486,9 +1518,11 @@ def _infer_position_verdict(base_asset: str, exec_csv_path: str = "logs/executio
                     return "HALF"
                 return "GO"
     except Exception as exc:
-        log.warning(
+        log.debug(
             f"Gagal baca verdict historis {base_asset} dari {exec_csv_path} ({type(exc).__name__}): {exc}"
         )
+        if failures is not None:
+            failures.append(base_asset)
     return "GO"
 
 
@@ -1966,6 +2000,7 @@ def _detect_and_log_exchange_closes(
             log.warning(f"Gagal membaca open_snapshot.json: {e}")
 
     current_snapshot: dict[str, dict] = {}
+    verdict_failures: list[str] = []
     for p in active_positions:
         if str(p.get("status", "open")).lower() not in ("open", "active"):
             continue
@@ -1974,7 +2009,11 @@ def _detect_and_log_exchange_closes(
         base_asset = p.get("contract_base_asset") or p.get("base_asset", "")
         prev_info = prev_snapshot.get(pos_key) or prev_snapshot.get(cid_str) or {}
         prev_verdict = prev_info.get("verdict")
-        verdict = prev_verdict if prev_verdict in ("GO", "HALF") else _infer_position_verdict(base_asset)
+        verdict = (
+            prev_verdict
+            if prev_verdict in ("GO", "HALF")
+            else _infer_position_verdict(base_asset, failures=verdict_failures)
+        )
         ac = p.get("auto_close") or {}
         tp_val = (ac.get("take_profit") or {}).get("trigger_price_quote") or p.get("take_profit_price") or p.get("tp_price") or p.get("tp")
         sl_val = (ac.get("stop_loss") or {}).get("trigger_price_quote") or p.get("stop_loss_price") or p.get("sl_price") or p.get("sl")
@@ -1992,6 +2031,7 @@ def _detect_and_log_exchange_closes(
             "opened_at": str(p.get("opened_at") or p.get("created_at") or prev_info.get("opened_at") or ""),
             "verdict": verdict,
         }
+    _log_failure_summary("detect_exchange_closes.infer_verdict", verdict_failures, total=len(active_positions))
 
     # Hindari false missing jika prev_snapshot masih format lama (key = contract_id)
     active_cids = {str(v.get("contract_id")) for v in current_snapshot.values()}
@@ -2534,19 +2574,22 @@ def daily_scan(client: WaltClient) -> dict:
     scan_limit = max(5, get_dynamic_max_slots(total_equity))
     top_candidates = opps[:scan_limit]
 
-    # Fetch live price untuk top candidates
+    # Fetch live price untuk top candidates (agregasi kegagalan per-kandidat menjadi 1 ringkasan)
+    rate_failures: list[str] = []
     for opp in top_candidates:
         try:
             r = client.latest_rate(f"{opp.base_asset}-USD-PERP")
             opp_price = float(r["rate"])
         except Exception as exc:
-            log.warning(f"Gagal fetch latest_rate untuk {opp.base_asset} ({type(exc).__name__}): {exc}")
+            log.debug(f"Gagal fetch latest_rate untuk {opp.base_asset} ({type(exc).__name__}): {exc}")
+            rate_failures.append(opp.base_asset)
             opp_price = 0.0
         setattr(opp, "live_price", opp_price)
         if opp_price > 0 and opp.min_size_base > 0:
             opp.min_margin_2x = round(
                 (opp.min_size_base * opp_price / MAX_LEVERAGE) * (1.0 + opp.price_slippage), 2
             )
+    _log_failure_summary("daily_scan.latest_rate", rate_failures, total=len(top_candidates))
 
     # Income tracker (akumulasi bulan berjalan: posisi closed bulan ini + posisi open saat ini)
     open_funding = sum(
@@ -3381,6 +3424,7 @@ def compute_closed_stats(
     trades = []
     unknown_count = 0
     seen_keys: set[str] = set()
+    trade_parse_failures: list[str] = []
     reason_breakdown: dict[str, int] = {
         "TP": 0,
         "SL": 0,
@@ -3422,6 +3466,7 @@ def compute_closed_stats(
             log.debug(
                 f"Gagal parse angka trade {asset_lbl} pada Closed_Positions ({type(exc).__name__}): {exc}"
             )
+            trade_parse_failures.append(str(asset_lbl))
             unknown_count += 1
             reason_breakdown["UNKNOWN"] = reason_breakdown.get("UNKNOWN", 0) + 1
             continue
@@ -3461,9 +3506,12 @@ def compute_closed_stats(
             "timestamp_utc": str(r[0]).strip(),
         })
 
+    _log_failure_summary("compute_closed_stats.trade_parse", trade_parse_failures, total=len(data_rows))
+
     # E5: Hitung median hold time dari selisih (closed_at - opened_at)
     import statistics as _statistics
     hold_hours_samples: list[float] = []
+    hold_parse_failures: list[str] = []
     for t in trades:
         o_raw = t.get("opened_at") or ""
         c_raw = t.get("closed_at") or t.get("timestamp_utc") or ""
@@ -3481,7 +3529,9 @@ def compute_closed_stats(
                 hold_hours_samples.append(diff_h)
         except Exception as exc:
             log.debug(f"Gagal parse durasi hold Closed_Positions ({type(exc).__name__}): {exc}")
+            hold_parse_failures.append(str(t.get("asset", "?")))
             continue
+    _log_failure_summary("compute_closed_stats.hold_time", hold_parse_failures, total=len(trades))
     median_hold_hours: Optional[float] = (
         round(float(_statistics.median(hold_hours_samples)), 2) if hold_hours_samples else None
     )
@@ -3499,6 +3549,7 @@ def compute_closed_stats(
     equity_change: Optional[float] = None
     pnl_rows = fetch_sheet_csv_rows("PnL_Tracker", local_csv_fallback=pnl_tracker_path)
     eq_vals: list[float] = []
+    equity_parse_failures: list[str] = []
     for pr in pnl_rows:
         if len(pr) < 2:
             continue
@@ -3508,7 +3559,9 @@ def compute_closed_stats(
             eq_vals.append(float(str(pr[1]).replace("$", "").strip()))
         except Exception as exc:
             log.debug(f"Gagal parse ekuitas PnL_Tracker tanggal {pr[0]} ({type(exc).__name__}): {exc}")
+            equity_parse_failures.append(str(pr[0]))
             continue
+    _log_failure_summary("compute_closed_stats.pnl_tracker_equity", equity_parse_failures, total=len(pnl_rows))
     if eq_vals:
         equity_start = round(eq_vals[0], 4)
         equity_latest = round(eq_vals[-1], 4)
