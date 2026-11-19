@@ -250,7 +250,7 @@ def log_execution(executions: list[dict], filepath: str = "logs/executions_histo
 CLOSED_POSITIONS_HEADERS = [
     "Timestamp (UTC)", "Asset", "Sisi", "Contract ID", "Entry Price ($)",
     "Exit Price ($)", "Margin ($)", "PnL ($)", "Funding ($)", "Alasan Close",
-    "Position ID", "Closed At (exchange)", "Strategy Version"
+    "Position ID", "Closed At (exchange)", "Strategy Version", "Opened At (exchange)"
 ]
 
 
@@ -304,6 +304,7 @@ def log_close(
     reason: str,
     position_id: str = "",
     closed_at: str = "",
+    opened_at: str = "",
     filepath: str = "logs/closed_history.csv",
 ) -> dict:
     """
@@ -333,6 +334,7 @@ def log_close(
         str(position_id or ""),
         str(closed_at or ""),
         strat_ver,
+        str(opened_at or ""),
     ]
 
     with open(filepath, "a", newline="", encoding="utf-8") as f:

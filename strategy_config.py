@@ -32,6 +32,7 @@ DEFAULT_STRATEGY_CONFIG: dict[str, Any] = {
     "max_entries_per_asset_24h": 2, # E4: maks 2 entry per aset per 24 jam
     "max_entries_per_day": 8,       # E4: maks 8 entry total per 24 jam
     "daily_loss_limit_pct": 0.05,   # E4: circuit breaker turun >= 5% dari ekuitas awal hari UTC
+    "expected_hold_hours": 24.0,    # E5: asumsi durasi tahan posisi (jam) untuk gerbang funding vs fee
     "dry_run": False,
 }
 
@@ -48,6 +49,7 @@ STRATEGY_PARAM_SPECS: dict[str, dict[str, Any]] = {
     "max_entries_per_asset_24h": {"type": "int", "min": 1, "max": 10, "desc": "Maksimal entry per aset dalam 24 jam"},
     "max_entries_per_day": {"type": "int", "min": 1, "max": 30, "desc": "Maksimal total entry dalam 24 jam"},
     "daily_loss_limit_pct": {"type": "float", "min": 0.01, "max": 0.25, "desc": "Batas penurunan ekuitas harian UTC untuk circuit breaker (mis. 0.05 = 5%)"},
+    "expected_hold_hours": {"type": "float", "min": 1.0, "max": 168.0, "desc": "Target durasi tahan posisi (jam) untuk gerbang ekonomi funding vs fee"},
     "dry_run": {"type": "bool", "desc": "Mode simulasi tanpa order riil (true/false)"},
 }
 

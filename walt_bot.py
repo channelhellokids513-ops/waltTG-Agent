@@ -207,6 +207,7 @@ MAX_P5_RISK = 0.70          # E2: P5_risk_catalysts >= 0.70 -> SKIP
 MAX_ENTRIES_PER_ASSET_24H = 2   # E4: maks 2 entry per aset per 24 jam
 MAX_ENTRIES_PER_DAY = 8         # E4: maks 8 entry total per 24 jam
 DAILY_LOSS_LIMIT_PCT = 0.05     # E4: circuit breaker penurunan ekuitas harian >= 5%
+EXPECTED_HOLD_HOURS = 24.0      # E5: asumsi hold time (jam) untuk gerbang funding vs fee
 
 try:
     from strategy_config import load_strategy_config as _load_strategy_config
@@ -220,6 +221,7 @@ try:
     MAX_ENTRIES_PER_ASSET_24H = int(_rt_cfg.get("max_entries_per_asset_24h", MAX_ENTRIES_PER_ASSET_24H))
     MAX_ENTRIES_PER_DAY = int(_rt_cfg.get("max_entries_per_day", MAX_ENTRIES_PER_DAY))
     DAILY_LOSS_LIMIT_PCT = float(_rt_cfg.get("daily_loss_limit_pct", DAILY_LOSS_LIMIT_PCT))
+    EXPECTED_HOLD_HOURS = float(_rt_cfg.get("expected_hold_hours", EXPECTED_HOLD_HOURS))
 except Exception as _cfg_exc:
     logging.getLogger("walt-bot").warning(
         f"Gagal memuat konfigurasi strategi bersama ({_cfg_exc}); fallback ke DEFAULT_STRATEGY_CONFIG."
@@ -927,6 +929,33 @@ def _sl_is_improvement(pos: Position, new_sl: float, buffer: float = 0.0005) -> 
         return new_sl < pos.sl * (1 - buffer)
 
 
+TAKER_FEE_PER_SIDE = 0.0009  # 0.09% per sisi (0.18% round-trip)
+
+
+def check_funding_vs_fee_gate(
+    funding_daily: float,
+    price_slippage: float = 0.0,
+    expected_hold_hours: Optional[float] = None,
+) -> tuple[bool, float, float, str]:
+    """
+    E5: Gerbang ekonomi Funding vs Fee sebelum open_position:
+      expected_funding = |funding_daily| * (expected_hold_hours / 24)
+      biaya = 2 * 0.0009 (fee round-trip) + price_slippage
+    Entry hanya lolos jika expected_funding >= biaya * 1.5.
+    Return (passed, expected_funding, cost, summary_note).
+    """
+    hold_h = EXPECTED_HOLD_HOURS if expected_hold_hours is None else float(expected_hold_hours)
+    exp_funding = abs(float(funding_daily or 0.0)) * (hold_h / 24.0)
+    cost = (2.0 * TAKER_FEE_PER_SIDE) + max(0.0, float(price_slippage or 0.0))
+    required = cost * 1.5
+    passed = exp_funding >= required
+    note = (
+        f"hold={hold_h:.0f}h, exp_funding={exp_funding*100:.3f}%, "
+        f"cost={cost*100:.3f}%, req={required*100:.3f}%"
+    )
+    return passed, round(exp_funding, 6), round(cost, 6), note
+
+
 def _record_position_close(pos: Position, reason: str):
     """Catat penutupan posisi ke Closed_Positions (Google Sheet), logs/closed_history.csv, closed_ids, dan set cooldown."""
     pos_key = make_position_dedupe_key({
@@ -950,6 +979,7 @@ def _record_position_close(pos: Position, reason: str):
             reason=reason,
             position_id=pos_key,
             closed_at=datetime.now(timezone.utc).isoformat(),
+            opened_at=pos.opened_at,
         )
         _record_closed_id(pos_key)
     except Exception as e:
@@ -1875,6 +1905,7 @@ def _detect_and_log_exchange_closes(
                     reason=reason,
                     position_id=dedupe_id,
                     closed_at=closed_at,
+                    opened_at=str(cp.get("opened_at") or cp.get("created_at") or prev_info.get("opened_at") or ""),
                     filepath=closed_csv_path,
                 )
                 _record_closed_id(dedupe_id, path=closed_ids_path)
@@ -2593,6 +2624,17 @@ def scan_with_research(
                     })
                     continue
 
+                econ_ok, _exp_fr, _cost, econ_note = check_funding_vs_fee_gate(opp.funding_daily, opp.price_slippage)
+                if not econ_ok:
+                    skip_msg = f"gerbang ekonomi funding vs fee gagal ({econ_note})"
+                    log.info(f"  SKIP {asset}: {skip_msg}")
+                    executions.append({
+                        "asset": asset, "side": opp.side, "leverage": MAX_LEVERAGE, "verdict": "SKIP",
+                        "reason": skip_msg,
+                    })
+                    continue
+                reason = f"{reason} | {econ_note}"
+
                 margin = calculate_dynamic_margin(
                     available_balance=available,
                     active_slots=active_slot_count,
@@ -2906,6 +2948,20 @@ def market_execute(
             })
             continue
 
+        econ_ok, _exp_fr, _cost, econ_note = check_funding_vs_fee_gate(opp.funding_daily, opp.price_slippage)
+        if not econ_ok:
+            skip_msg = f"gerbang ekonomi funding vs fee gagal ({econ_note})"
+            log.info(f"  SKIP {opp.base_asset}: {skip_msg}")
+            executions.append({
+                "asset": opp.base_asset,
+                "side": opp.side,
+                "leverage": MAX_LEVERAGE,
+                "verdict": "SKIP",
+                "reason": skip_msg,
+            })
+            continue
+        reason = f"{reason} | {econ_note}"
+
         margin = calculate_dynamic_margin(
             available_balance=available,
             active_slots=active_slot_count,
@@ -3125,8 +3181,40 @@ def compute_closed_stats(
             "category": cat,
             "position_id": pos_id,
             "closed_at": str(r[11]).strip() if len(r) > 11 else "",
+            "opened_at": str(r[13]).strip() if len(r) > 13 else "",
             "timestamp_utc": str(r[0]).strip(),
         })
+
+    # E5: Hitung median hold time dari selisih (closed_at - opened_at)
+    import statistics as _statistics
+    hold_hours_samples: list[float] = []
+    for t in trades:
+        o_raw = t.get("opened_at") or ""
+        c_raw = t.get("closed_at") or t.get("timestamp_utc") or ""
+        if not o_raw or not c_raw:
+            continue
+        try:
+            o_dt = datetime.fromisoformat(o_raw.replace("Z", "+00:00"))
+            c_dt = datetime.fromisoformat(c_raw.replace("Z", "+00:00"))
+            if o_dt.tzinfo is None:
+                o_dt = o_dt.replace(tzinfo=timezone.utc)
+            if c_dt.tzinfo is None:
+                c_dt = c_dt.replace(tzinfo=timezone.utc)
+            diff_h = (c_dt - o_dt).total_seconds() / 3600.0
+            if diff_h >= 0:
+                hold_hours_samples.append(diff_h)
+        except Exception:
+            continue
+    median_hold_hours: Optional[float] = (
+        round(float(_statistics.median(hold_hours_samples)), 2) if hold_hours_samples else None
+    )
+    hold_time_warning: Optional[str] = None
+    if median_hold_hours is not None and median_hold_hours < (EXPECTED_HOLD_HOURS * 0.5):
+        hold_time_warning = (
+            f"⚠️ Median hold ({median_hold_hours:.2f} jam) jauh di bawah target "
+            f"expected_hold_hours ({EXPECTED_HOLD_HOURS:.0f} jam) — strategi aktual "
+            "cenderung scalping arah harga, bukan funding carry."
+        )
 
     # Pembanding perubahan ekuitas dari PnL_Tracker
     equity_start: Optional[float] = None
@@ -3181,6 +3269,9 @@ def compute_closed_stats(
         "equity_start_usd": equity_start,
         "equity_latest_usd": equity_latest,
         "equity_change_usd": equity_change,
+        "median_hold_hours": median_hold_hours,
+        "expected_hold_hours": EXPECTED_HOLD_HOURS,
+        "hold_time_warning": hold_time_warning,
         "strategy_version": get_strategy_version_hash(),
         "breakdown_by_reason": reason_breakdown,
     }
@@ -3190,11 +3281,17 @@ def compute_closed_stats(
         if equity_change is not None
         else "Perubahan Ekuitas (PnL\\_Tracker): `N/A`"
     )
+    hold_line = (
+        f"Median Hold Time: `{median_hold_hours:.2f} jam` (target: `{EXPECTED_HOLD_HOURS:.0f} jam`)"
+        if median_hold_hours is not None
+        else f"Median Hold Time: `N/A` (target: `{EXPECTED_HOLD_HOURS:.0f} jam`)"
+    )
     msg_lines = [
         f"*📈 Walt Perps — Closed Positions Stats* (Ver: `{stats['strategy_version']}`)",
         f"Total Trade Valid: *{total_trades}* (Win: {len(wins)} | Loss: {len(losses)}) | UNKNOWN: *{unknown_count}*",
         f"Win Rate (tanpa UNKNOWN): *{win_rate_pct:.1f}%*",
         eq_line,
+        hold_line,
         f"Avg Win: `${avg_win_usd:+.4f}` (`{avg_win_pct:+.2f}%`)",
         f"Avg Loss: `${avg_loss_usd:+.4f}` (`{avg_loss_pct:+.2f}%`)",
         f"Gross Price PnL: `${gross_pnl_usd:+.4f}`",
@@ -3203,6 +3300,8 @@ def compute_closed_stats(
         f"Net PnL: *`${net_pnl_usd:+.4f}`*\n",
         "*Breakdown Alasan Close:*",
     ]
+    if hold_time_warning:
+        msg_lines.insert(5, hold_time_warning)
     for k, v in reason_breakdown.items():
         msg_lines.append(f"• {k}: {v}")
 
