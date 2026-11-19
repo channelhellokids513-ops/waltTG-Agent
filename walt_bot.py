@@ -228,7 +228,7 @@ except Exception as _cfg_exc:
         f"Gagal memuat konfigurasi strategi bersama ({_cfg_exc}); fallback ke DEFAULT_STRATEGY_CONFIG."
     )
 
-# Tangga Trailing Stop (True Zero-Risk — surplus bersih setelah fee 0.18% + spread)
+# Tangga Trailing Stop (True Zero-Risk — surplus bersih setelah fee 0.18% = 2 * TAKER_FEE_PER_SIDE + spread)
 # Arah monoton: diurutkan naik berdasarkan ambang profit; semakin tinggi profit, semakin ketat SL terkunci
 # (LONG semakin naik di atas entry, SHORT semakin turun di bawah entry).
 TRAILING_TIERS = [
@@ -824,7 +824,7 @@ def compute_baseline_tpsl(
 ) -> tuple[float, float]:
     """
     Return (tp, sl) dinamis disesuaikan dengan profil volatilitas aset & windfall funding:
-    - Asymmetric R:R: TP +2.0% s/d +2.5% vs SL DEFAULT_SL_PCT agar surplus bersih melampaui fee 0.18%
+    - Asymmetric R:R: TP +2.0% s/d +2.5% vs SL DEFAULT_SL_PCT agar surplus bersih melampaui fee 0.18% (2 * TAKER_FEE_PER_SIDE)
     - Windfall Take Profit: Jika abs(funding_daily) >= MIN_FUNDING_DAILY dan
       DEFAULT_SL_PCT <= 2.5x funding harian < tp_pct, TP dimajukan
     """
@@ -1058,6 +1058,7 @@ def _sl_is_improvement(pos: Position, new_sl: float, buffer: float = 0.0005) -> 
 
 
 TAKER_FEE_PER_SIDE = 0.0009  # 0.09% per sisi (0.18% round-trip)
+# Catatan: memindahkan konstanta fee ke strategy_config.py (config-driven) adalah pekerjaan terpisah di luar ronde 3.
 
 
 def check_funding_vs_fee_gate(
@@ -1068,7 +1069,7 @@ def check_funding_vs_fee_gate(
     """
     E5: Gerbang ekonomi Funding vs Fee sebelum open_position:
       expected_funding = |funding_daily| * (expected_hold_hours / 24)
-      biaya = 2 * 0.0009 (fee round-trip) + price_slippage
+      biaya = 2 * TAKER_FEE_PER_SIDE (fee round-trip) + price_slippage
     Entry hanya lolos jika expected_funding >= biaya * 1.5.
     Return (passed, expected_funding, cost, summary_note).
     """
@@ -2659,7 +2660,7 @@ def format_summary_telegram(
             oid_short = f"`{order_id[:8]}...`" if order_id != "N/A" else "N/A"
             lines.append(f"• *{e['side'].upper()} {e['asset']}*: margin `${e['margin']:.2f}` @ `${e.get('price', 0):.4f}` (Order ID: {oid_short})")
 
-    lines.append(f"\n_Fee taker 0.09%/sisi | Max lev 2x | Proteksi Auto TP/SL_")
+    lines.append(f"\n_Fee taker {TAKER_FEE_PER_SIDE*100:.2f}%/sisi | Max lev {MAX_LEVERAGE}x | Proteksi Auto TP/SL_")
     return "\n".join(lines)
 
 
@@ -3327,7 +3328,7 @@ def compute_closed_stats(
     - dedupe dengan kunci D2 (Position ID atau Asset+ContractID+EntryPrice);
     - kecualikan baris UNKNOWN dari win-rate (tampilkan terpisah di unknown_count);
     - pembanding perubahan ekuitas riil dari PnL_Tracker;
-    - estimasi fee (0.09%/sisi × notional), total funding, net PnL, breakdown alasan close.
+    - estimasi fee (0.09%/sisi dari TAKER_FEE_PER_SIDE × 2 × notional), total funding, net PnL, breakdown alasan close.
     """
     from sheet_logger import fetch_sheet_csv_rows
 
@@ -3406,7 +3407,7 @@ def compute_closed_stats(
         reason_breakdown[cat] = reason_breakdown.get(cat, 0) + 1
         pnl_pct = (pnl_usd / margin * 100.0) if margin > 0 else 0.0
         notional = margin * MAX_LEVERAGE
-        fee_usd = 2 * 0.0009 * notional  # 0.09%/sisi (open + close)
+        fee_usd = 2.0 * TAKER_FEE_PER_SIDE * notional  # round-trip: open + close
 
         trades.append({
             "asset": r[1],
@@ -3537,7 +3538,7 @@ def compute_closed_stats(
         f"Avg Loss: `${avg_loss_usd:+.4f}` (`{avg_loss_pct:+.2f}%`)",
         f"Gross Price PnL: `${gross_pnl_usd:+.4f}`",
         f"Total Funding: `${total_funding_usd:+.4f}`",
-        f"Est. Fee (0.09%/sisi): `-${estimated_fee_usd:.4f}`",
+        f"Est. Fee ({TAKER_FEE_PER_SIDE*100:.2f}%/sisi): `-${estimated_fee_usd:.4f}`",
         f"Net PnL: *`${net_pnl_usd:+.4f}`*\n",
         "*Breakdown Alasan Close:*",
     ]

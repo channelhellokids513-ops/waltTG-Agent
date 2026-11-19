@@ -216,4 +216,48 @@ def test_r4_no_bare_except_exception_in_walt_bot():
     assert bare_lines == [], f"Ditemukan except Exception: tanpa variabel di walt_bot.py: {bare_lines}"
 
 
+def test_r3_6_fee_single_source_of_truth(monkeypatch, tmp_path):
+    import csv
+    import re
+    from pathlib import Path
+    import sheet_logger
+
+    # (i) compute_closed_stats atas 1 baris sintetis mengikuti TAKER_FEE_PER_SIDE (termasuk saat di-monkeypatch)
+    csv_file = tmp_path / "closed_synth.csv"
+    margin = 2.5
+    with open(csv_file, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(sheet_logger.CLOSED_POSITIONS_HEADERS)
+        w.writerow([
+            "2026-11-19T10:00:00+00:00", "NVDA", "LONG", 10, 100.0, 102.0,
+            margin, 0.10, 0.01, "TP breached", "pos_synth_1",
+            "2026-11-19T12:00:00+00:00", "vtest", "2026-11-19T10:00:00+00:00",
+        ])
+
+    # Paksa baca dari CSV lokal (tanpa jaringan)
+    monkeypatch.setattr(
+        sheet_logger,
+        "fetch_sheet_csv_rows",
+        lambda sheet_name, **kw: list(csv.reader(open(csv_file, encoding="utf-8"))) if sheet_name == "Closed_Positions" else [],
+    )
+    stats_default = walt_bot.compute_closed_stats(csv_path=str(csv_file), send_tg=False)
+    expected_default_fee = round(2.0 * walt_bot.TAKER_FEE_PER_SIDE * margin * walt_bot.MAX_LEVERAGE, 4)
+    assert stats_default["estimated_fee_usd"] == pytest.approx(expected_default_fee, abs=1e-6)
+
+    monkeypatch.setattr(walt_bot, "TAKER_FEE_PER_SIDE", 0.0020)
+    stats_custom = walt_bot.compute_closed_stats(csv_path=str(csv_file), send_tg=False)
+    expected_custom_fee = round(2.0 * 0.0020 * margin * walt_bot.MAX_LEVERAGE, 4)
+    assert stats_custom["estimated_fee_usd"] == pytest.approx(expected_custom_fee, abs=1e-6)
+
+    # (ii) Tidak ada literal 0.0009 di luar baris definisi TAKER_FEE_PER_SIDE
+    src = (Path(__file__).resolve().parent.parent / "walt_bot.py").read_text(encoding="utf-8")
+    non_def_hits = [
+        f"walt_bot.py:{lineno}: {line.strip()}"
+        for lineno, line in enumerate(src.splitlines(), start=1)
+        if re.search(r"\b0\.0009\b", line) and not re.match(r"^\s*TAKER_FEE_PER_SIDE\s*=\s*0\.0009\b", line)
+    ]
+    assert non_def_hits == [], f"Literal 0.0009 ditemukan di luar definisi TAKER_FEE_PER_SIDE: {non_def_hits}"
+
+
+
 
