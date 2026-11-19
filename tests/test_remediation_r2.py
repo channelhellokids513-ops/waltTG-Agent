@@ -336,6 +336,44 @@ def test_p2_2_3_4_dynamic_sl_label_and_config_constants(monkeypatch):
     assert "2.00%" in logged_reasons[0] and "1.5%" not in logged_reasons[0]
 
 
+def test_p12c_guard_no_dead_trailing_tier_branches_in_walt_bot():
+    import re
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent / "walt_bot.py").read_text(encoding="utf-8")
+    active_str_tiers = {action for _, action in walt_bot.TRAILING_TIERS if isinstance(action, str)}
+
+    branch_matches = re.findall(r'(?:el)?if\s+action\s*==\s*["\']([^"\']+)["\']', src)
+    assert branch_matches, "Harus ada minimal 1 cabang aktif action == tier di walt_bot.py"
+    stale_tiers = [t for t in branch_matches if t not in active_str_tiers]
+    assert stale_tiers == [], f"Ditemukan cabang tier mati di walt_bot.py: {stale_tiers}"
+
+    # Pastikan nama tier lama tidak muncul lagi sebagai cabang kondisi
+    for dead_name in ("lock_0010", "lock_0022", "lock_0030", "lock_0020", "lock_0025", "lock_0050", "lock_008", "lock_0100", "lock_015"):
+        assert f'"{dead_name}"' not in src and f"'{dead_name}'" not in src, f"Tier mati masih ada: {dead_name}"
+
+
+def test_p12d_guard_no_silent_except_exception_pass_in_token_manager_and_sheet_logger():
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    for fname in ("token_manager.py", "sheet_logger.py"):
+        src = (root / fname).read_text(encoding="utf-8")
+        tree = ast.parse(src, filename=fname)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ExceptHandler):
+                is_bare_or_exception = (
+                    node.type is None
+                    or (isinstance(node.type, ast.Name) and node.type.id == "Exception")
+                )
+                is_only_pass = len(node.body) == 1 and isinstance(node.body[0], ast.Pass)
+                assert not (is_bare_or_exception and is_only_pass), (
+                    f"{fname}:{node.lineno} masih memiliki pola 'except Exception: pass'"
+                )
+
+
+
 
 
 

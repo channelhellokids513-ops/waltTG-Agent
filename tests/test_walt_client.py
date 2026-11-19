@@ -87,3 +87,56 @@ def test_p0_4_call_429_respects_retry_after_capped_at_20s_and_list_tools_retries
     tools = client.list_tools()
     assert len(tools) == 1
     assert sleeps == [20.0]
+
+
+def test_p12a_call_mcp_is_error_raises_runtime_error(monkeypatch):
+    client = _make_client()
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {
+            "isError": True,
+            "content": [{"type": "text", "text": "order rejected by exchange"}],
+        },
+    }
+    monkeypatch.setattr(
+        client.client,
+        "post",
+        lambda url, json=None, headers=None: httpx.Response(200, json=body, request=httpx.Request("POST", url)),
+    )
+    with pytest.raises(RuntimeError) as exc_info:
+        client._call("perps_execute")
+    assert "order rejected by exchange" in str(exc_info.value)
+
+
+def test_p12a_call_non_json_content_raises_runtime_error_max_200_chars(monkeypatch):
+    client = _make_client()
+    long_non_json = "NONJSON_" + ("A" * 350) + "_TAIL_MARKER"
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {"content": [{"type": "text", "text": long_non_json}]},
+    }
+    monkeypatch.setattr(
+        client.client,
+        "post",
+        lambda url, json=None, headers=None: httpx.Response(200, json=body, request=httpx.Request("POST", url)),
+    )
+    with pytest.raises(RuntimeError) as exc_info:
+        client._call("perps_balance")
+    err_msg = str(exc_info.value)
+    assert "NONJSON_" in err_msg
+    assert "_TAIL_MARKER" not in err_msg
+    assert ("A" * 201) not in err_msg
+
+
+def test_p12a_call_result_null_returns_none(monkeypatch):
+    client = _make_client()
+    body = {"jsonrpc": "2.0", "id": 1, "result": None}
+    monkeypatch.setattr(
+        client.client,
+        "post",
+        lambda url, json=None, headers=None: httpx.Response(200, json=body, request=httpx.Request("POST", url)),
+    )
+    assert client._call("perps_list_positions") is None
+
