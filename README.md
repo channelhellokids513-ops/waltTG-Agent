@@ -102,12 +102,35 @@ Mengatasi limit bursa Walt pada aset berharga tinggi (seperti `NVDA` atau `MSTR`
 
 ## ⏰ Jadwal Eksekusi Sistem
 
-| Komponen / Workflow | Jadwal Cloud Scheduler (WIB) | Jadwal Cron GitHub (UTC) | Deskripsi |
+Seluruh 4 workflow trading dipicu **eksklusif oleh Google Cloud Scheduler** (`workflow_dispatch`) untuk menghindari keterlambatan cron GitHub Actions yang bisa mencapai 7–8 jam. Verifikasi status job Cloud Scheduler sebelum/sesudah perubahan:
+
+```bash
+gcloud scheduler jobs list --location=asia-southeast2
+```
+
+| Komponen / Workflow | Trigger Resmi | Timeout / Guard | Deskripsi |
 |---|---|---|---|
-| [`daily-scan.yml`](.github/workflows/daily-scan.yml) | **07:17 & 19:17 WIB** (2x Sehari) | `17 0,12 * * *` | Master Scan seluruh kontrak, ranking peluang funding, riset Swarm AI mendalam (Qwen+Gemini P1-P7), **eksekusi instan order GO/HALF**, simpan database ke Google Sheet & notif Telegram. |
-| [`market-execute.yml`](.github/workflows/market-execute.yml) | **Dinamis 1h / 2h** (Calmed Adaptive + Gatekeeper) | `43 */2 * * *` | Eksekusi adaptif Saham US & Komoditas 24/7: **1 jam (Gear 2)** saat peluang funding melimpah ($\ge 3$ aset $\ge 0.5\%$/hari atau $\ge 2$ ekstrem $\ge 0.8\%$/hari), **2 jam (Gear 1)** saat normal/sepi, dan *fast-exit* (<2 detik) saat slot penuh (Gear 0). Dilengkapi *3-hour re-entry cooldown*. |
-| [`crypto-execute.yml`](.github/workflows/crypto-execute.yml) | **Dinamis 1h / 2h** (Calmed Adaptive + Gatekeeper) | `11 */2 * * *` | Eksekusi adaptif 10 Crypto Bluechip (`BTC`, `ETH`, `SOL`, dll) dengan sistem **Calmed Adaptive (1h / 2h)** dan *3-hour re-entry cooldown* agar posisi cukup lama memanen *funding*. |
-| [`risk-monitor.yml`](.github/workflows/risk-monitor.yml) | **Dinamis 5–10 Menit** (6x–12x/Jam + Smart Idle) | `*/10 * * * *` | Pengawas risiko adaptif: otomatis *fast-exit* (<2 detik) saat 0 posisi; meningkat hingga **12x/jam (~tiap 5 menit)** jika ada $\ge 3$ posisi aktif, posisi kategori `HALF`, atau harga mendekati TP ($\ge +0.70\%$) / SL ($\le -1.00\%$); dan stabil di **10 menit** untuk posisi `GO` tenang. |
+| [`daily-scan.yml`](.github/workflows/daily-scan.yml) | **Cloud Scheduler (`workflow_dispatch`)** — 07:17 & 19:17 WIB | `15m` (`JOB_TIMEOUT_MIN=15`) | Master Scan seluruh kontrak, ranking peluang funding, riset Swarm AI mendalam (Qwen+Gemini P1–P7), eksekusi order GO/HALF, simpan database ke Google Sheet & notif Telegram. |
+| [`market-execute.yml`](.github/workflows/market-execute.yml) | **Cloud Scheduler (`workflow_dispatch`)** — Tiap 2 jam (menit 43) | `15m` (`JOB_TIMEOUT_MIN=15`) | Eksekusi adaptif Saham US & Komoditas 24/7: **1 jam (Gear 2)** saat peluang funding melimpah ($\ge 3$ aset $\ge 0.5\%$/hari atau $\ge 2$ ekstrem $\ge 0.8\%$/hari), **2 jam (Gear 1)** saat normal/sepi, dan *fast-exit* saat slot penuh (Gear 0). Dilengkapi *3-hour re-entry cooldown*. |
+| [`crypto-execute.yml`](.github/workflows/crypto-execute.yml) | **Cloud Scheduler (`workflow_dispatch`)** — Tiap 2 jam (menit 11) | `15m` (`JOB_TIMEOUT_MIN=15`) | Eksekusi adaptif 10 Crypto Bluechip (`BTC`, `ETH`, `SOL`, dll) dengan sistem **Calmed Adaptive (1h / 2h)** dan *3-hour re-entry cooldown*. |
+| [`risk-monitor.yml`](.github/workflows/risk-monitor.yml) | **Cloud Scheduler (`workflow_dispatch`)** — Tiap 10 menit | `20m` (`JOB_TIMEOUT_MIN=20`, guard sisa `< 6m`) | Pengawas risiko adaptif (5–10 menit + *Smart Fast-Exit Idle*). Guard waktu otomatis melewati *sub-cycle* & *adaptive execute* jika sisa waktu job `< 6 menit` agar order tidak terpotong sebelum TP/SL terpasang. |
+| [`watchdog.yml`](.github/workflows/watchdog.yml) | **GitHub Cron (`0 * * * *`)** + `workflow_dispatch` | `3m` (`walt-watchdog`) | Pengaman pengganti cron: mengecek apakah `Walt Risk Monitor` sukses dalam 30 menit terakhir. Jika tidak, mengirim alert Telegram dan memicu 1x `workflow_dispatch` fallback (tanpa akses Walt API). |
+| [`tests.yml`](.github/workflows/tests.yml) | **Push / PR ke `main`** | `5m` (`walt-tests`) | CI otomatis menjalankan `pytest -q` dan validasi sintaks seluruh file `.github/workflows/*.yml` tanpa secrets. |
+
+---
+
+## 🔒 Kebijakan Privasi Log (Repo Publik) & Alur Konfigurasi Strategi
+
+### Kebijakan Log & State di Repo Publik
+- **`LOG_REDACT=true` di Actions:** Seluruh angka saldo, ekuitas, margin, PnL, `order_id`, dan email disamarkan (`***`) pada *stdout* log publik, sementara notifikasi **Telegram** dan **Google Sheets** tetap menerima angka lengkap.
+- **Tanpa Artifact Publik & Ringkasan Aman:** Langkah *Upload Logs Artifact* dihapus; *Step Summary* hanya menampilkan status job, jumlah aksi/eksekusi, *cadence mode*, dan *gear*.
+- **State Cache Tahan Error (`actions/cache/restore@v4` + `save@v4` `if: always()`):** `logs/market_regime.json` (cooldown 3 jam) dan `logs/open_snapshot.json` tetap tersimpan meski job gagal.
+- **Tanpa Hardcode Sheet ID:** `GOOGLE_SHEET_ID` dibaca eksklusif dari GitHub Secrets/Variables (`vars.GOOGLE_SHEET_ID || secrets.GOOGLE_SHEET_ID`).
+
+### Alur Sinkronisasi Strategi (Telegram ↔ GitHub Actions)
+- Perubahan strategi lewat Bot Telegram (`/set_strategy` / `/reset_strategy`) divalidasi terhadap batas aman `STRATEGY_PARAM_SPECS`, disimpan lokal di `logs/strategy_config.json`, dan langsung disinkronkan via `GH_PAT` ke **GitHub Repository Variable `STRATEGY_CONFIG_JSON`**.
+- Setiap workflow GitHub Actions meneruskan `STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}` ke `walt_bot.py`. Jika parsing gagal atau ada nilai di luar batas aman, bot mencatat *warning* dan *fallback* otomatis ke `DEFAULT_STRATEGY_CONFIG`.
+- Profil pribadi End User (`logs/user_strategies.json`) dan data auth (`logs/telegram_auth.json`) **tidak pernah** disinkronkan ke variable atau sheet publik.
 
 ---
 

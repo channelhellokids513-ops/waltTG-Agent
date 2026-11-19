@@ -126,10 +126,17 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
      - **Gear 1 (Konservatif 2 Jam):** Aktif pada kondisi normal/sepi lainnya agar posisi berkesempatan memanen funding tanpa *over-trading*.
      - **Gear 0 (Smart Idle Gatekeeper):** Langsung *fast-exit* dalam <2 detik tanpa memanggil AI jika slot posisi sudah penuh.
    - **3-Hour Re-Entry Cooldown & Dynamic Slot Elasticity:** Aset yang baru ditutup dalam 3 jam terakhir otomatis dilewati. Kuota slot elastis 5–15 slot berdasarkan Total Ekuitas dan pembobotan margin berbasis keyakinan (hard ceiling 15% ekuitas).
-4. **Crypto Execute (`crypto-execute.yml` — Dinamis 1 Jam / 2 Jam dengan Calmed Adaptive Engine):**
+4. **Crypto Execute (`crypto-execute.yml` — Dinamis 1 Jam / 2 Jam via Cloud Scheduler):**
    - Modul mandiri untuk capture yield 10 crypto bluechip (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `AVAX`, `SUI`, `LINK`, `NEAR`, `AAVE`) dengan mekanisme **Calmed Adaptive (1h / 2h)** dan **3-Hour Re-Entry Cooldown** yang identik.
    - Strict altcoin exclusion: token spekulatif dan memecoin di-blacklist total.
    - Asymmetric R:R TP +2.0% & SL 1.5% untuk memberi ruang napas *funding carry*.
+5. **Watchdog & CI Safety (`watchdog.yml` & `tests.yml`):**
+   - **Cloud Scheduler Satu-Satunya Trigger Trading:** Blok `schedule:` dihapus dari 4 workflow trading agar tidak terjadi eksekusi dobel/terlambat. Verifikasi job Cloud Scheduler dilakukan dengan `gcloud scheduler jobs list --location=asia-southeast2`.
+   - **Watchdog (`watchdog.yml`, `0 * * * *`, timeout `3m`):** Mengecek apakah `Walt Risk Monitor` sukses dalam 30 menit terakhir; jika tidak, mengirim alert Telegram dan memicu 1x `workflow_dispatch` fallback (tanpa mengakses Walt API).
+   - **Timeout & Guard 6 Menit:** `risk-monitor` memakai `timeout-minutes: 20` (lainnya `15`), dengan guard di `walt_bot.py` yang melewati *sub-cycle* & *adaptive execute* jika sisa waktu `< 6 menit` sebelum `JOB_TIMEOUT_MIN`.
+   - **Cache Tahan Error & Privasi Repo Publik:** Memakai pasangan `actions/cache/restore@v4` + `save@v4` (`if: always()`), `LOG_REDACT=true` di Actions (tanpa *Upload Logs Artifact* dan tanpa hardcode `GOOGLE_SHEET_ID`), serta *Step Summary* ringkas tanpa angka saldo/margin/`order_id`.
+   - **Sinkronisasi Konfigurasi Strategi Bersama:** Telegram `/set_strategy` menyinkronkan parameter aman (tervalidasi `STRATEGY_PARAM_SPECS`) ke GitHub Repository Variable `STRATEGY_CONFIG_JSON` untuk dibaca `walt_bot.py` pada run berikutnya (tanpa mengekspor `user_strategies.json` / ID Telegram).
+   - **CI Test (`tests.yml`):** Menjalankan `pytest -q` dan validasi sintaks YAML pada setiap push/PR ke `main` di concurrency terpisah (`walt-tests`).
 
 ### 3.4 Langkah Penerapan Segera (Fase 1 Action Plan)
 - [x] Pastikan GitHub Secret terkonfigurasi lengkap di repository (`WALT_CLIENT_ID`, `WALT_REFRESH_TOKEN`, `DASHSCOPE_API_KEY`, `DASHSCOPE_API_GEMINI_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GOOGLE_SHEET_WEBHOOK_URL`, `GH_PAT`).
