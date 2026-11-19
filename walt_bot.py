@@ -1767,6 +1767,34 @@ def _maybe_run_adaptive_executions(
     return triggered_actions
 
 
+JOB_START_MONO = time.monotonic()
+JOB_TIME_GUARD_MIN = 6.0  # Sisakan minimal 6 menit agar order + TP/SL tidak pernah terpotong timeout
+
+
+def get_job_remaining_minutes(
+    start_mono: Optional[float] = None,
+    now_mono: Optional[float] = None,
+) -> float:
+    """Hitung sisa waktu job (menit) terhadap batas env JOB_TIMEOUT_MIN (default 20 menit)."""
+    try:
+        timeout_min = float(os.getenv("JOB_TIMEOUT_MIN", "20"))
+    except ValueError:
+        timeout_min = 20.0
+    s = JOB_START_MONO if start_mono is None else start_mono
+    n = time.monotonic() if now_mono is None else now_mono
+    elapsed_min = max(0.0, (n - s) / 60.0)
+    return timeout_min - elapsed_min
+
+
+def has_enough_job_time(
+    min_remaining_min: float = JOB_TIME_GUARD_MIN,
+    start_mono: Optional[float] = None,
+    now_mono: Optional[float] = None,
+) -> bool:
+    """True jika sisa waktu job >= min_remaining_min (default 6 menit)."""
+    return get_job_remaining_minutes(start_mono=start_mono, now_mono=now_mono) >= min_remaining_min
+
+
 def _has_recent_tp_close(actions: list[dict]) -> bool:
     """True hanya jika ada penutupan posisi riil (CLOSE / EXCHANGE_CLOSE_DETECTED) karena TP/Trailing."""
     for a in actions:
@@ -1809,14 +1837,17 @@ def risk_monitor_run(
 
     if checked_count == 0:
         if enable_adaptive_execute:
-            adaptive_acts = _maybe_run_adaptive_executions(
-                client,
-                contracts_by_id,
-                active_positions_count=0,
-                recent_tp_closed=recent_tp_closed,
-                rng=rng,
-            )
-            actions.extend(adaptive_acts)
+            if not has_enough_job_time():
+                log.warning("skip: waktu job hampir habis (adaptive execute saat idle dilewati)")
+            else:
+                adaptive_acts = _maybe_run_adaptive_executions(
+                    client,
+                    contracts_by_id,
+                    active_positions_count=0,
+                    recent_tp_closed=recent_tp_closed,
+                    rng=rng,
+                )
+                actions.extend(adaptive_acts)
         log.info("💤 [SMART IDLE] 0 posisi aktif. Semua order aman/kas cair. Masuk mode tidur (fast-exit).")
         return {
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -1840,36 +1871,39 @@ def risk_monitor_run(
     cadence_mode = "normal_10m"
 
     if should_subcycle and enable_dynamic_subcycle:
-        cadence_mode = "dynamic_5m"
-        log.info(
-            f"⚡ [DYNAMIC MONITOR] Mode 5-Menit Aktif ({cadence_reason}) → "
-            f"tunggu {delay_sec}s (~{delay_sec/60:.1f} menit) untuk evaluasi sub-cycle ke-2..."
-        )
-        sleep_fn(delay_sec)
-        remaining_positions, current_snapshot, actions_2, checked_2 = _run_single_monitor_pass(
-            client, contracts_by_id, snapshot_path=snapshot_path, cycle_label="5m-SubCycle"
-        )
-        actions.extend(actions_2)
-        cycles_run = 2
-        log.info(
-            f"✅ [DYNAMIC MONITOR] Sub-cycle 5 menit selesai (checked={checked_2}, new_actions={len(actions_2)})."
-        )
+        if not has_enough_job_time():
+            log.warning("skip: waktu job hampir habis (sub-cycle 5 menit dilewati)")
+        else:
+            cadence_mode = "dynamic_5m"
+            log.info(
+                f"⚡ [DYNAMIC MONITOR] Mode 5-Menit Aktif ({cadence_reason}) → "
+                f"tunggu {delay_sec}s (~{delay_sec/60:.1f} menit) untuk evaluasi sub-cycle ke-2..."
+            )
+            sleep_fn(delay_sec)
+            remaining_positions, current_snapshot, actions_2, checked_2 = _run_single_monitor_pass(
+                client, contracts_by_id, snapshot_path=snapshot_path, cycle_label="5m-SubCycle"
+            )
+            actions.extend(actions_2)
+            cycles_run = 2
+            log.info(
+                f"✅ [DYNAMIC MONITOR] Sub-cycle 5 menit selesai (checked={checked_2}, new_actions={len(actions_2)})."
+            )
     else:
         log.info(f"⏱️ [DYNAMIC MONITOR] Interval normal 10 menit ({cadence_reason}).")
 
     if enable_adaptive_execute:
-        recent_tp_closed = any(
-            "tp" in str(a.get("detail", "")).lower() or "trailing" in str(a.get("detail", "")).lower()
-            for a in actions
-        )
-        adaptive_acts = _maybe_run_adaptive_executions(
-            client,
-            contracts_by_id,
-            active_positions_count=len(remaining_positions),
-            recent_tp_closed=recent_tp_closed,
-            rng=rng,
-        )
-        actions.extend(adaptive_acts)
+        if not has_enough_job_time():
+            log.warning("skip: waktu job hampir habis (adaptive execute dilewati)")
+        else:
+            recent_tp_closed = _has_recent_tp_close(actions)
+            adaptive_acts = _maybe_run_adaptive_executions(
+                client,
+                contracts_by_id,
+                active_positions_count=len(remaining_positions),
+                recent_tp_closed=recent_tp_closed,
+                rng=rng,
+            )
+            actions.extend(adaptive_acts)
 
     return {
         "ts": datetime.now(timezone.utc).isoformat(),
