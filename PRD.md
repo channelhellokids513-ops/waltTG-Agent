@@ -112,25 +112,24 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
 2. **Risk Monitor (`risk-monitor.yml` — Dinamis 5–10 Menit / 6x–12x per Jam via `walt-risk-monitor` Scheduler):**
    - **Opsi A Smart Fast-Exit Idle:** Jika 0 posisi aktif dan tidak ada perubahan snapshot penutupan, proses langsung selesai (*fast-exit*) dalam <2 detik sehingga hemat kuota runner hingga 95%.
    - **Dynamic Adaptive Cadence (5 Menit vs 10 Menit):**
-     - **Mode Intensif ~5 Menit (hingga 12x/jam):** Otomatis aktif dengan *random jitter* (240–290 detik) apabila: (a) terdapat $\ge 3$ posisi aktif, (b) terdapat posisi dengan kategori keputusan `HALF`, atau (c) harga sudah mendekati zona TP/Trailing ($\ge +0.15\%$) maupun mendekati SL ($\le -0.50\%$).
-     - **Mode Normal 10 Menit (6x/jam + Random 5-Min Spot Check):** Untuk posisi kategori `GO` yang berjumlah $< 3$ dan masih jauh dari TP/SL, monitor berjalan tiap 10 menit namun sesekali (probabilitas 35% random) tetap melakukan pengecekan 5 menit.
-   - **Deteksi Penutupan Posisi (`Closed_Positions`):** Membandingkan posisi aktif dengan `logs/open_snapshot.json` (dipersist via `actions/cache`) dan mencatat setiap penutupan posisi ke sheet `Closed_Positions` serta `logs/closed_history.csv`.
+     - **Mode Intensif ~5 Menit (hingga 12x/jam):** Otomatis aktif dengan *random jitter* (240–290 detik) apabila: (a) terdapat $\ge 3$ posisi aktif, (b) terdapat posisi dengan kategori keputusan `HALF`, atau (c) harga mendekati zona TP/Trailing ($\ge +0.70\%$ / jarak TP $\le 0.35\%$) maupun mendekati SL ($\le -1.00\%$ / jarak SL $\le 0.50\%$).
+     - **Mode Normal 10 Menit (6x/jam):** Untuk posisi kategori `GO` yang berjumlah $< 3$ dan masih tenang jauh dari TP/SL, monitor berjalan stabil tiap 10 menit tanpa *spot check* acak yang boros.
+   - **Deteksi Penutupan Posisi (`Closed_Positions`):** Membandingkan posisi aktif dengan `logs/open_snapshot.json` (dipersist via `actions/cache`), mencatat setiap penutupan posisi ke sheet `Closed_Positions` serta `logs/closed_history.csv`, dan mengaktifkan **3-Hour Re-Entry Cooldown** untuk aset yang baru ditutup.
    - Jika terdapat posisi aktif, bot memantau intensif tanpa jeda dan menerapkan **Proteksi Risiko Terpadu**:
-     - **Lapis 1:** Wick-Catcher Baseline TP (+0.55% ETF, +0.60% Crypto, +0.65% Komoditas, +0.75% Saham + Windfall $\ge 0.45\%$) & **Uniform SL 1.0%** di semua kelas aset, dilengkapi guard validasi sisi harga dan migrasi penutupan otomatis bagi posisi lama yang melampaui rugi 1.0%.
+     - **Lapis 1:** Asymmetric R:R Baseline TP (+2.0% ETF & Crypto, +2.5% Komoditas & Saham + Windfall $2.5\times$ di rentang $1.5\% \le \text{windfall} < \text{TP}$) & **Uniform SL 1.5%** di semua kelas aset, dilengkapi guard validasi sisi harga dan migrasi penutupan otomatis bagi posisi lama yang melampaui rugi 1.5%.
      - **Lapis 2:** Funding Integrity dengan **Hysteresis 0.1%/hari** (*emergency close* jika funding berlawanan arah $\ge 0.1\%$/hari, atau geser SL ke breakeven jika $< 0.1\%$/hari).
-     - **Lapis 3:** *Deprecated* (digantikan oleh SL baseline 1.0%).
-     - **Lapis 4:** **Opsi 3 Hybrid Ultimate (Zero-Risk + Pinch Lock + Instant Market-TP):** Profit $\ge +0.25\% \to$ lock SL di `Entry + 0.10%`; Profit $\ge +0.35\% \to$ lock SL di `Entry + 0.22%` & Pinch TP ke `Entry + 0.50%`; Profit $\ge +0.50\% \to$ **Instant Market-TP Close**.
-3. **Market Execute (`market-execute.yml` — Dinamis 30 Menit / 1 Jam / 2 Jam dengan 3-Gear Adaptive Engine):**
-   - Berjalan 24/7 memanfaatkan likuiditas perpetual synthetic Walt dengan **3-Gear Adaptive Execution (`evaluate_execution_gear`)**:
-     - **Gear 3 (Turbo 30 Menit):** Aktif jika terdapat $\ge 4$ peluang funding $\ge 0.5\%$/hari, $\ge 2$ peluang ekstrem $\ge 0.8\%$/hari, atau baru saja ada posisi yang tertutup TP sementara peluang $\ge 0.6\%$/hari tersedia.
-     - **Gear 2 (Normal Aktif 1 Jam + Random Boost 30m 30%):** Aktif jika terdapat 2–3 peluang funding $\ge 0.5\%$/hari.
-     - **Gear 1 (Konservatif 2 Jam):** Aktif jika peluang funding sedang sepi ($\le 1$ aset).
+     - **Lapis 3:** *Deprecated* (digantikan oleh SL baseline 1.5%).
+     - **Lapis 4:** **True Zero-Risk Trailing Tiers:** Profit $\ge +0.80\% \to$ lock SL di `Entry + 0.35%` (`lock_0035`); Profit $\ge +1.40\% \to$ lock SL di `Entry + 0.85%` (`lock_0085`); Profit $\ge +2.00\% \to$ Trailing Stop dinamis `0.60%`.
+3. **Market Execute (`market-execute.yml` — Dinamis 1 Jam / 2 Jam dengan Calmed Adaptive Engine):**
+   - Berjalan 24/7 memanfaatkan likuiditas perpetual synthetic Walt dengan **Calmed Adaptive Execution (`evaluate_execution_gear`)**:
+     - **Gear 2 (Aktif 1 Jam):** Aktif jika terdapat $\ge 3$ peluang funding $\ge 0.5\%$/hari atau $\ge 2$ peluang ekstrem $\ge 0.8\%$/hari.
+     - **Gear 1 (Konservatif 2 Jam):** Aktif pada kondisi normal/sepi lainnya agar posisi berkesempatan memanen funding tanpa *over-trading*.
      - **Gear 0 (Smart Idle Gatekeeper):** Langsung *fast-exit* dalam <2 detik tanpa memanggil AI jika slot posisi sudah penuh.
-   - **Dynamic Slot Elasticity & Conviction Sizing:** Kuota slot elastis 5–15 slot berdasarkan Total Ekuitas dan pembobotan margin berbasis keyakinan (hard ceiling 15% ekuitas).
-4. **Crypto Execute (`crypto-execute.yml` — Dinamis 30 Menit / 1 Jam / 2 Jam dengan 3-Gear Adaptive Engine):**
-   - Modul mandiri untuk capture yield 10 crypto bluechip (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `AVAX`, `SUI`, `LINK`, `NEAR`, `AAVE`) dengan mekanisme **3-Gear Adaptive (30m / 1h / 2h)** yang identik.
+   - **3-Hour Re-Entry Cooldown & Dynamic Slot Elasticity:** Aset yang baru ditutup dalam 3 jam terakhir otomatis dilewati. Kuota slot elastis 5–15 slot berdasarkan Total Ekuitas dan pembobotan margin berbasis keyakinan (hard ceiling 15% ekuitas).
+4. **Crypto Execute (`crypto-execute.yml` — Dinamis 1 Jam / 2 Jam dengan Calmed Adaptive Engine):**
+   - Modul mandiri untuk capture yield 10 crypto bluechip (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `AVAX`, `SUI`, `LINK`, `NEAR`, `AAVE`) dengan mekanisme **Calmed Adaptive (1h / 2h)** dan **3-Hour Re-Entry Cooldown** yang identik.
    - Strict altcoin exclusion: token spekulatif dan memecoin di-blacklist total.
-   - Wick-Catcher TP +0.60% & SL 1.0% (turnover modal cepat).
+   - Asymmetric R:R TP +2.0% & SL 1.5% untuk memberi ruang napas *funding carry*.
 
 ### 3.4 Langkah Penerapan Segera (Fase 1 Action Plan)
 - [x] Pastikan GitHub Secret terkonfigurasi lengkap di repository (`WALT_CLIENT_ID`, `WALT_REFRESH_TOKEN`, `DASHSCOPE_API_KEY`, `DASHSCOPE_API_GEMINI_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GOOGLE_SHEET_WEBHOOK_URL`, `GH_PAT`).

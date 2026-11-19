@@ -66,48 +66,48 @@ def _make_pos(
 
 
 # -----------------------------------------------------------------------------
-# 1. compute_baseline_tpsl: SL 1% di semua aset, TP 1.0%/1.2%, Windfall TP
+# 1. compute_baseline_tpsl: SL 1.5% di semua aset, TP 2.0%/2.5%, Windfall TP
 # -----------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
     "asset,expected_tp_pct",
     [
-        ("SPY", 0.0055),
-        ("US100", 0.0055),
-        ("AAPL", 0.0055),
-        ("BTC", 0.0060),
-        ("SOL", 0.0060),
-        ("XAU", 0.0065),
-        ("XAG", 0.0065),
-        ("NVDA", 0.0075),
-        ("NBIS", 0.0075),
-        (None, 0.0075),
+        ("SPY", 0.020),
+        ("US100", 0.020),
+        ("AAPL", 0.020),
+        ("BTC", 0.020),
+        ("SOL", 0.020),
+        ("XAU", 0.025),
+        ("XAG", 0.025),
+        ("NVDA", 0.025),
+        ("NBIS", 0.025),
+        (None, 0.025),
     ],
 )
-def test_baseline_tpsl_sl_is_always_1_percent_and_tp_wick_catcher(asset, expected_tp_pct):
+def test_baseline_tpsl_sl_is_always_1_5_percent_and_asymmetric_tp(asset, expected_tp_pct):
     tp_pct, sl_pct = get_asset_baseline_tpsl_pct(asset)
-    assert sl_pct == pytest.approx(0.010)
+    assert sl_pct == pytest.approx(0.015)
     assert tp_pct == pytest.approx(expected_tp_pct)
 
     entry = 100.0
     tp_long, sl_long = compute_baseline_tpsl("long", entry, asset=asset, funding_daily=0.0)
-    assert sl_long == pytest.approx(99.0)
+    assert sl_long == pytest.approx(98.5)
     assert tp_long == pytest.approx(round(entry * (1 + expected_tp_pct), 4))
 
     tp_short, sl_short = compute_baseline_tpsl("short", entry, asset=asset, funding_daily=0.0)
-    assert sl_short == pytest.approx(101.0)
+    assert sl_short == pytest.approx(101.5)
     assert tp_short == pytest.approx(round(entry * (1 - expected_tp_pct), 4))
 
 
-def test_windfall_tp_advances_tp_when_15x_funding_between_045_and_baseline():
-    # NVDA baseline TP = 0.75% (0.0075). Funding 0.4%/hari -> windfall_tp = 1.5 * 0.4% = 0.60% (0.0060) < 0.0075
-    tp_long, sl_long = compute_baseline_tpsl("long", 100.0, asset="NVDA", funding_daily=-0.004)
-    assert tp_long == pytest.approx(100.6)
-    assert sl_long == pytest.approx(99.0)
+def test_windfall_tp_advances_tp_when_25x_funding_between_15_and_baseline():
+    # NVDA baseline TP = 2.5% (0.025). Funding 0.7%/hari -> windfall_tp = 2.5 * 0.7% = 1.75% (0.0175) < 0.025
+    tp_long, sl_long = compute_baseline_tpsl("long", 100.0, asset="NVDA", funding_daily=-0.007)
+    assert tp_long == pytest.approx(101.75)
+    assert sl_long == pytest.approx(98.5)
 
-    tp_short, sl_short = compute_baseline_tpsl("short", 100.0, asset="NVDA", funding_daily=0.004)
-    assert tp_short == pytest.approx(99.4)
-    assert sl_short == pytest.approx(101.0)
+    tp_short, sl_short = compute_baseline_tpsl("short", 100.0, asset="NVDA", funding_daily=0.007)
+    assert tp_short == pytest.approx(98.25)
+    assert sl_short == pytest.approx(101.5)
 
 
 # -----------------------------------------------------------------------------
@@ -133,46 +133,46 @@ def test_sl_is_improvement():
 # 3. Guard sisi salah & migrasi close (Poin 8)
 # -----------------------------------------------------------------------------
 
-def test_guard_migrates_old_sl_and_closes_when_sl_1pct_breached_long(monkeypatch):
+def test_guard_migrates_old_sl_and_closes_when_sl_15pct_breached_long(monkeypatch):
     monkeypatch.setattr(walt_bot, "_record_position_close", lambda *a, **kw: None)
     client = _make_mock_client()
 
-    # Posisi lama LONG dengan SL 3% (97.0), harga sekarang 98.5 (rugi 1.5% > 1%)
-    pos = _make_pos(side="long", entry=100.0, current=98.5, tp=101.2, sl=97.0)
+    # Posisi lama LONG dengan SL 3% (97.0), harga sekarang 98.2 (rugi 1.8% > 1.5%)
+    pos = _make_pos(side="long", entry=100.0, current=98.2, tp=102.5, sl=97.0)
     res = evaluate_and_apply_position_risk(client, pos, current_funding_daily=-0.006)
 
     assert res is not None
     assert res["action"] == "CLOSE"
-    assert res["detail"] == "SL 1% breached (migrasi)"
+    assert res["detail"] == "SL 1.5% breached (migrasi)"
     client.preview_close.assert_called_once_with(pos.contract_id)
     client.preview_auto_close.assert_not_called()
 
 
-def test_guard_closes_when_sl_1pct_breached_short(monkeypatch):
+def test_guard_closes_when_sl_15pct_breached_short(monkeypatch):
     monkeypatch.setattr(walt_bot, "_record_position_close", lambda *a, **kw: None)
     client = _make_mock_client()
 
-    # Posisi lama SHORT dengan SL 3% (103.0), harga sekarang 101.4 (rugi 1.4% > 1%)
-    pos = _make_pos(side="short", entry=100.0, current=101.4, tp=98.8, sl=103.0)
+    # Posisi lama SHORT dengan SL 3% (103.0), harga sekarang 101.7 (rugi 1.7% > 1.5%)
+    pos = _make_pos(side="short", entry=100.0, current=101.7, tp=97.5, sl=103.0)
     res = evaluate_and_apply_position_risk(client, pos, current_funding_daily=0.006)
 
     assert res is not None
     assert res["action"] == "CLOSE"
-    assert res["detail"] == "SL 1% breached (migrasi)"
+    assert res["detail"] == "SL 1.5% breached (migrasi)"
     client.preview_close.assert_called_once_with(pos.contract_id)
     client.preview_auto_close.assert_not_called()
 
 
-def test_guard_tightens_old_sl_to_1pct_when_loss_under_1pct():
+def test_guard_tightens_old_sl_to_15pct_when_loss_under_15pct():
     client = _make_mock_client()
 
-    # Posisi lama LONG dengan SL 2.5% (97.5), harga sekarang 99.4 (rugi 0.6% < 1%)
-    pos = _make_pos(side="long", entry=100.0, current=99.4, tp=101.2, sl=97.5)
+    # Posisi lama LONG dengan SL 2.5% (97.5), harga sekarang 99.1 (rugi 0.9% < 1.5%)
+    pos = _make_pos(side="long", entry=100.0, current=99.1, tp=102.5, sl=97.5)
     res = evaluate_and_apply_position_risk(client, pos, current_funding_daily=-0.006)
 
     assert res is not None
     assert res["action"] == "UPDATE_AUTO_CLOSE"
-    assert res["sl"] == pytest.approx(99.0)
+    assert res["sl"] == pytest.approx(98.5)
     assert res["sl"] < pos.current_price
     client.preview_close.assert_not_called()
 
@@ -181,7 +181,7 @@ def test_guard_closes_when_tp_breached(monkeypatch):
     monkeypatch.setattr(walt_bot, "_record_position_close", lambda *a, **kw: None)
     client = _make_mock_client()
 
-    pos = _make_pos(side="long", entry=100.0, current=101.5, tp=101.2, sl=99.0)
+    pos = _make_pos(side="long", entry=100.0, current=102.6, tp=102.5, sl=98.5)
     res = evaluate_and_apply_position_risk(client, pos, current_funding_daily=-0.006)
 
     assert res is not None
@@ -223,82 +223,79 @@ def test_funding_flip_hysteresis_closes_only_at_or_above_threshold(monkeypatch):
 
 
 # -----------------------------------------------------------------------------
-# 5. Trailing tiers baru, Pinch Lock, & Instant Market-TP (Opsi 3 Hybrid)
+# 5. Trailing tiers True Zero-Risk (+0.35% / +0.85% / Trailing 0.60%)
 # -----------------------------------------------------------------------------
 
-def test_new_trailing_tiers_pinch_lock_and_instant_market_tp(monkeypatch):
-    monkeypatch.setattr(walt_bot, "_record_position_close", lambda *a, **kw: None)
+def test_true_zero_risk_trailing_tiers():
     assert TRAILING_TIERS == [
-        (0.0025, "lock_0010"),
-        (0.0035, "lock_0022"),
+        (0.0080, "lock_0035"),
+        (0.0140, "lock_0085"),
+        (0.0200, 0.0060),
     ]
 
-    # Tier 1: profit +0.28% (>= 0.25%) pada LONG -> SL di entry +0.10% (100.10)
+    # Tier 1: profit +0.85% (>= 0.80%) pada LONG -> SL di entry +0.35% (100.35 — surplus bersih setelah fee 0.18%)
     client1 = _make_mock_client()
-    pos_t1_long = _make_pos(side="long", entry=100.0, current=100.28, tp=100.75, sl=99.0)
+    pos_t1_long = _make_pos(side="long", entry=100.0, current=100.85, tp=102.5, sl=98.5)
     res1 = evaluate_and_apply_position_risk(client1, pos_t1_long, current_funding_daily=-0.006)
     assert res1 is not None
     assert res1["action"] == "UPDATE_AUTO_CLOSE"
-    assert res1["sl"] == pytest.approx(100.10)
+    assert res1["sl"] == pytest.approx(100.35)
 
-    # Tier 2 Pinch Lock: profit +0.40% (>= 0.35% & < 0.50%) pada LONG -> SL di 100.22 & TP dirapatkan ke 100.50
+    # Tier 2: profit +1.50% (>= 1.40%) pada LONG -> SL di entry +0.85% (100.85)
     client2 = _make_mock_client()
-    pos_t2_long = _make_pos(side="long", entry=100.0, current=100.40, tp=100.75, sl=100.10)
-    res2 = evaluate_and_apply_position_risk(client2, pos_t2_long, current_funding_daily=-0.006)
+    pos_t2_long = _make_pos(side="long", entry=100.0, current=101.50, tp=102.5, sl=100.35)
+    res2 = evaluate_and_apply_position_risk(client2, pos_t2_long, current_funding_daily=-0.005)
     assert res2 is not None
     assert res2["action"] == "UPDATE_AUTO_CLOSE"
-    assert res2["sl"] == pytest.approx(100.22)
-    assert res2["tp"] == pytest.approx(100.50)
+    assert res2["sl"] == pytest.approx(100.85)
 
-    # Tier 2 Pinch Lock pada SHORT: profit +0.40% (current=99.60) -> SL di 99.78 & TP dirapatkan ke 99.50
+    # Tier 2 pada SHORT: profit +1.50% (current=98.50) -> SL di entry -0.85% (99.15)
     client3 = _make_mock_client()
-    pos_t2_short = _make_pos(side="short", entry=100.0, current=99.60, tp=99.25, sl=101.0)
-    res3 = evaluate_and_apply_position_risk(client3, pos_t2_short, current_funding_daily=0.006)
+    pos_t2_short = _make_pos(side="short", entry=100.0, current=98.50, tp=97.5, sl=101.5)
+    res3 = evaluate_and_apply_position_risk(client3, pos_t2_short, current_funding_daily=0.005)
     assert res3 is not None
     assert res3["action"] == "UPDATE_AUTO_CLOSE"
-    assert res3["sl"] == pytest.approx(99.78)
-    assert res3["tp"] == pytest.approx(99.50)
+    assert res3["sl"] == pytest.approx(99.15)
 
-    # Tier 3 Instant Market-TP: profit +0.52% (>= 0.50%) tapi belum lewati TP bursa 100.75 -> langsung CLOSE!
-    client_itp = _make_mock_client()
-    pos_itp = _make_pos(side="long", entry=100.0, current=100.52, tp=100.75, sl=100.22)
-    res_itp = evaluate_and_apply_position_risk(client_itp, pos_itp, current_funding_daily=-0.006)
-    assert res_itp is not None
-    assert res_itp["action"] == "CLOSE"
-    assert res_itp["reason"] == "Instant Market-TP"
-    client_itp.preview_close.assert_called_once_with(pos_itp.contract_id)
+    # Tier 3 Trailing 0.60%: profit +2.10% (current=102.10) -> SL di 102.10 * (1 - 0.006) = 101.4874
+    client_t3 = _make_mock_client()
+    pos_t3 = _make_pos(side="long", entry=100.0, current=102.10, tp=102.5, sl=100.85)
+    res_t3 = evaluate_and_apply_position_risk(client_t3, pos_t3, current_funding_daily=-0.005)
+    assert res_t3 is not None
+    assert res_t3["action"] == "UPDATE_AUTO_CLOSE"
+    assert res_t3["sl"] == pytest.approx(101.4874)
 
     # apply_layer4_trailing wrapper
     client4 = _make_mock_client()
     apply_layer4_trailing(client4, pos_t1_long)
-    client4.preview_auto_close.assert_called_once_with(pos_t1_long.contract_id, sl=100.10)
+    client4.preview_auto_close.assert_called_once_with(pos_t1_long.contract_id, sl=100.35)
 
 
 # -----------------------------------------------------------------------------
-# 6. Tidak ada jalur kode yang menghasilkan SL lebih longgar dari 1% dari entry
+# 6. Tidak ada jalur kode yang menghasilkan SL lebih longgar dari 1.5% dari entry
 # -----------------------------------------------------------------------------
 
-def test_no_code_path_produces_sl_wider_than_1_percent():
+def test_no_code_path_produces_sl_wider_than_1_5_percent():
     client = _make_mock_client()
-    pos = _make_pos(side="long", entry=100.0, current=97.5, tp=101.2, sl=99.0)
+    pos = _make_pos(side="long", entry=100.0, current=97.5, tp=102.5, sl=98.5)
     # apply_layer3_volatility harus no-op (None)
     assert apply_layer3_volatility(client, pos) is None
     assert "deprecated" in (apply_layer3_volatility.__doc__ or "").lower()
 
-    for price in (99.1, 99.5, 99.9, 100.0, 100.2, 100.5, 100.7):
+    for price in (98.6, 99.1, 99.5, 100.0, 100.5, 101.0, 101.8):
         for funding in (-0.010, -0.005, -0.0005, 0.0, 0.0005):
             c = _make_mock_client()
-            p_long = _make_pos(side="long", entry=100.0, current=price, tp=101.2, sl=None)
+            p_long = _make_pos(side="long", entry=100.0, current=price, tp=102.5, sl=None)
             r_long = evaluate_and_apply_position_risk(c, p_long, current_funding_daily=funding)
             if r_long and r_long.get("action") == "UPDATE_AUTO_CLOSE" and r_long.get("sl") is not None:
-                assert r_long["sl"] >= 99.0
+                assert r_long["sl"] >= 98.5
                 assert r_long["sl"] < price
 
             c_s = _make_mock_client()
-            p_short = _make_pos(side="short", entry=100.0, current=price, tp=98.8, sl=None)
+            p_short = _make_pos(side="short", entry=100.0, current=price, tp=97.5, sl=None)
             r_short = evaluate_and_apply_position_risk(c_s, p_short, current_funding_daily=-funding)
             if r_short and r_short.get("action") == "UPDATE_AUTO_CLOSE" and r_short.get("sl") is not None:
-                assert r_short["sl"] <= 101.0
+                assert r_short["sl"] <= 101.5
                 assert r_short["sl"] > price
 
 
@@ -418,38 +415,31 @@ def test_dynamic_monitor_cadence_rules():
     assert 240 <= delay_half <= 295
     assert "HALF" in reason_half
 
-    # 4. Dekat TP / Trailing (profit >= +0.15%) pada posisi GO -> mode 5 menit
-    p_near_tp = _make_pos(side="long", entry=100.0, current=100.20, tp=100.75, sl=99.0, asset="NVDA")
+    # 4. Dekat TP / Trailing (profit >= +0.70%) pada posisi GO -> mode 5 menit
+    p_near_tp = _make_pos(side="long", entry=100.0, current=100.75, tp=102.5, sl=98.5, asset="NVDA")
     sub_tp, delay_tp, reason_tp = decide_dynamic_monitor_cadence([p_near_tp], {1: "GO"})
     assert sub_tp is True
     assert "Proximity TP" in reason_tp
 
-    # 5. Dekat SL (loss <= -0.50%) pada posisi GO -> mode 5 menit
-    p_near_sl = _make_pos(side="long", entry=100.0, current=99.45, tp=100.75, sl=99.0, asset="NVDA")
+    # 5. Dekat SL (loss <= -1.00%) pada posisi GO -> mode 5 menit
+    p_near_sl = _make_pos(side="long", entry=100.0, current=98.95, tp=102.5, sl=98.5, asset="NVDA")
     sub_sl, delay_sl, reason_sl = decide_dynamic_monitor_cadence([p_near_sl], {1: "GO"})
     assert sub_sl is True
     assert "Proximity SL" in reason_sl
 
-    # 6. Kategori GO tenang (< 3 posisi): bergantung pada random (35% 5m, 65% 10m)
-    rng_normal = SimpleNamespace(random=lambda: 0.80, randint=lambda a, b: 270)
-    sub_go_10, delay_go_10, reason_go_10 = decide_dynamic_monitor_cadence([p1], {1: "GO"}, rng=rng_normal)
+    # 6. Kategori GO tenang (< 3 posisi): tetap 10 menit (hemat API & tidak spam)
+    sub_go_10, delay_go_10, reason_go_10 = decide_dynamic_monitor_cadence([p1], {1: "GO"})
     assert sub_go_10 is False
     assert delay_go_10 == 0
     assert "10 menit" in reason_go_10
 
-    rng_spot = SimpleNamespace(random=lambda: 0.15, randint=lambda a, b: 270)
-    sub_go_5, delay_go_5, reason_go_5 = decide_dynamic_monitor_cadence([p1], {1: "GO"}, rng=rng_spot)
-    assert sub_go_5 is True
-    assert delay_go_5 == 270
-    assert "Random 5-min" in reason_go_5
-
 
 # -----------------------------------------------------------------------------
-# 10. 3-Gear Adaptive Execution Engine (30m / 60m / 120m)
+# 10. Adaptive Execution Gear (60m / 120m) & Cooldown Re-Entry 3 Jam
 # -----------------------------------------------------------------------------
 
-def test_evaluate_execution_gear_rules():
-    from walt_bot import Opportunity, evaluate_execution_gear
+def test_evaluate_execution_gear_and_cooldown(tmp_path):
+    from walt_bot import Opportunity, evaluate_execution_gear, _set_asset_cooldown, _is_asset_in_cooldown
 
     def _opp(asset: str, funding: float) -> Opportunity:
         return Opportunity(
@@ -461,38 +451,29 @@ def test_evaluate_execution_gear_rules():
             side="short" if funding > 0 else "long",
         )
 
-    # 1. Gear 3 Turbo (30m): >= 4 peluang >= 0.5%/hari
-    opps_many = [_opp("NVDA", 0.006), _opp("SNDK", 0.0055), _opp("MSTR", 0.006), _opp("TSLA", 0.0052)]
+    # 1. Gear 2 Aktif (60m): >= 3 peluang >= 0.5%/hari atau >= 2 ekstrem >= 0.8%/hari
+    opps_many = [_opp("NVDA", 0.006), _opp("SNDK", 0.0055), _opp("MSTR", 0.006)]
     gear, interval, _ = evaluate_execution_gear(opps_many)
-    assert gear == "GEAR_3_TURBO_30M"
-    assert interval == 30
+    assert gear == "GEAR_2_ACTIVE_60M"
+    assert interval == 60
 
-    # 2. Gear 3 Turbo (30m): >= 2 peluang ekstrem >= 0.8%/hari
     opps_extreme = [_opp("NVDA", 0.009), _opp("SNDK", 0.0085)]
     gear_ex, interval_ex, _ = evaluate_execution_gear(opps_extreme)
-    assert gear_ex == "GEAR_3_TURBO_30M"
-    assert interval_ex == 30
+    assert gear_ex == "GEAR_2_ACTIVE_60M"
+    assert interval_ex == 60
 
-    # 3. Gear 3 Post-TP (30m): baru saja TP closed dan ada peluang >= 0.6%/hari
-    opps_post_tp = [_opp("SOL", 0.0065)]
-    gear_tp, interval_tp, _ = evaluate_execution_gear(opps_post_tp, recent_tp_closed=True)
-    assert gear_tp == "GEAR_3_POST_TP_30M"
-    assert interval_tp == 30
-
-    # 4. Gear 2 Normal (60m) vs Boost (30m): 2-3 peluang >= 0.5%/hari
-    opps_normal = [_opp("BTC", 0.0055), _opp("ETH", 0.0052)]
-    rng_60 = SimpleNamespace(random=lambda: 0.70)
-    gear_60, interval_60, _ = evaluate_execution_gear(opps_normal, rng=rng_60)
-    assert gear_60 == "GEAR_2_NORMAL_60M"
-    assert interval_60 == 60
-
-    rng_30 = SimpleNamespace(random=lambda: 0.15)
-    gear_30, interval_30, _ = evaluate_execution_gear(opps_normal, rng=rng_30)
-    assert gear_30 == "GEAR_2_BOOST_30M"
-    assert interval_30 == 30
-
-    # 5. Gear 1 Konservatif (120m / 2 jam): <= 1 peluang >= 0.5%/hari
-    opps_quiet = [_opp("AAPL", 0.0051)]
+    # 2. Gear 1 Konservatif (120m / 2 jam): <= 2 peluang >= 0.5%/hari dan < 2 ekstrem
+    opps_quiet = [_opp("AAPL", 0.0051), _opp("BTC", 0.0052)]
     gear_120, interval_120, _ = evaluate_execution_gear(opps_quiet)
     assert gear_120 == "GEAR_1_CONSERVATIVE_120M"
     assert interval_120 == 120
+
+    # 3. Cooldown Re-Entry 3 Jam
+    regime_file = str(tmp_path / "market_regime.json")
+    in_cd, _ = _is_asset_in_cooldown("NVDA", regime_path=regime_file)
+    assert in_cd is False
+
+    _set_asset_cooldown("NVDA", cooldown_sec=10800, regime_path=regime_file)
+    in_cd_after, rem_min = _is_asset_in_cooldown("NVDA", regime_path=regime_file)
+    assert in_cd_after is True
+    assert rem_min > 170.0

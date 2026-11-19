@@ -186,47 +186,47 @@ def calculate_dynamic_margin(
 
     return max(DEFAULT_MARGIN, round(final_margin, 2))
 
-# Filter likuiditas
+# Filter likuiditas & Cooldown
 MIN_VOL_24H = 1_000_000     # $1M
 MIN_FUNDING_DAILY = 0.005   # 0.5%/hari
 FUNDING_FLIP_CLOSE_THRESHOLD = 0.001  # 0.1%/hari hysteresis untuk tutup posisi saat funding flip
+REENTRY_COOLDOWN_SEC = 3 * 3600       # Cooldown 3 jam pasca penutupan aset (cegah whipsaw & boros fee)
 
 # Target income
 MONTHLY_TARGET = 100.0      # USDC
 
-# Risk management parameters (Opsi 3 Hybrid Ultimate: Wick-Catcher TP + Pinch Lock + Instant Market-TP)
-DEFAULT_SL_PCT = 0.010          # 1.0% default SL (ketat & batasi drawdown)
-DEFAULT_TP_PCT = 0.0075         # 0.75% default TP (realistis & mudah tersentuh wick bursa)
-INSTANT_MARKET_TP_PCT = 0.0050  # Profit >= +0.50% saat monitor jalan -> langsung Market Close ambil cuan!
-PINCH_TP_TARGET_PCT = 0.0050    # Saat Tier 2 (+0.35%) aktif, rapatkan juga TP bursa ke Entry + 0.50% (Pinch Lock)
+# Risk management parameters (True Funding Carry + Asymmetric R:R)
+DEFAULT_SL_PCT = 0.015      # 1.5% default SL (beri ruang napas noise intraday, R:R >= 1:1.33)
+DEFAULT_TP_PCT = 0.025      # 2.5% default TP (biarkan profit berlari & tutup fee jauh)
 
-# Tangga Trailing Stop & Pinch Lock (Opsi 3 Hybrid Ultimate)
+# Tangga Trailing Stop (True Zero-Risk — surplus bersih setelah fee 0.18% + spread)
 TRAILING_TIERS = [
-    (0.0025, "lock_0010"),  # Tier 1: profit >= +0.25% → SL di entry +0.10% (zero-risk setelah fee)
-    (0.0035, "lock_0022"),  # Tier 2: profit >= +0.35% → SL di entry +0.22% & Pinch TP ke +0.50%
+    (0.0080, "lock_0035"),  # Tier 1: profit >= +0.80% → SL di entry +0.35% (surplus bersih setelah fee)
+    (0.0140, "lock_0085"),  # Tier 2: profit >= +1.40% → SL di entry +0.85% (kunci cuan menengah)
+    (0.0200, 0.0060),       # Tier 3: profit >= +2.00% → Trailing stop 0.60% di bawah running price
 ]
 
 
 def get_asset_baseline_tpsl_pct(asset: Optional[str] = None) -> tuple[float, float]:
     """
-    Return (tp_pct, sl_pct) disesuaikan dengan profil volatilitas aset (Opsi 3 Wick-Catcher TP):
-    - SL seragam 1.0% (0.010) untuk semua kelas aset guna membatasi drawdown ketat.
-    - ETF / Saham Kalem (SPY, US100, AAPL): TP +0.55%, SL 1.0%
-    - Crypto Tier-1 (BTC, ETH, SOL, BNB, XRP, AVAX, SUI, LINK, NEAR, AAVE): TP +0.60%, SL 1.0%
-    - Komoditas (XAU, XAG, BRENTOIL): TP +0.65%, SL 1.0%
-    - Saham Volatil (NVDA, TSLA, MSTR, CRCL, SNDK, VVV, dll): TP +0.75%, SL 1.0%
+    Return (tp_pct, sl_pct) dengan Asymmetric R:R (TP >= 1.33x SL) agar surplus bersih setelah fee:
+    - SL seragam 1.5% (0.015) untuk semua kelas aset guna menghindari whipsaw noise intraday.
+    - ETF / Saham Kalem (SPY, US100, AAPL): TP +2.0%, SL 1.5%
+    - Crypto Tier-1 (BTC, ETH, SOL, BNB, XRP, AVAX, SUI, LINK, NEAR, AAVE): TP +2.0%, SL 1.5%
+    - Komoditas (XAU, XAG, BRENTOIL): TP +2.5%, SL 1.5%
+    - Saham Volatil (NVDA, TSLA, MSTR, CRCL, SNDK, VVV, dll): TP +2.5%, SL 1.5%
     """
     if not asset:
-        return 0.0075, 0.010
+        return 0.025, 0.015
     asset_up = asset.upper()
     if asset_up in {"SPY", "US100", "AAPL"}:
-        return 0.0055, 0.010
+        return 0.020, 0.015
     elif asset_up in ALLOWED_CRYPTO:
-        return 0.0060, 0.010
+        return 0.020, 0.015
     elif asset_up in ALLOWED_COMMODITIES:
-        return 0.0065, 0.010
+        return 0.025, 0.015
     else:
-        return 0.0075, 0.010
+        return 0.025, 0.015
 
 # Logging
 logging.basicConfig(
@@ -663,14 +663,14 @@ def compute_baseline_tpsl(
 ) -> tuple[float, float]:
     """
     Return (tp, sl) dinamis disesuaikan dengan profil volatilitas aset & windfall funding:
-    - Wick-Catcher TP (+0.55% s/d +0.75%) agar sering tersentuh jarum harga di server bursa
-    - Windfall Take Profit: Jika 1.5x funding harian realistis (0.45% <= windfall < tp_pct), TP dimajukan
+    - Asymmetric R:R: TP +2.0% s/d +2.5% vs SL 1.5% agar surplus bersih jauh melampaui fee 0.18%
+    - Windfall Take Profit: Jika 2.5x funding harian berada di 1.5% <= windfall < tp_pct, TP dimajukan
     """
     tp_pct, sl_pct = get_asset_baseline_tpsl_pct(asset)
 
-    if abs(funding_daily) >= 0.003:
-        windfall_tp = round(abs(funding_daily) * 1.5, 4)
-        if 0.0045 <= windfall_tp < tp_pct:
+    if abs(funding_daily) >= 0.005:
+        windfall_tp = round(abs(funding_daily) * 2.5, 4)
+        if 0.015 <= windfall_tp < tp_pct:
             tp_pct = windfall_tp
 
     if side == "long":
@@ -829,7 +829,7 @@ def _sl_is_improvement(pos: Position, new_sl: float, buffer: float = 0.0005) -> 
 
 
 def _record_position_close(pos: Position, reason: str):
-    """Catat penutupan posisi ke Closed_Positions (Google Sheet) & logs/closed_history.csv."""
+    """Catat penutupan posisi ke Closed_Positions (Google Sheet), logs/closed_history.csv, dan set cooldown."""
     try:
         from sheet_logger import log_close
         pnl_quote = pos.pnl_pct_margin * pos.margin
@@ -846,6 +846,7 @@ def _record_position_close(pos: Position, reason: str):
         )
     except Exception as e:
         log.warning(f"Gagal mencatat log_close untuk {pos.base_asset}: {e}")
+    _set_asset_cooldown(pos.base_asset)
 
 
 def evaluate_and_apply_position_risk(
@@ -926,7 +927,7 @@ def evaluate_and_apply_position_risk(
             candidate_sl = l2_sl
             sl_reason = "L2 Breakeven"
 
-    # D. Kandidat dari Trailing Stop & Pinch Lock (Lapis 4 — Opsi 3 Hybrid Ultimate)
+    # D. Kandidat dari Trailing Stop (Lapis 4 — True Zero-Risk surplus bersih setelah fee)
     profit = pos.profit_pct_price
     if profit >= TRAILING_TIERS[0][0]:
         active_tier = None
@@ -935,33 +936,23 @@ def evaluate_and_apply_position_risk(
                 active_tier = (threshold, action)
         if active_tier:
             threshold, action = active_tier
-            # Cabang aktif Opsi 3 Hybrid: LONG di atas entry, SHORT di bawah entry
-            if action == "lock_0010":
+            # Cabang aktif True Zero-Risk: LONG di atas entry, SHORT di bawah entry
+            if action == "lock_0035":
+                l4_sl = pos.entry_price * 1.0035 if pos.side == "long" else pos.entry_price * 0.9965
+                tier_desc = f"L4 True Zero-Risk +0.35% (Profit {profit*100:+.2f}%)"
+            elif action == "lock_0085":
+                l4_sl = pos.entry_price * 1.0085 if pos.side == "long" else pos.entry_price * 0.9915
+                tier_desc = f"L4 Lock Cuan +0.85% (Profit {profit*100:+.2f}%)"
+            # Cabang lama dipertahankan untuk kompatibilitas mundur
+            elif action == "lock_0010":
                 l4_sl = pos.entry_price * 1.0010 if pos.side == "long" else pos.entry_price * 0.9990
                 tier_desc = f"L4 Zero-Risk +0.10% (Profit {profit*100:+.2f}%)"
             elif action == "lock_0022":
                 l4_sl = pos.entry_price * 1.0022 if pos.side == "long" else pos.entry_price * 0.9978
-                tier_desc = f"L4 Pinch Lock +0.22% (Profit {profit*100:+.2f}%)"
-                # Pinch Lock TP: rapatkan TP bursa ke Entry + 0.50% agar jemput bola
-                pinch_tp = round(
-                    pos.entry_price * (1 + PINCH_TP_TARGET_PCT)
-                    if pos.side == "long"
-                    else pos.entry_price * (1 - PINCH_TP_TARGET_PCT),
-                    4,
-                )
-                curr_tp_ref = new_tp if new_tp is not None else pos.tp
-                if pos.side == "long" and pinch_tp > pos.current_price:
-                    if curr_tp_ref is None or pinch_tp < curr_tp_ref * 0.9995:
-                        new_tp = pinch_tp
-                        tp_reason = "L4 Pinch TP +0.50%"
-                elif pos.side == "short" and pinch_tp < pos.current_price:
-                    if curr_tp_ref is None or pinch_tp > curr_tp_ref * 1.0005:
-                        new_tp = pinch_tp
-                        tp_reason = "L4 Pinch TP +0.50%"
+                tier_desc = f"L4 Lock +0.22% (Profit {profit*100:+.2f}%)"
             elif action == "lock_0030":
                 l4_sl = pos.entry_price * 1.0030 if pos.side == "long" else pos.entry_price * 0.9970
                 tier_desc = f"L4 Lock Cuan +0.30% (Profit {profit*100:+.2f}%)"
-            # Cabang lama dipertahankan untuk kompatibilitas mundur
             elif action in ("lock_0020", "lock_0025"):
                 l4_sl = pos.entry_price * 1.0020 if pos.side == "long" else pos.entry_price * 0.9980
                 tier_desc = f"L4 Zero-Risk +0.20% (Profit {profit*100:+.2f}%)"
@@ -988,7 +979,7 @@ def evaluate_and_apply_position_risk(
     final_sl = candidate_sl if (candidate_sl is not None and _sl_is_improvement(pos, candidate_sl)) else None
     final_tp = new_tp
 
-    # --- Guard SL/TP Sisi Salah + Migrasi Posisi Lama + Instant Market-TP ---
+    # --- Guard SL/TP Sisi Salah + Migrasi Posisi Lama ---
     # LONG : final_sl < current_price dan final_tp > current_price
     # SHORT: final_sl > current_price dan final_tp < current_price
     sl_check = final_sl if final_sl is not None else target_sl
@@ -998,16 +989,16 @@ def evaluate_and_apply_position_risk(
     )
     if sl_breached:
         log.warning(
-            f"[GUARD] {pos.base_asset}: SL 1% breached (current=${pos.current_price:.4f}, sl=${sl_check:.4f}) → tutup posisi"
+            f"[GUARD] {pos.base_asset}: SL 1.5% breached (current=${pos.current_price:.4f}, sl=${sl_check:.4f}) → tutup posisi"
         )
         preview = client.preview_close(pos.contract_id)
         if preview and preview.get("ok"):
             res = client.execute(preview["confirmationToken"])
-            _record_position_close(pos, "SL 1% breached (migrasi)")
+            _record_position_close(pos, "SL 1.5% breached (migrasi)")
             return {
                 "action": "CLOSE",
-                "detail": "SL 1% breached (migrasi)",
-                "reason": "SL 1% breached (migrasi)",
+                "detail": "SL 1.5% breached (migrasi)",
+                "reason": "SL 1.5% breached (migrasi)",
                 "result": res,
             }
         return None
@@ -1029,24 +1020,6 @@ def evaluate_and_apply_position_risk(
                 "action": "CLOSE",
                 "detail": "TP breached",
                 "reason": "TP breached",
-                "result": res,
-            }
-        return None
-
-    # Tier 3 Instant Market-TP: Jika saat monitor mengecek profit sudah >= +0.50%, bungkus cuan langsung!
-    if profit >= INSTANT_MARKET_TP_PCT:
-        log.info(
-            f"💰 [INSTANT TP] {pos.base_asset}: profit {profit*100:+.2f}% >= "
-            f"{INSTANT_MARKET_TP_PCT*100:.2f}% → tutup posisi & kunci cuan langsung"
-        )
-        preview = client.preview_close(pos.contract_id)
-        if preview and preview.get("ok"):
-            res = client.execute(preview["confirmationToken"])
-            _record_position_close(pos, "Instant Market-TP")
-            return {
-                "action": "CLOSE",
-                "detail": f"Instant Market-TP ({profit*100:+.2f}%)",
-                "reason": "Instant Market-TP",
                 "result": res,
             }
         return None
@@ -1130,8 +1103,12 @@ def apply_layer4_trailing(client: WaltClient, pos: Position) -> Optional[dict]:
     if active_tier is None:
         return None
     threshold, action = active_tier
-    # Cabang aktif baru: LONG di atas entry, SHORT di bawah entry
-    if action == "lock_0010":
+    # Cabang aktif True Zero-Risk: LONG di atas entry, SHORT di bawah entry
+    if action == "lock_0035":
+        new_sl = pos.entry_price * 1.0035 if pos.side == "long" else pos.entry_price * 0.9965
+    elif action == "lock_0085":
+        new_sl = pos.entry_price * 1.0085 if pos.side == "long" else pos.entry_price * 0.9915
+    elif action == "lock_0010":
         new_sl = pos.entry_price * 1.0010 if pos.side == "long" else pos.entry_price * 0.9990
     elif action == "lock_0022":
         new_sl = pos.entry_price * 1.0022 if pos.side == "long" else pos.entry_price * 0.9978
@@ -1252,7 +1229,7 @@ def decide_dynamic_monitor_cadence(
         else:
             dist_to_sl = max(0.0, sl_pct + profit)
 
-        if profit >= 0.0015 or dist_to_tp <= 0.0025:
+        if profit >= 0.0070 or dist_to_tp <= 0.0035:
             delay = rand.randint(240, 280)
             return (
                 True,
@@ -1260,7 +1237,7 @@ def decide_dynamic_monitor_cadence(
                 f"Proximity TP/Trailing ({pos.base_asset} profit {profit*100:+.2f}%, dist_tp {dist_to_tp*100:.2f}%)",
             )
 
-        if profit <= -0.0050 or dist_to_sl <= 0.0035:
+        if profit <= -0.0100 or dist_to_sl <= 0.0050:
             delay = rand.randint(240, 280)
             return (
                 True,
@@ -1283,11 +1260,7 @@ def decide_dynamic_monitor_cadence(
         delay = rand.randint(245, 290)
         return True, delay, f"Kategori HALF ({', '.join(half_assets)}) → pengawasan intensif 5 menit"
 
-    # 4. Kategori GO (< 3 posisi & kondisi tenang): per 10 menit, sesekali 5 menit secara random (35%)
-    if rand.random() < 0.35:
-        delay = rand.randint(250, 295)
-        return True, delay, "Kategori GO (Random 5-min spot check)"
-
+    # 4. Kategori GO (< 3 posisi & kondisi tenang): hemat API, tetap per 10 menit
     return False, 0, "Kategori GO stabil (interval normal 10 menit)"
 
 
@@ -1297,48 +1270,23 @@ def evaluate_execution_gear(
     rng: Optional[Any] = None,
 ) -> tuple[str, int, str]:
     """
-    Tentukan Gigi Kecepatan (Gear) dan interval eksekusi (30, 60, atau 120 menit)
-    untuk Market Execute & Crypto Execute berdasarkan peluang funding dari scan:
-    - GEAR 3 (Turbo 30 Menit):
-      * Terdapat >= 4 aset dengan |funding_daily| >= 0.5%/hari, ATAU
-      * Terdapat >= 2 aset dengan funding ekstrem (|funding_daily| >= 0.8%/hari), ATAU
-      * Baru saja ada posisi yang kena TP (recent_tp_closed=True) dan ada >= 1 peluang >= 0.6%/hari.
-    - GEAR 2 (Normal Aktif 60 Menit / 1 Jam, sesekali 30 Menit random 30%):
-      * Terdapat 2 - 3 aset dengan |funding_daily| >= 0.5%/hari.
+    Tentukan Gigi Kecepatan (Gear) dan interval eksekusi (60 atau 120 menit)
+    untuk Market Execute & Crypto Execute agar tidak over-trading / boros fee:
+    - GEAR 2 (Aktif Normal 60 Menit / 1 Jam):
+      * Terdapat >= 3 aset dengan |funding_daily| >= 0.5%/hari, ATAU
+      * Terdapat >= 2 aset dengan funding ekstrem (|funding_daily| >= 0.8%/hari).
     - GEAR 1 (Konservatif 120 Menit / 2 Jam):
-      * Peluang funding tipis (<= 1 aset yang memenuhi >= 0.5%/hari).
+      * Peluang funding moderat/tipis (<= 2 aset yang memenuhi >= 0.5%/hari).
     Return (gear_label, interval_minutes, reason).
     """
-    rand = rng if rng is not None else random
     qualifying = [o for o in opps if abs(o.funding_daily) >= MIN_FUNDING_DAILY]
     extreme = [o for o in qualifying if abs(o.funding_daily) >= 0.008]
-    strong = [o for o in qualifying if abs(o.funding_daily) >= 0.006]
 
-    if len(qualifying) >= 4 or len(extreme) >= 2:
+    if len(qualifying) >= 3 or len(extreme) >= 2:
         return (
-            "GEAR_3_TURBO_30M",
-            30,
-            f"Panen Raya ({len(qualifying)} peluang >=0.5%, {len(extreme)} ekstrem >=0.8%/hari) → interval 30 menit",
-        )
-
-    if recent_tp_closed and len(strong) >= 1:
-        return (
-            "GEAR_3_POST_TP_30M",
-            30,
-            f"Post-TP Re-Deploy ({len(strong)} peluang >=0.6%/hari tersedia) → interval 30 menit",
-        )
-
-    if len(qualifying) >= 2:
-        if rand.random() < 0.30:
-            return (
-                "GEAR_2_BOOST_30M",
-                30,
-                f"Aktif Normal ({len(qualifying)} peluang >=0.5% + Random Boost 30m) → interval 30 menit",
-            )
-        return (
-            "GEAR_2_NORMAL_60M",
+            "GEAR_2_ACTIVE_60M",
             60,
-            f"Aktif Normal ({len(qualifying)} peluang >=0.5%/hari) → interval 60 menit (1 jam)",
+            f"Aktif ({len(qualifying)} peluang >=0.5%, {len(extreme)} ekstrem >=0.8%/hari) → interval 60 menit (1 jam)",
         )
 
     return (
@@ -1346,6 +1294,39 @@ def evaluate_execution_gear(
         120,
         f"Konservatif ({len(qualifying)} peluang >=0.5%/hari) → interval 120 menit (2 jam)",
     )
+
+
+def _set_asset_cooldown(
+    asset: str,
+    cooldown_sec: int = REENTRY_COOLDOWN_SEC,
+    regime_path: str = "logs/market_regime.json",
+):
+    """Catat waktu cooldown re-entry untuk aset yang baru ditutup (cegah whipsaw & boros fee)."""
+    if not asset:
+        return
+    state = _load_execution_regime(regime_path)
+    cooldowns = state.get("cooldowns")
+    if not isinstance(cooldowns, dict):
+        cooldowns = {}
+    cooldowns[asset.upper()] = time.time() + cooldown_sec
+    state["cooldowns"] = cooldowns
+    _save_execution_regime(state, regime_path=regime_path)
+
+
+def _is_asset_in_cooldown(
+    asset: str,
+    regime_path: str = "logs/market_regime.json",
+) -> tuple[bool, float]:
+    """Cek apakah aset masih dalam masa cooldown. Return (in_cooldown, remaining_minutes)."""
+    if not asset:
+        return False, 0.0
+    state = _load_execution_regime(regime_path)
+    cooldowns = state.get("cooldowns") or {}
+    until_ts = float(cooldowns.get(asset.upper(), 0.0) or 0.0)
+    remaining = until_ts - time.time()
+    if remaining > 0:
+        return True, round(remaining / 60.0, 1)
+    return False, 0.0
 
 
 def _load_execution_regime(regime_path: str = "logs/market_regime.json") -> dict:
@@ -1520,6 +1501,7 @@ def _detect_and_log_exchange_closes(
                     funding_quote=funding_quote,
                     reason=reason,
                 )
+                _set_asset_cooldown(asset)
                 closed_events.append({
                     "asset": asset,
                     "action": "EXCHANGE_CLOSE_DETECTED",
@@ -2140,6 +2122,15 @@ def scan_with_research(
                     })
                     continue
 
+                in_cd, cd_min = _is_asset_in_cooldown(asset)
+                if in_cd:
+                    log.info(f"  SKIP {asset}: cooldown {cd_min:.0f}m pasca penutupan")
+                    executions.append({
+                        "asset": asset, "side": opp.side, "leverage": MAX_LEVERAGE, "verdict": "SKIP",
+                        "reason": f"cooldown {cd_min:.0f}m pasca penutupan (anti-whipsaw)",
+                    })
+                    continue
+
                 margin = calculate_dynamic_margin(
                     available_balance=available,
                     active_slots=active_slot_count,
@@ -2407,6 +2398,18 @@ def market_execute(
                 "leverage": MAX_LEVERAGE,
                 "verdict": "SKIP",
                 "reason": "posisi sudah aktif",
+            })
+            continue
+
+        in_cd, cd_min = _is_asset_in_cooldown(opp.base_asset)
+        if in_cd:
+            log.info(f"  SKIP {opp.base_asset}: cooldown {cd_min:.0f}m pasca penutupan")
+            executions.append({
+                "asset": opp.base_asset,
+                "side": opp.side,
+                "leverage": MAX_LEVERAGE,
+                "verdict": "SKIP",
+                "reason": f"cooldown {cd_min:.0f}m pasca penutupan (anti-whipsaw)",
             })
             continue
 

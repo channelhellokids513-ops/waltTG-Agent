@@ -116,13 +116,13 @@ Walt mewajibkan pola 2-tahap dengan *time-limited confirmation token*:
 4. `perps_execute_operation` — Mengirimkan `confirmationToken` (berlaku ~90 detik) untuk konfirmasi eksekusi order di bursa.
 5. **Fallback TP/SL Otomatis:** Jika bursa menolak order awal karena batasan parameter TP/SL di luar toleransi slippage kontrak, bot mengeksekusi order terbuka tanpa `autoClose`, kemudian mengatur TP/SL secara terpisah via `perps_prepare_auto_close_set`.
 
-### 4.3 Parameter TP/SL Baseline Dinamis per Kelas Aset (Opsi 3 Hybrid Ultimate & SL 1.0%)
-Memasang *Wick-Catcher TP* langsung di server bursa pada zona ayunan intraday yang realistis dan membatasi risiko kerugian maksimal 1.0% pada setiap posisi:
-- **ETF / Saham Kalem (SPY, US100, AAPL):** TP +0.55%, SL 1.0%
-- **Crypto Bluechip (BTC, ETH, SOL, dll):** TP +0.60%, SL 1.0%
-- **Komoditas Tradisional (XAU, XAG, BRENTOIL):** TP +0.65%, SL 1.0%
-- **Saham Volatil (NVDA, TSLA, MSTR, CRCL, dll):** TP +0.75%, SL 1.0%
-- **Windfall Rule Responsif:** Jika $1.5\times$ funding rate harian berada di rentang $0.45\% \le \text{windfall} < \text{TP baseline}$, TP dimajukan lebih awal agar segera terkunci di server bursa.
+### 4.3 Parameter TP/SL Baseline Dinamis per Kelas Aset (True Funding Carry & Asymmetric R:R)
+Memberi ruang napas bagi harga agar tidak terpicu *noise* jangka pendek sekaligus memastikan *Risk-to-Reward* positif setelah dikurangi biaya taker `0.18%` round-trip + spread:
+- **ETF / Saham Kalem (SPY, US100, AAPL):** TP +2.0%, SL 1.5%
+- **Crypto Bluechip (BTC, ETH, SOL, dll):** TP +2.0%, SL 1.5%
+- **Komoditas Tradisional (XAU, XAG, BRENTOIL):** TP +2.5%, SL 1.5%
+- **Saham Volatil (NVDA, TSLA, MSTR, CRCL, dll):** TP +2.5%, SL 1.5%
+- **Windfall Rule:** Jika $2.5\times$ funding rate harian berada di rentang $1.5\% \le \text{windfall} < \text{TP baseline}$, TP dimajukan ke level tersebut di server bursa.
 
 ---
 
@@ -213,24 +213,25 @@ Manajemen risiko berjalan otomatis tiap 4 jam melalui workflow `risk-monitor.yml
 
 ### Penjelasan Detil Tiap Lapis:
 
-1. **Lapis 1 (Wick-Catcher Baseline TP & Uniform 1.0% SL):**  
-   Target TP realistis (+0.55% s/d +0.75%) dipadukan dengan Stop Loss ketat **1.0%** di seluruh kelas aset:
-   - ETF / Indeks (`SPY`, `US100`, `AAPL`): TP +0.55%, SL 1.0%
-   - Crypto Tier-1 (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `AVAX`, `SUI`, `LINK`, `NEAR`, `AAVE`): TP +0.60%, SL 1.0%
-   - Komoditas (`XAU`, `XAG`, `BRENTOIL`): TP +0.65%, SL 1.0%
-   - Saham Volatil (`NVDA`, `TSLA`, `MSTR`, `CRCL`, `SNDK`, `VVV`): TP +0.75%, SL 1.0%
-   - *Windfall Rule:* Jika $1.5\times$ funding harian berada di $0.45\% \le \text{windfall} < \text{TP baseline}$, TP dimajukan lebih cepat agar cuan segera terkunci.
-   - *Guard Sisi Salah & Migrasi:* Memvalidasi level SL/TP terhadap `current_price` sebelum mengirim `auto_close`. Posisi lama yang sudah melewati batas rugi 1.0% langsung ditutup (`SL 1% breached (migrasi)`).
+1. **Lapis 1 (Asymmetric R:R Baseline TP & Uniform 1.5% SL):**  
+   Target TP asimetris (+2.0% s/d +2.5%) dipadukan dengan Stop Loss seragam **1.5%** di seluruh kelas aset:
+   - ETF / Indeks (`SPY`, `US100`, `AAPL`): TP +2.0%, SL 1.5%
+   - Crypto Tier-1 (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `AVAX`, `SUI`, `LINK`, `NEAR`, `AAVE`): TP +2.0%, SL 1.5%
+   - Komoditas (`XAU`, `XAG`, `BRENTOIL`): TP +2.5%, SL 1.5%
+   - Saham Volatil (`NVDA`, `TSLA`, `MSTR`, `CRCL`, `SNDK`, `VVV`): TP +2.5%, SL 1.5%
+   - *Windfall Rule:* Jika $2.5\times$ funding harian berada di $1.5\% \le \text{windfall} < \text{TP baseline}$, TP dimajukan ke level tersebut.
+   - *Guard Sisi Salah & Migrasi:* Memvalidasi level SL/TP terhadap `current_price` sebelum mengirim `auto_close`. Posisi lama yang sudah melewati batas rugi 1.5% langsung ditutup (`SL 1.5% breached (migrasi)`).
 2. **Lapis 2 (Dinamika Funding Rate dengan Hysteresis 0.1%/hari):**  
    - **Hysteresis (`FUNDING_FLIP_CLOSE_THRESHOLD = 0.001`):** Jika arah funding berbalik (*funding flip sign*) DAN `abs(funding_daily) >= 0.1%/hari`, **posisi seketika ditutup pasar**.
    - Jika funding berbalik arah tetapi masih `< 0.1%/hari`, atau meluruh di bawah `< 0.1%/hari`, stop loss digeser ke harga entry (*breakeven*).
 3. **Lapis 3 (Volatilitas & Momentum Harga — Deprecated):**  
-   - *Deprecated*: Digantikan sepenuhnya oleh SL baseline 1.0% yang lebih ketat (tidak ada kode yang melonggarkan SL di atas 1.0%).
-4. **Lapis 4 (Trailing Stop, Pinch Lock, & Instant Market-TP — Opsi 3 Hybrid Ultimate):**  
-   Menjemput profit secara aktif agar posisi yang sudah naik tidak memantul balik:
-   - **Tier 1 (Profit $\ge +0.25\%$):** Geser SL otomatis ke **Entry + 0.10%** (`lock_0010` — Zero-Risk Lock dini setelah fee).
-   - **Tier 2 Pinch Lock (Profit $\ge +0.35\%$):** Geser SL ke **Entry + 0.22%** (`lock_0022`) **DAN** merapatkan TP bursa ke **Entry + 0.50%** (menjepit harga dari atas dan bawah).
-   - **Tier 3 Instant Market-TP (Profit $\ge +0.50\%$):** Langsung eksekusi *Market Close* saat monitor berjalan untuk membungkus cuan ke saldo kas.
+   - *Deprecated*: Digantikan sepenuhnya oleh SL baseline 1.5% (tidak ada kode yang melonggarkan SL di atas 1.5%).
+4. **Lapis 4 (True Zero-Risk Trailing Stop & 3-Hour Cooldown):**  
+   Mengunci surplus bersih di atas biaya transaksi (`0.18%` taker round-trip + spread) tanpa memotong profit terlalu dini:
+   - **Tier 1 (Profit $\ge +0.80\%$):** Geser SL otomatis ke **Entry + 0.35%** (`lock_0035` — True Zero-Risk Lock setelah fee + spread).
+   - **Tier 2 (Profit $\ge +1.40\%$):** Geser SL ke **Entry + 0.85%** (`lock_0085`).
+   - **Tier 3 (Profit $\ge +2.00\%$):** Aktifkan Trailing Stop dinamis **0.60%** di bawah puncak harga berjalan.
+   - **3-Hour Re-Entry Cooldown:** Setelah posisi ditutup (`_record_position_close` atau `_detect_and_log_exchange_closes`), aset dikunci selama 3 jam di `logs/market_regime.json` sebelum boleh dibuka ulang.
 
 ---
 
@@ -284,9 +285,9 @@ Sistem beroperasi dengan arsitektur hibrida: cron internal GitHub Actions diduku
 | Workflow File | Jadwal Scheduler (WIB) | Jadwal Cron (UTC) | Target Cloud Scheduler | Fungsi Utama |
 |---|---|---|---|---|
 | [daily-scan.yml](file:///.github/workflows/daily-scan.yml) | **07:17 & 19:17 WIB** (2x Sehari) | `17 0,12 * * *` | `walt-daily-scan` | Master Scan seluruh kontrak, ranking peluang funding harian, riset sentimen Swarm AI (Qwen+Gemini), eksekusi instan sinyal GO/HALF, simpan database ke Google Sheet. |
-| [risk-monitor.yml](file:///.github/workflows/risk-monitor.yml) | **Dinamis 5–10 Menit** (6x–12x/Jam + Smart Idle) | `*/10 * * * *` | `walt-risk-monitor` | Evaluasi risiko adaptif (Wick-Catcher TP, Pinch Lock, Instant Market-TP). Fast-exit <2 detik saat 0 posisi; otomatis mempercepat ke **tiap ~5 menit (12x/jam)** jika $\ge 3$ posisi aktif, kategori `HALF`, atau dekat TP/SL; dan per 10 menit (sesekali 5 menit random) untuk posisi `GO` stabil. |
-| [market-execute.yml](file:///.github/workflows/market-execute.yml) | **Dinamis 30m / 1h / 2h** (3-Gear Adaptive) | `43 */2 * * *` | `walt-market-execute` | Eksekusi adaptif Saham US & Komoditas 24/7: **Gear 3 (30m)** saat peluang funding $\ge 4$ aset / $\ge 2$ ekstrem $\ge 0.8\%$ / pasca-TP; **Gear 2 (1h, random 30m)** saat 2–3 peluang; **Gear 1 (2h)** saat sepi; dan **Gear 0 (Fast-Exit)** saat slot penuh. |
-| [crypto-execute.yml](file:///.github/workflows/crypto-execute.yml) | **Dinamis 30m / 1h / 2h** (3-Gear Adaptive) | `11 */2 * * *` | `walt-crypto-execute` | Eksekusi adaptif Crypto Bluechip (10 Tier-1) dengan mekanisme **3-Gear Adaptive (30m / 1h / 2h)** menangkap funding carry & perputaran modal pasca-TP. |
+| [risk-monitor.yml](file:///.github/workflows/risk-monitor.yml) | **Dinamis 5–10 Menit** (6x–12x/Jam + Smart Idle) | `*/10 * * * *` | `walt-risk-monitor` | Evaluasi risiko adaptif (True Zero-Risk Trailing & Asymmetric R:R). Fast-exit <2 detik saat 0 posisi; otomatis mempercepat ke **tiap ~5 menit (12x/jam)** jika $\ge 3$ posisi aktif, kategori `HALF`, atau dekat TP ($\ge +0.70\%$) / SL ($\le -1.00\%$); dan stabil **10 menit** untuk posisi `GO` tenang. |
+| [market-execute.yml](file:///.github/workflows/market-execute.yml) | **Dinamis 1h / 2h** (Calmed Adaptive) | `43 */2 * * *` | `walt-market-execute` | Eksekusi adaptif Saham US & Komoditas 24/7: **Gear 2 (1h)** saat peluang funding $\ge 3$ aset ($\ge 0.5\%$/hari) atau $\ge 2$ ekstrem $\ge 0.8\%$/hari; **Gear 1 (2h)** saat kondisi normal/sepi; dan **Gear 0 (Fast-Exit)** saat slot penuh. Dilengkapi *3-hour re-entry cooldown*. |
+| [crypto-execute.yml](file:///.github/workflows/crypto-execute.yml) | **Dinamis 1h / 2h** (Calmed Adaptive) | `11 */2 * * *` | `walt-crypto-execute` | Eksekusi adaptif Crypto Bluechip (10 Tier-1) dengan mekanisme **Calmed Adaptive (1h / 2h)** dan *3-hour re-entry cooldown* untuk memanen funding secara berkelanjutan. |
 
 ### 7.2 Otomasi Rotasi Token OAuth (`token_manager.py`)
 - Akses ke Walt API menggunakan protokol OAuth 2.0 PKCE dengan Bearer token yang memiliki masa berlaku terbatas.

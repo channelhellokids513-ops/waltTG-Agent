@@ -60,21 +60,22 @@ Analisis sentimen berita, katalis earnings, dan momentum makro dilakukan oleh 4 
   - `HALF` (Half size $1.25 – $1.50 margin jika katalis risiko P5 $\ge 0.70$)
   - `SKIP` (Batalkan jika melawan sentimen / earnings $\le 7$ hari)
 
-### 2. Wick-Catcher Take Profit (TP) & Uniform 1.0% Stop Loss (SL) — Opsi 3 Hybrid Ultimate
-Menangkap lonjakan *wick* harga intraday langsung di server bursa dengan batasan risiko ketat 1.0% di semua kelas aset:
-- **ETF / Saham Kalem (SPY, US100, AAPL):** TP +0.55%, SL 1.0%
-- **Crypto Tier-1 (BTC, ETH, SOL, BNB, XRP, AVAX, SUI, LINK, NEAR, AAVE):** TP +0.60%, SL 1.0%
-- **Komoditas (XAU, XAG, BRENTOIL):** TP +0.65%, SL 1.0%
-- **Saham Volatil (NVDA, TSLA, MSTR, CRCL, SNDK, VVV, dll):** TP +0.75%, SL 1.0%
-- **Windfall Rule Responsif:** Jika $1.5\times$ funding harian berada di rentang $0.45\% \le \text{windfall} < \text{TP baseline}$, TP dimajukan lebih awal agar cepat tersentuh di server bursa.
+### 2. Asymmetric R:R Take Profit (TP) & Uniform 1.5% Stop Loss (SL) — True Funding Carry
+Menghindari *fee bleed* (`0.18%` round-trip taker fee + spread) dengan *Risk-to-Reward* asimetris dan ruang napas yang cukup untuk memanen *funding rate*:
+- **ETF / Saham Kalem (SPY, US100, AAPL):** TP +2.0%, SL 1.5%
+- **Crypto Tier-1 (BTC, ETH, SOL, BNB, XRP, AVAX, SUI, LINK, NEAR, AAVE):** TP +2.0%, SL 1.5%
+- **Komoditas (XAU, XAG, BRENTOIL):** TP +2.5%, SL 1.5%
+- **Saham Volatil (NVDA, TSLA, MSTR, CRCL, SNDK, VVV, dll):** TP +2.5%, SL 1.5%
+- **Windfall Rule:** Jika $2.5\times$ funding harian berada di rentang $1.5\% \le \text{windfall} < \text{TP baseline}$, TP dimajukan ke level tersebut di server bursa.
 
-### 3. Tangga Trailing Stop, Pinch Lock, & Instant Market-TP
-- **Tier 1 (Profit $\ge +0.25\%$):** Lock SL otomatis ke `Entry + 0.10%` (**Zero-Risk Lock Dini:** modal dan fee terkunci aman begitu posisi hijau +0.25%).
-- **Tier 2 Pinch Lock (Profit $\ge +0.35\%$):** Lock SL ke `Entry + 0.22%` **DAN** merapatkan TP bursa ke `Entry + 0.50%` (menjepit harga dari atas dan bawah).
-- **Tier 3 Instant Market-TP (Profit $\ge +0.50\%$):** Jika saat monitor berjalan posisi sudah profit $\ge +0.50\%$, bot langsung mengeksekusi *Market Close* untuk mengamankan cuan tanpa menunggu 10 menit berikutnya.
-- **Lapis 3 (Volatility Cut):** *Deprecated* (digantikan sepenuhnya oleh SL baseline ketat 1.0%).
+### 3. True Zero-Risk Trailing Stop & 3-Hour Re-Entry Cooldown
+- **Tier 1 (Profit $\ge +0.80\%$):** Lock SL otomatis ke `Entry + 0.35%` (`lock_0035` — surplus bersih setelah menutup round-trip taker fee `0.18%` + spread).
+- **Tier 2 (Profit $\ge +1.40\%$):** Lock SL otomatis ke `Entry + 0.85%` (`lock_0085`).
+- **Tier 3 (Profit $\ge +2.00\%$):** Trailing stop dinamis `0.60%` di bawah puncak harga berjalan (tanpa *Pinch TP* atau *Instant Market-TP* agar profit tidak terpotong terlalu dini).
+- **3-Hour Re-Entry Cooldown:** Setiap aset yang posisinya baru ditutup otomatis masuk jeda 3 jam (tercatat di `logs/market_regime.json`) agar bot tidak melakukan *churning* membuka ulang aset yang sama berkali-kali.
+- **Lapis 3 (Volatility Cut):** *Deprecated* (digantikan sepenuhnya oleh SL baseline 1.5%).
 - **Funding Flip Hysteresis (`0.1%/hari`):** Posisi hanya ditutup karena funding berbalik arah jika `abs(funding_daily) >= 0.1%/hari`. Jika berbalik arah tetapi `< 0.1%/hari`, SL digeser ke *breakeven* (`Entry`).
-- **Guard Sisi Salah & Migrasi Posisi Lama:** Memvalidasi SL/TP terhadap harga berjalan sebelum mengirim `auto_close` dan otomatis menutup posisi lama yang sudah melewati batas SL 1.0%.
+- **Guard Sisi Salah & Migrasi Posisi Lama:** Memvalidasi SL/TP terhadap harga berjalan sebelum mengirim `auto_close` dan otomatis menutup posisi lama yang sudah melewati batas SL 1.5% (`SL 1.5% breached (migrasi)`).
 - **Audit Penutupan & Statistik (`Closed_Positions` & `PnL_Tracker`):** Seluruh penutupan posisi (baik oleh monitor maupun TP/SL bursa) tercatat ke sheet `Closed_Positions` (`logs/closed_history.csv`), progres harian ke `PnL_Tracker`, dan dapat dianalisis via `python walt_bot.py stats`.
 
 ### 4. Contract Minimum Order Size Enforcement (`min_size_base`)
@@ -104,9 +105,9 @@ Mengatasi limit bursa Walt pada aset berharga tinggi (seperti `NVDA` atau `MSTR`
 | Komponen / Workflow | Jadwal Cloud Scheduler (WIB) | Jadwal Cron GitHub (UTC) | Deskripsi |
 |---|---|---|---|
 | [`daily-scan.yml`](.github/workflows/daily-scan.yml) | **07:17 & 19:17 WIB** (2x Sehari) | `17 0,12 * * *` | Master Scan seluruh kontrak, ranking peluang funding, riset Swarm AI mendalam (Qwen+Gemini P1-P7), **eksekusi instan order GO/HALF**, simpan database ke Google Sheet & notif Telegram. |
-| [`market-execute.yml`](.github/workflows/market-execute.yml) | **Dinamis 30m / 1h / 2h** (3-Gear Adaptive + Gatekeeper) | `43 */2 * * *` | Eksekusi adaptif Saham US & Komoditas 24/7: dipercepat ke **30 menit (Gear 3)** saat peluang funding melimpah ($\ge 4$ aset atau $\ge 2$ ekstrem $\ge 0.8\%$) atau pasca-TP, **1 jam (Gear 2)** saat aktif normal (2–3 peluang), **2 jam (Gear 1)** saat sepi, dan *fast-exit* (<2 detik) saat slot penuh (Gear 0). |
-| [`crypto-execute.yml`](.github/workflows/crypto-execute.yml) | **Dinamis 30m / 1h / 2h** (3-Gear Adaptive + Gatekeeper) | `11 */2 * * *` | Eksekusi adaptif 10 Crypto Bluechip (`BTC`, `ETH`, `SOL`, dll) dengan sistem **3-Gear Adaptive (30m / 1h / 2h)** berdasarkan kepadatan peluang funding harian dan ketersediaan slot posisi. |
-| [`risk-monitor.yml`](.github/workflows/risk-monitor.yml) | **Dinamis 5–10 Menit** (6x–12x/Jam + Smart Idle) | `*/10 * * * *` | Pengawas risiko adaptif: otomatis *fast-exit* (<2 detik) saat 0 posisi; meningkat hingga **12x/jam (~tiap 5 menit)** jika ada $\ge 3$ posisi aktif, posisi kategori `HALF`, atau harga mendekati TP/SL; dan kembali ke 10 menit (sesekali 5 menit random) untuk posisi `GO` yang stabil. |
+| [`market-execute.yml`](.github/workflows/market-execute.yml) | **Dinamis 1h / 2h** (Calmed Adaptive + Gatekeeper) | `43 */2 * * *` | Eksekusi adaptif Saham US & Komoditas 24/7: **1 jam (Gear 2)** saat peluang funding melimpah ($\ge 3$ aset $\ge 0.5\%$/hari atau $\ge 2$ ekstrem $\ge 0.8\%$/hari), **2 jam (Gear 1)** saat normal/sepi, dan *fast-exit* (<2 detik) saat slot penuh (Gear 0). Dilengkapi *3-hour re-entry cooldown*. |
+| [`crypto-execute.yml`](.github/workflows/crypto-execute.yml) | **Dinamis 1h / 2h** (Calmed Adaptive + Gatekeeper) | `11 */2 * * *` | Eksekusi adaptif 10 Crypto Bluechip (`BTC`, `ETH`, `SOL`, dll) dengan sistem **Calmed Adaptive (1h / 2h)** dan *3-hour re-entry cooldown* agar posisi cukup lama memanen *funding*. |
+| [`risk-monitor.yml`](.github/workflows/risk-monitor.yml) | **Dinamis 5–10 Menit** (6x–12x/Jam + Smart Idle) | `*/10 * * * *` | Pengawas risiko adaptif: otomatis *fast-exit* (<2 detik) saat 0 posisi; meningkat hingga **12x/jam (~tiap 5 menit)** jika ada $\ge 3$ posisi aktif, posisi kategori `HALF`, atau harga mendekati TP ($\ge +0.70\%$) / SL ($\le -1.00\%$); dan stabil di **10 menit** untuk posisi `GO` tenang. |
 
 ---
 
