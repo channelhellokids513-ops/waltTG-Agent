@@ -154,3 +154,52 @@ def test_r3_2_unknown_tier_action_logs_error_and_returns_none(monkeypatch, caplo
         for rec in caplog.records
     )
 
+
+_RUNNER_OS_ENV_ALLOWLIST = {
+    "GITHUB_ACTIONS",
+    "GITHUB_REPOSITORY",
+    "GITHUB_RUN_ID",
+    "GITHUB_RUN_ATTEMPT",
+    "GITHUB_SHA",
+    "GITHUB_REF",
+    "GITHUB_WORKSPACE",
+    "HOME",
+    "PATH",
+    "PYTHONPATH",
+}
+
+
+def _find_undocumented_env_keys(root_dir, env_example_path):
+    import re
+    from pathlib import Path
+
+    env_text = Path(env_example_path).read_text(encoding="utf-8")
+    documented = set(re.findall(r"^([A-Z0-9_]+)=", env_text, flags=re.M))
+    env_pat = re.compile(r'os\.(?:getenv|environ\.get)\(\s*["\']([A-Z0-9_]+)["\']|os\.environ\[\s*["\']([A-Z0-9_]+)["\']\s*\]')
+
+    missing = []
+    for py_file in sorted(Path(root_dir).glob("*.py")):
+        for lineno, line in enumerate(py_file.read_text(encoding="utf-8").splitlines(), start=1):
+            for m in env_pat.finditer(line):
+                key = m.group(1) or m.group(2)
+                if key not in documented and key not in _RUNNER_OS_ENV_ALLOWLIST:
+                    missing.append(f"{key} ({py_file.name}:{lineno})")
+    return missing
+
+
+def test_r3_3_all_env_keys_read_by_code_are_documented(tmp_path):
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parent.parent
+    env_example = repo_root / ".env.example"
+
+    missing = _find_undocumented_env_keys(repo_root, env_example)
+    assert missing == [], f"Kunci env dibaca kode tapi belum terdokumentasi di .env.example: {missing}"
+
+    # Buktikan guard benar-benar merah bila ada kunci fiktif FOO_TEST_KEY
+    dummy_py = tmp_path / "dummy_mod.py"
+    dummy_py.write_text('import os\nx = os.getenv("FOO_TEST_KEY")\n', encoding="utf-8")
+    dummy_missing = _find_undocumented_env_keys(tmp_path, env_example)
+    assert any("FOO_TEST_KEY" in item and "dummy_mod.py:2" in item for item in dummy_missing)
+
+
