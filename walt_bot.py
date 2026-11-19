@@ -1669,8 +1669,9 @@ def _maybe_run_adaptive_executions(
     elapsed_market_min = (now - last_market_ts) / 60.0
     elapsed_crypto_min = (now - last_crypto_ts) / 60.0
 
-    # Pengecekan paling cepat adalah 30 menit (toleransi 28 menit untuk jitter cron), kecuali baru saja TP
-    if not recent_tp_closed and elapsed_market_min < 28.0 and elapsed_crypto_min < 28.0:
+    # Pengecekan tercepat 60m (toleransi 55m), atau 45m khusus jika baru saja benar-benar tutup TP profit
+    min_wait = 45.0 if recent_tp_closed else 55.0
+    if elapsed_market_min < min_wait and elapsed_crypto_min < min_wait:
         return []
 
     # Ambil daftar kontrak jika belum ada untuk mengevaluasi peluang funding terkini
@@ -1694,8 +1695,15 @@ def _maybe_run_adaptive_executions(
         "crypto", crypto_opps, mark_executed=False, recent_tp_closed=recent_tp_closed, regime_path=regime_path, rng=rng
     )
 
-    due_market = elapsed_market_min >= (m_interval - 2.0) or (recent_tp_closed and len(market_opps) >= 2 and elapsed_market_min >= 15.0)
-    due_crypto = elapsed_crypto_min >= (c_interval - 2.0) or (recent_tp_closed and len(crypto_opps) >= 2 and elapsed_crypto_min >= 15.0)
+    m_tp_boost = recent_tp_closed and elapsed_market_min >= 45.0 and (
+        len(market_opps) >= 3 or any(abs(o.funding_daily) >= 0.008 for o in market_opps)
+    )
+    c_tp_boost = recent_tp_closed and elapsed_crypto_min >= 45.0 and (
+        len(crypto_opps) >= 3 or any(abs(o.funding_daily) >= 0.008 for o in crypto_opps)
+    )
+
+    due_market = elapsed_market_min >= (m_interval - 2.0) or m_tp_boost
+    due_crypto = elapsed_crypto_min >= (c_interval - 2.0) or c_tp_boost
 
     if not due_market and not due_crypto:
         return []
@@ -1759,6 +1767,17 @@ def _maybe_run_adaptive_executions(
     return triggered_actions
 
 
+def _has_recent_tp_close(actions: list[dict]) -> bool:
+    """True hanya jika ada penutupan posisi riil (CLOSE / EXCHANGE_CLOSE_DETECTED) karena TP/Trailing."""
+    for a in actions:
+        if a.get("action") not in ("CLOSE", "EXCHANGE_CLOSE_DETECTED"):
+            continue
+        detail = str(a.get("detail", "")).lower()
+        if "tp" in detail or "trailing" in detail:
+            return True
+    return False
+
+
 def risk_monitor_run(
     client: WaltClient,
     snapshot_path: str = "logs/open_snapshot.json",
@@ -1786,10 +1805,7 @@ def risk_monitor_run(
         client, contracts_by_id, snapshot_path=snapshot_path
     )
 
-    recent_tp_closed = any(
-        "tp" in str(a.get("detail", "")).lower() or "trailing" in str(a.get("detail", "")).lower()
-        for a in actions
-    )
+    recent_tp_closed = _has_recent_tp_close(actions)
 
     if checked_count == 0:
         if enable_adaptive_execute:

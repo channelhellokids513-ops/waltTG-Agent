@@ -178,3 +178,20 @@ def test_ai_directional_score_has_no_positive_bias_and_includes_strategy_context
     assert "SHORT" in ctx
     assert "+0.600%/hari" in ctx
     assert "24-72 jam" in ctx
+
+
+def test_has_recent_tp_close_ignores_update_auto_close():
+    from walt_bot import _has_recent_tp_close
+
+    # Menggeser TP/SL (UPDATE_AUTO_CLOSE) TIDAK boleh dianggap posisi tutup TP
+    assert _has_recent_tp_close([
+        {"asset": "VVV", "action": "UPDATE_AUTO_CLOSE", "detail": "TP $22.8145 (L1 Tighten)"}
+    ]) is False
+
+    # Penutupan riil karena TP/Trailing baru mengembalikan True
+    assert _has_recent_tp_close([
+        {"asset": "CRCL", "action": "EXCHANGE_CLOSE_DETECTED", "detail": "Exchange Auto-Close TP/Trailing (PnL $+0.25)"}
+    ]) is True
+    assert _has_recent_tp_close([
+        {"asset": "SPY", "action": "CLOSE", "detail": "SL 1.5% breached"}
+    ]) is False
