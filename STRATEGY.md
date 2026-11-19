@@ -180,7 +180,7 @@ Keempat voter menilai **7 Parameter Standar Validasi (P1-P7)** yang sama secara 
 
 ## 6. Risk Management Dinamis — 4 Lapis Pengaman
 
-Manajemen risiko berjalan otomatis tiap 4 jam melalui workflow `risk-monitor.yml`:
+Manajemen risiko berjalan otomatis secara adaptif (dinamis 5–10 menit dengan *Smart Fast-Exit Idle* saat 0 posisi) melalui workflow `risk-monitor.yml`:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -190,25 +190,24 @@ Manajemen risiko berjalan otomatis tiap 4 jam melalui workflow `risk-monitor.yml
   [ Posisi Terbuka ]
           │
           ▼
-  [ LAPIS 2: FUNDING RATE INTEGRITY (Prioritas Tertinggi) ]
-  • Funding berubah arah (flip sign)? ──────────────> [ TUTUP POSISI SEGERA ]
-  • Funding meluruh tajam (<0.1%/hari)? ────────────> [ Geser SL ke Breakeven ]
+  [ LAPIS 2: FUNDING RATE INTEGRITY (Hysteresis 0.1%/hari) ]
+  • Funding flip sign & |funding| ≥ 0.1%/hari? ─────> [ TUTUP POSISI SEGERA ]
+  • Funding flip < 0.1%/hari atau meluruh? ─────────> [ Geser SL ke Breakeven ]
           │ (Thesis funding masih valid)
           ▼
-  [ LAPIS 1: BASELINE PROTECTION ]
-  • Belum ada TP/SL? ───────────────────────────────> [ Set SL 7% & TP 15% ]
+  [ LAPIS 1: ASYMMETRIC R:R BASELINE PROTECTION ]
+  • Belum ada TP/SL? ───────────────────────────────> [ Set SL 1.5% & TP 2.0%/2.5% ]
+  • Posisi lama melewati batas SL 1.5%? ────────────> [ Tutup (SL 1.5% migrasi) ]
           │
           ▼
-  [ LAPIS 4: PROGRESSIVE TRAILING STOP ]
-  • Profit ≥ 3% ────────────────────────────────────> [ Kunci SL di Breakeven ]
-  • Profit ≥ 5% ────────────────────────────────────> [ Trailing SL 2.5% di belakang ]
-  • Profit ≥ 10% ───────────────────────────────────> [ Trailing SL 1.5% di belakang ]
-  • Profit ≥ 20% ───────────────────────────────────> [ Trailing SL 1.0% di belakang ]
+  [ LAPIS 4: TRUE ZERO-RISK TRAILING STOP ]
+  • Profit ≥ +0.80% ────────────────────────────────> [ Lock SL Entry + 0.35% ]
+  • Profit ≥ +1.40% ────────────────────────────────> [ Lock SL Entry + 0.85% ]
+  • Profit ≥ +2.00% ────────────────────────────────> [ Trailing SL 0.60% ]
           │
           ▼
-  [ LAPIS 3: VOLATILITY & ADVERSE MOMENTUM ]
-  • Pergerakan harga melawan posisi > 3% ───────────> [ Perketat SL ke Entry ± 5% ]
-  • Pergerakan harga searah posisi > 5% ────────────> [ Kunci SL ke Breakeven + 1% ]
+  [ LAPIS 3: VOLATILITY CUT — DEPRECATED ]
+  • Digantikan sepenuhnya oleh SL baseline ketat 1.5% + 3h Cooldown pasca-close
 ```
 
 ### Penjelasan Detil Tiap Lapis:

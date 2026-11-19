@@ -135,7 +135,7 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
 - [x] Pastikan GitHub Secret terkonfigurasi lengkap di repository (`WALT_CLIENT_ID`, `WALT_REFRESH_TOKEN`, `DASHSCOPE_API_KEY`, `DASHSCOPE_API_GEMINI_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GOOGLE_SHEET_WEBHOOK_URL`, `GH_PAT`).
 - [x] Lakukan verifikasi uji coba manual (*manual trigger*) untuk workflow `daily-scan.yml`, `risk-monitor.yml`, `market-execute.yml`, dan `crypto-execute.yml`.
 - [x] Pasang Google Cloud Scheduler Bridge (Jakarta `asia-southeast2`) untuk trigger tepat detik tanpa delay cron GitHub.
-- [x] Implementasikan Dynamic TP/SL per Asset Class, Windfall Rule, dan Tangga Trailing Stop 4-Tier (+1.5% Zero-Risk Lock).
+- [x] Implementasikan Asymmetric R:R TP (+2.0%/+2.5%) & Uniform SL 1.5% per Asset Class, Windfall Rule 2.5x, True Zero-Risk Trailing Tiers (`+0.35%` / `+0.85%` / `0.60%`), dan 3-Hour Re-Entry Cooldown.
 - [x] Terapkan Minimum Order Size Clamping (`min_size_base`) untuk mencegah kegagalan risk check Walt.
 - [x] Hubungkan real-time logging ke Google Sheets via Google Apps Script Webhook.
 - [x] Aktifkan mode eksekusi riil pada saldo terdedikasi di Walt Perps.
