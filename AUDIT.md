@@ -13,7 +13,7 @@ identifikator akun, dan angka saldo sengaja dibuang. Detail instruksi per ronde 
 | Nama secret di GitHub Actions | memudahkan pihak luar memetakan apa yang ada/tidak ada di konfigurasi |
 | Saldo akun riil (USDC) | data keuangan pribadi; tidak perlu untuk jejak audit |
 | Alamat email penulis commit | PII, sudah ada di metadata git, tidak perlu digandakan di dokumen |
-| Nomor ID sheet yang telanjur tertulis sebagai default di kode | ikut disanitasi di sini meski pun sudah ada di sumber; lihat §6.3 |
+| Nomor ID sheet yang telanjur tertulis sebagai default di kode | ikut disanitasi di sini meskipun nilainya sudah ada di berkas kode publik; lihat §7 |
 
 Angka parameter strategi (SL, TP, tier trailing, buffer kas, fee) **tidak** disanitasi karena sudah
 publik di `STRATEGY.md`, `PRD.md`, `README.md`, dan kode sumber.
@@ -141,7 +141,7 @@ mempertahankan semuanya:
 5. **Guard yang tidak bisa merah bukan guard.** Setiap ronde menambahkan test yang lebih dulu
    dibuktikan gagal sebelum perbaikan; itu syarat, bukan formalitas.
 
-### 6.3 Catatan kebersihan yang masih terbuka (sengaja tidak disanitasi dari daftar, hanya dari nilai)
+## 7. Catatan kebersihan yang masih terbuka (yang disanitasi hanya nilainya, bukan keberadaannya)
 
 ID spreadsheet Google dipakai sebagai **nilai default di dalam kode sumber**, sehingga berkas kode
 yang publik sudah memuatnya. Dokumen ini tidak mengulang nilai itu. Yang perlu dilakukan suatu hari
@@ -154,7 +154,7 @@ yang publik sudah memuatnya. Dokumen ini tidak mengulang nilai itu. Yang perlu d
   membaca lewat ekspor CSV tetap butuh akses; 404 di CI menunjukkan batas ini belum dirumuskan);
 - simpan jejak keputusan itu di dokumen ini supaya tidak menjadi misteri lintas ronde.
 
-## 7. Cara memakai jejak ini
+## 8. Cara memakai jejak ini
 
 - **Ingin tahu apa yang berubah dan kenapa:** §1 dan §3; SHA commit ada di `git log` dengan tag
   `[P0-*]`, `[P1-*]`, `[P2-*]` (ronde 2), `[R3-n]` (ronde 3), `[R4-n]` (ronde 4), `[R5-n]` (ronde 5).
