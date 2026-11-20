@@ -33,6 +33,27 @@ cc = _load_tool()
 BASE = dict(DEFAULT_STRATEGY_CONFIG)
 
 
+def test_pemeriksa_dijalankan_ci_dengan_angka_produksi():
+    """Klaim di dokumen harus bisa dibuktikan dari file: keduanya memang jadi langkah diagnostics."""
+    import yaml
+    wf = yaml.safe_load((REPO_ROOT / ".github/workflows" / "diagnostics.yml").read_text(encoding="utf-8"))
+    steps = next(iter(wf["jobs"].values()))["steps"]
+    koheren = next(s for s in steps if "tools/config_coherence.py" in (s.get("run") or ""))
+    sensus = next(s for s in steps if "tools/ledger_census.py" in (s.get("run") or ""))
+    # wajib memakai VARIABLE produksi — kalau tidak, yang diperiksa cuma default kode
+    assert "vars.STRATEGY_CONFIG_JSON" in (koheren.get("env") or {}).get("STRATEGY_CONFIG_JSON", "")
+    assert "GOOGLE_SHEET_ID" in (sensus.get("env") or {})
+    for s in (koheren, sensus):
+        assert not any(k.startswith("WALT_") for k in (s.get("env") or {})), (
+            f"langkah '{s['name']}' tidak boleh menyentuh kredensial Walt"
+        )
+        assert "GITHUB_STEP_SUMMARY" in s["run"], "hasil harus naik ke Step Summary"
+    idx_oauth = min(i for i, s in enumerate(steps) if "WALT_REFRESH_TOKEN" in (s.get("env") or {}))
+    assert steps.index(koheren) < idx_oauth and steps.index(sensus) < idx_oauth, (
+        "keduanya harus tetap menghasilkan data walau token mati"
+    )
+
+
 def test_default_kode_koheren():
     assert cc.check(BASE) == [], "default kode harus lulus pemeriksaannya sendiri"
 

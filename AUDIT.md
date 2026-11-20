@@ -575,6 +575,90 @@ bukan menambah lebih banyak `cron` GitHub.
 Catatan operasional: seluruh verifikasi ronde ini memakai `diagnostics.yml mode=read_only` — nol
 langkah OAuth, jadi tidak ada lagi ras token seperti kejadian 16:00Z yang saya timbulkan sendiri.
 
+## 3j. Eksekusi berurutan (a)→(d): jendela kadens, watchdog tanpa cron, dan 11 duplikat ledger yang terbendung (2026-11-20, 17:10–18:10 UTC)
+
+### (a) Jendela riset 6j → 13j, terikat kadens, dan sumber kebenaran sebenarnya
+
+Ternyata mengubah default kode SAJA tidak berpengaruh: variable `STRATEGY_CONFIG_JSON` menimpa
+default. Keduanya diubah, dan angkanya kini TIDAK ditulis manual —
+`DEFAULT_RESEARCH_AGE_HOURS = DAILY_SCAN_CADENCE_HOURS + 1.0`.
+
+Pelajaran operasional: `gh variable set NAME --body '{json}'` di PowerShell **menghancurkan tanda
+kutip** sehingga variable sempat tersimpan sebagai string tak-valid. Sekarang ada
+`tools/set_strategy_var.py` yang (1) menyusun JSON dari `DEFAULT_STRATEGY_CONFIG`, (2) mengirimnya
+lewat **stdin**, (3) membaca balik dan menolak bila hasil baca tidak bisa diurai JSON, (4) membandingkan
+dengan kode. Verifikasi: 13 kunci, `max_research_age_hours=13.0`, `sama_dengan_kode=True`.
+Kesalahan saya sendiri terukur tidak berbahaya: loader gagal-dengan-aman (`Gagal parse sumber bersama
+STRATEGY_CONFIG_JSON ... fallback ke DEFAULT` + peringatan, exit 0) — dibuktikan dengan menjalankan
+loader memakai string rusak yang persis sama.
+
+`tools/config_coherence.py` memeriksa PASANGAN angka, bukan rentang satu angka (yang gagal dulu
+lolos semua rentang): jendela ≥ kadens scan; `min_funding_daily × hold/24` ≥ biaya round-trip
+(2×taker + slippage) dengan margin ≥1.5×; `tp_calm_pct` > biaya; `daily_loss_limit_pct` ≥ SL.
+Dijalankan atas variable produksi di diagnostics (nol OAuth) dan atas default kode di test.
+Catatan: saya SEMPAT menduga gerbang fee salah faktor 100 — setelah dibaca, implementasinya benar
+(`expected_funding = |funding_daily| × hold/24`, tanpa `/100`); dugaan itu saya buang, tidak saya
+jadikan perubahan kode.
+
+### (b) Yang mengawal si pengawal — diselesaikan dari dalam repo
+
+Cloud Scheduler pemilik TIDAK bisa dijangkau dari mesin ini: `gcloud` aktif sebagai akun pemilik,
+tapi `scheduler jobs list` menghasilkan **0 job di semua lokasi/proyek yang bisa diakses**
+(dijajal di 10 proyek; proyek `rtdicky888-com` bahkan tidak ada — itu tebakan saya, lalu dikoreksi).
+Satu-satunya konfigurasi gcloud = `porosnusantara-portal`. Jadi pemicu cadangan dibuat dari yang
+memang kita kendalikan: `keep_watchdog_alive()` dipanggil di akhir `risk-monitor.yml` dan
+`market-execute.yml` (`if: always()`), men-**dispatch** `watchdog.yml` hanya bila run watchdog
+terakhir > 50 menit. Throttle memakai **usia run**, bukan menit jam dinding, supaya tetap benar
+bila kadens berubah.
+
+Dibuktikan di produksi, dua-dua sisi:
+```
+17:40:21Z  Watchdog terakhir 440m lalu — dispatch agar jaring pengaman tetap hidup.
+17:40:21Z  Fallback dispatch `watchdog.yml` dipicu.        → watchdog jalan 17:40:20Z
+17:50:14Z  Watchdog terakhir berjalan 10m lalu (< 50.0m) — tidak perlu dispatch.
+```
+440 menit itu persis jeda 7,3 jam yang diukur di §3i. Harga yang dibayar: `actions: write` di dua
+job — bukan pelonggaran global. `PERMISSIONS_ALLOWLIST` mengunci exact-equality per workflow plus
+test arah-balik (memegang `actions: write` tanpa langkah dispatch yang terbukti = merah). Prefiks
+`WALT_` dijaga tetap berarti "kredensial": pintu daruratnya `WATCHDOG_KEEPALIVE`, dan test
+melarang env `WALT_*` di langkah keepalive (jangan sampai fasilitas baru ikut membakar token).
+
+### (d) Backfill: dedupe harus membaca sheet, dan 11 baris nyaris dobel
+
+`reconcile_history` dulu hanya membandingkan CSV lokal + `closed_ids.json` — padahal yang akan
+ditulis mirror adalah Google Sheet, dan CSV di CI berasal dari cache yang bisa ter-eviksi. Dry-run
+pertama (17:54Z) memberi angka yang menipu nyaman: `rows_seen=52, sudah_ada_di_sheet=6,
+candidates_to_add=46`. Sensus read-only baru (`tools/ledger_census.py`) menjelaskan kenapa 6, bukan 17:
+
+```
+baris_total 17 | punya_position_id 6 | tanpa_position_id 11
+tanpa_sisi 11  | terkunci_waktu 0    | tak_ternavigasi 0
+```
+
+Sebelas baris warisan itu tidak punya Position ID, tidak punya `Side`, dan `Opened At (exchange)`
+kosong — jadi kunci berbasis waktu/sisi mustahil. Identitas tertangguh yang tersisa adalah
+(aset | harga masuk 4dp), di mana arah galat dipilih **tidak menulis** bila ragu: duplikat ledger
+merusak pengukuran senyap, baris yang terlewat hanya membuat angka tetap tidak lengkap (dan itu
+dilaporkan). Hasil setelah guard terpasang (18:06Z):
+
+```
+rows_seen 52 | already_recorded 17 | dicocokkan_kunci_cadangan 11 | candidates_to_add 35
+```
+
+17 + 35 = 52, tertutup persis. **Seperempat "kandidat" (11 dari 46) ternyata sudah tercatat** —
+tanpa kunci ini, mirror pertama akan menanam 11 baris duplikat ke ledger yang dipakai menghitung
+win-rate. Guard tambahan: `--mirror-sheet` wajib bersama `--write`, dan mirror DIBATALKAN kalau
+sheet tidak terbaca (`status != ok`) — tanpa dedupe yang bisa dipercaya, menulis itu judi.
+
+### Regresi yang saya timbulkan sendiri dan diperbaiki di ronde ini
+
+Probe riset yang exit 1 (keputusan §3i, masih benar) ternyata **membloki seluruh langkah setelahnya**,
+sehingga dry-run reconcile pertama tidak pernah jalan. Sensor jujur dan pipeline yang tetap jalan
+bukan pilihan biner: langkah setelah probe kini `if: always() && ...`, dikunci test
+`test_sensor_merah_tidak_boleh_memblokir_langkah_lain`.
+
+Suite: **303 → 339 test**.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 
