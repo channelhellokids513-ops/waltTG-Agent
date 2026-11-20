@@ -523,6 +523,58 @@ gagal bila seseorang mencoba mengecualikan `AUDIT.md`, dan test yang gagal bila 
 
 Suite: **258 → 286 test** (+28), semua lulus; gerbang bersih atas 53 berkas terlacak.
 
+## 3i. Rantai baca riset selesai diperbaiki — dan menutup dengan dua temuan struktural (2026-11-20, 16:40–17:05 UTC)
+
+Setelah redeploy pemilik, mode `read_only` (nol OAuth) dipakai menguji berulang sampai tuntas.
+Empat run diagnostik, empat lapisan yang berbeda:
+
+| Run | Yang terungkap |
+|---|---|
+| #44774660187 16:34Z | Balasan webhook = `text/plain`, 42 byte: `Walt Perps Sheet Logger Webhook is active!` → **deployment aktif bukan `google_apps_script.js` repo ini** (string itu tidak ada di repo) |
+| #44776590327 16:45Z | gviz menolak `Daily_Scans` dengan `header_mismatch` → tab berisi label cantik berbahasa Indonesia (`Sisi`, `Saldo (USDC)`, `P1 (Polaritas)`), bukan nama kolom internal |
+| #44777562090 16:51Z | `_is_research_fresh gagal parse timestamp '2026-11-15 5:40:00'` → Sheets menulis ulang ISO ke formatnya sendiri; **semua baris otomatis dianggap basi** |
+| #44778524915 16:57Z | `baris=39, segar=0, basi=39, waktu_tidak_dikenali=0, terbaru=2026-11-20T00:17:17Z` → parser benar-benar bekerja di data nyata dan angka sisanya adalah **fakta data**, bukan cacat kode |
+
+Perbaikan yang masuk kode (semua ada test-nya, 303 test lulus):
+1. Pemetaan header toleran berbasis token ternormalisasi (`_normalize_header` + `map_gviz_scan_header`),
+   dengan penanda tab TIGA kolom (`timestamp_utc`+`asset`+`swarm_score`) supaya `Closed_Positions`
+   — yang juga punya kolom `Asset` — tetap ditolak. Guard anti-fallback gviz ronde 6 tetap utuh.
+2. `parse_sheet_timestamp`: ISO, `YYYY-M-D H:MM:SS` (jam tanpa nol, spasi), tanggal US, AM/PM,
+   nomor seri Sheets. Tanpa zona = UTC (kolomnya memang `Timestamp (UTC)`). Sampah tetap `None`
+   (ada test yang menuntut "kemarin"/"NVDA" TIDAK dipaksa jadi tanggal).
+3. Statistik gviz (`baris/segar/basi/waktu_tidak_dikenali/terbaru`) dicetak probe — sebuah `0`
+   tidak boleh lagi muncul tanpa penjelasan, sesuai invarian 13.
+4. Kolom `balance_usdc`/`open_positions` **ditahan** dari objek riset (test menuntut angka saldo
+   tidak ada di dalamnya) — jalur baca baru tidak boleh menjadi jalur bocor baru.
+
+**Koreksi atas dugaan saya sendiri:** sempat saya tulis "tab berhenti 15 November". Itu keliru —
+yang terlihat saat itu adalah baris *pertama yang gagal parse*, bukan yang terbaru. Setelah parser
+benar, ternyata `terbaru = 2026-11-20T00:17Z`. Kesimpulan yang bertahan hanya yang diukur.
+
+### Temuan struktural A — kadens riset vs jendela kesegaran tidak pernah bertemu
+
+`daily-scan` berjalan **00:17Z & 12:17Z** (12 jam), sementara `max_research_age_hours = 6.0`.
+Artinya reuse riset antar-workflow **secara struktural mustahil** di paruh kedua tiap interval:
+pada 16:57Z riset terbaru berumur 16,7 jam. Run 12:17 hari ini juga `skipped` (masih
+`MAINTENANCE_MODE`), jadi jendelanya melebar lagi. Untuk ronde 7: naikkan jendela ke ≥ kadens
+scan ATAU percepat kadens scan — dan putuskan mana, karena ini biaya (LLM) vs kesegaran, bukan
+bugs yang bisa "diperbaiki diam-diam".
+
+### Temuan struktural B — siapa mengawal si pengawal
+
+`watchdog.yml` memakai `cron: '0 * * * *'`, tapi run `schedule` terakhir adalah **09:55:19Z**
+(~7 jam tanpa satu pun run terjadwal), sedangkan run manual 10:19Z sukses dan push/CI tetap jalan.
+Dua kegagalan `schedule` sebelumnya (09:55, 01:10) memakai langkah lama yang memanggil `gh run list
+--status success` dan roboh `CalledProcessError` — logika itu sudah dipindah ke `tools/watchdog_check.py`
+di ronde 6, jadi kegagalannya bersejarah, bukan aktif. Yang aktif justru: **jaring pengaman untuk
+"kematian senyap scheduler" bergantung pada scheduler milik pihak yang sama**. Karena Cloud Scheduler
+milik pemilik terbukti hidup (risk-monitor 16:00/16:10 jalan tepat waktu), kandidat perbaikan ronde 7:
+tembak `watchdog.yml` dari Cloud Scheduler juga (atau dispatch watchdog tiap N siklus risk-monitor),
+bukan menambah lebih banyak `cron` GitHub.
+
+Catatan operasional: seluruh verifikasi ronde ini memakai `diagnostics.yml mode=read_only` — nol
+langkah OAuth, jadi tidak ada lagi ras token seperti kejadian 16:00Z yang saya timbulkan sendiri.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 
