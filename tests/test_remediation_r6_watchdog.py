@@ -240,6 +240,8 @@ def test_bukti_historis_defek_watchdog_lama_tidak_ada_checkout():
         ["git", "show", "e68e0eb:.github/workflows/watchdog.yml"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if old.returncode != 0:
         # CI memakai checkout dangkal (fetch-depth 1) sehingga objek baseline tidak tersedia.
