@@ -1955,6 +1955,12 @@ def _update_regime_state(
 CLOSED_IDS_PATH = "logs/closed_ids.json"
 MAX_CLOSED_IDS = 500
 
+# R6-1: penanda jujur untuk baris hasil backfill riwayat bursa. Endpoint
+# list_positions(statuses=["closed"]) tidak menyediakan harga keluar maupun realized PnL,
+# sehingga baris ini TIDAK BOLEH diisi PnL hasil turunan/aritmetika.
+EXCHANGE_HISTORY_EXIT_SOURCE = "exchange_history_no_exit"
+BACKFILL_CLOSE_REASON = "backfill riwayat bursa (harga keluar tidak tersedia di endpoint)"
+
 
 def make_position_dedupe_key(pos_dict: dict) -> str:
     """
@@ -2016,6 +2022,12 @@ def _fetch_recorded_closed_ids(csv_path: str = "logs/closed_history.csv") -> set
             local_csv_fallback=csv_path,
         )
         if not rows:
+            # R6-1: kegagalan membaca ledger tidak boleh senyap. sheet_logger sudah mencatat
+            # log.warning teragregasi untuk status sheet; ini kasus "0 baris tanpa status jelas".
+            log.warning(
+                f"_fetch_recorded_closed_ids: 0 baris terbaca dari Closed_Positions/CSV {csv_path} — "
+                "dedupe hanya bergantung pada closed_ids.json"
+            )
             return recorded
         col_map, data_rows, used_fallback = resolve_closed_positions_columns(rows)
         if used_fallback:
@@ -2027,7 +2039,7 @@ def _fetch_recorded_closed_ids(csv_path: str = "logs/closed_history.csv") -> set
             if pid_idx >= 0 and len(r) > pid_idx and str(r[pid_idx]).strip():
                 recorded.add(str(r[pid_idx]).strip())
     except Exception as e:
-        log.debug(f"Gagal membaca Position ID dari Closed_Positions: {e}")
+        log.warning(f"Gagal membaca Position ID dari Closed_Positions ({type(e).__name__}): {e}")
     return recorded
 
 
@@ -3546,12 +3558,23 @@ def compute_closed_stats(
     - estimasi fee (0.09%/sisi dari TAKER_FEE_PER_SIDE × 2 × notional), total funding, net PnL, breakdown alasan close.
     """
     from sheet_logger import fetch_sheet_csv_rows, resolve_closed_positions_columns
+    import sheet_logger as _sheet_logger
 
     rows = fetch_sheet_csv_rows(
         "Closed_Positions",
         expected_col_name="Exit Price ($)",
         local_csv_fallback=csv_path,
     )
+    # R6-1: bedakan "sheet tidak terbaca" dari "sheet terbaca tapi kosong".
+    sheet_status = _sheet_logger.get_ledger_read_status("Closed_Positions")
+    sheet_detail = _sheet_logger.get_ledger_read_detail("Closed_Positions")
+    ledger_unreadable = (not rows) and sheet_status != "ok"
+    if ledger_unreadable:
+        banner = (
+            f"LEDGER TIDAK TERTBACA ({sheet_status}) — angka 0 di bawah BUKAN berarti tidak ada trade"
+        )
+        print(banner)
+        log.warning(f"{banner} | detail: {sheet_detail}")
     col_map, data_rows, used_fallback = resolve_closed_positions_columns(rows)
     if rows and used_fallback:
         log.warning(
@@ -3578,6 +3601,7 @@ def compute_closed_stats(
 
     trades = []
     unknown_count = 0
+    unmeasured_backfill_count = 0
     seen_keys: set[str] = set()
     trade_parse_failures: list[str] = []
     reason_breakdown: dict[str, int] = {
@@ -3612,6 +3636,11 @@ def compute_closed_stats(
         if is_unknown:
             unknown_count += 1
             reason_breakdown["UNKNOWN"] = reason_breakdown.get("UNKNOWN", 0) + 1
+            # R6-1: baris hasil backfill riwayat bursa sengaja tanpa exit/PnL (endpoint list
+            # positions(statuses=["closed"]) tidak menyediakan harga keluar). Ini "belum terukur",
+            # BUKAN kegagalan parsing dan BUKAN trade rugi.
+            if _cell(r, idx_exit_src) == EXCHANGE_HISTORY_EXIT_SOURCE:
+                unmeasured_backfill_count += 1
             continue
 
         try:
@@ -3763,6 +3792,16 @@ def compute_closed_stats(
         "hold_time_warning": hold_time_warning,
         "strategy_version": get_strategy_version_hash(),
         "breakdown_by_reason": reason_breakdown,
+        # R6-1: kejujuran sumber data. "0 trade" dari sheet yang tidak terbaca bukan performa nol.
+        "ledger_source": {
+            "sheet_status": sheet_status,
+            "sheet_detail": sheet_detail,
+            "spreadsheet_configured": bool(_sheet_logger.get_spreadsheet_id()),
+            "rows_from": "none" if not rows else (sheet_status if sheet_status in ("ok", "local_csv") else "unknown"),
+            "unreadable": ledger_unreadable,
+        },
+        "pnl_terukur": total_trades,
+        "belum_terukur_pnl": unmeasured_backfill_count,
     }
 
     eq_line = (
@@ -3777,6 +3816,11 @@ def compute_closed_stats(
     )
     msg_lines = [
         f"*📈 Walt Perps — Closed Positions Stats* (Ver: `{stats['strategy_version']}`)",
+        (
+            f"LEDGER TIDAK TERTBACA ({sheet_status}) — angka 0 di bawah BUKAN berarti tidak ada trade"
+            if ledger_unreadable
+            else f"Sumber ledger: `{stats['ledger_source']['rows_from']}` | PnL terukur: `{total_trades}` | belum terukur (backfill bursa): `{unmeasured_backfill_count}`"
+        ),
         f"Total Trade Valid: *{total_trades}* (Win: {len(wins)} | Loss: {len(losses)}) | UNKNOWN: *{unknown_count}*",
         f"Win Rate (tanpa UNKNOWN): *{win_rate_pct:.1f}%*",
         eq_line,
@@ -3865,6 +3909,9 @@ def dump_closed_schema(client: WaltClient, limit: int = 3) -> dict[str, Any]:
     out: dict[str, Any] = {
         "closed_positions_count": len(positions),
         "sample_schemas": sample_schemas,
+        # R6-1: pengukuran yang sama dipakai reconcile_history — dicetak di diagnostics CI agar
+        # kelengkapan riwayat (termasuk kemungkinan TERPOTONG) terlihat tanpa kredensial lokal.
+        "history_measurement": describe_closed_history(client, positions=positions, resp=resp),
     }
     if not positions:
         try:
@@ -3879,6 +3926,232 @@ def dump_closed_schema(client: WaltClient, limit: int = 3) -> dict[str, Any]:
     return out
 
 
+def _extract_positions(resp: Any) -> list[dict]:
+    """Ambil daftar posisi dari respons MCP (dict berisi 'positions' atau list langsung)."""
+    if isinstance(resp, dict):
+        pos = resp.get("positions", [])
+        return [p for p in pos if isinstance(p, dict)] if isinstance(pos, list) else []
+    if isinstance(resp, list):
+        return [p for p in resp if isinstance(p, dict)]
+    return []
+
+
+def _is_valid_number(value: Any) -> bool:
+    try:
+        num = float(str(value).strip())
+    except (TypeError, ValueError):
+        return False
+    return num == num and num not in (float("inf"), float("-inf"))
+
+
+def describe_closed_history(
+    client: WaltClient,
+    positions: Optional[list[dict]] = None,
+    resp: Any = None,
+    probe_pagination: bool = True,
+) -> dict[str, Any]:
+    """
+    R6-1 langkah 1: UKUR dulu isi riwayat closed di bursa sebelum menulis kode apa pun.
+    READ-ONLY: hanya list_positions (+ tools/list untuk mendeteksi kemampuan paginasi).
+    Tidak pernah memanggil prepare/execute order.
+    """
+    import inspect
+
+    if positions is None:
+        resp = client.list_positions(statuses=["closed"])
+        positions = _extract_positions(resp)
+
+    wrapper_keys = sorted(resp.keys()) if isinstance(resp, dict) else []
+    pagination_hints = {
+        k: resp.get(k)
+        for k in ("total", "count", "limit", "page", "pageSize", "cursor", "nextCursor", "hasMore")
+        if isinstance(resp, dict) and k in resp
+    }
+
+    created_vals = sorted(v for v in (str(p.get("created_at") or "").strip() for p in positions) if v)
+    updated_vals = sorted(v for v in (str(p.get("updated_at") or "").strip() for p in positions) if v)
+
+    invalid_fields: dict[str, int] = {}
+    for field in ("avg_entry_price", "value_base", "margin_quote", "funding_paid_quote", "contract_id", "leverage"):
+        invalid_fields[field] = sum(1 for p in positions if not _is_valid_number(p.get(field)))
+
+    client_params = list(inspect.signature(client.list_positions).parameters)
+    tool_pagination_params: list[str] = []
+    if probe_pagination:
+        try:
+            for tool in client.list_tools():
+                if tool.get("name") != "perps_list_positions":
+                    continue
+                schema = tool.get("inputSchema") or {}
+                props = list((schema.get("properties") or {}).keys()) if isinstance(schema, dict) else []
+                tool_pagination_params = [
+                    p for p in props
+                    if any(h in p.lower() for h in ("limit", "offset", "page", "cursor", "since"))
+                ]
+        except Exception as exc:
+            log.warning(f"describe_closed_history: gagal inspeksi tools/list ({type(exc).__name__}): {exc}")
+
+    total_hint = None
+    for key in ("total", "count", "totalCount"):
+        if isinstance(pagination_hints.get(key), int):
+            total_hint = pagination_hints[key]
+            break
+
+    if total_hint is not None and total_hint == len(positions):
+        completeness_verdict = f"LENGKAP (bursa melaporkan total={total_hint} == jumlah item diterima)"
+    elif tool_pagination_params:
+        completeness_verdict = (
+            "TIDAK BISA DIVERIFIKASI: endpoint mendukung paginasi "
+            f"{tool_pagination_params} tapi klien tidak memakainya"
+        )
+    else:
+        completeness_verdict = (
+            "TIDAK BISA DIVERIFIKASI: kemungkinan terpotong — respons tidak memuat total/cursor "
+            "dan klien tidak punya parameter paginasi"
+        )
+
+    return {
+        "closed_positions_count": len(positions),
+        "response_wrapper_keys": wrapper_keys,
+        "pagination_hints_in_response": pagination_hints,
+        "client_list_positions_params": client_params,
+        "tool_pagination_params": tool_pagination_params,
+        "created_at_min": created_vals[0] if created_vals else None,
+        "created_at_max": created_vals[-1] if created_vals else None,
+        "updated_at_min": updated_vals[0] if updated_vals else None,
+        "updated_at_max": updated_vals[-1] if updated_vals else None,
+        "invalid_number_field_counts": invalid_fields,
+        "completeness_verdict": completeness_verdict,
+    }
+
+
+def build_backfill_rows(closed_positions: list[dict]) -> list[dict]:
+    """
+    Konversi posisi closed dari bursa menjadi baris ledger.
+    KUNCI DEDUPE: memakai ulang make_position_dedupe_key (SATU skema kunci untuk backfill & live),
+    dengan pemetaan contract_id <- contract_id, entry_price <- avg_entry_price,
+    opened_at <- created_at, position_id <- "" — jalur live membangun kunci yang sama dari
+    snapshot open sehingga backfill dan deteksi live collapse ke satu identitas.
+    """
+    rows: list[dict] = []
+    for cp in closed_positions:
+        key = make_position_dedupe_key(
+            {
+                "position_id": "",
+                "contract_id": cp.get("contract_id"),
+                "entry_price": cp.get("avg_entry_price"),
+                "opened_at": cp.get("created_at"),
+            }
+        )
+        rows.append(
+            {
+                "position_id": key,
+                "asset": cp.get("contract_base_asset") or cp.get("contract_name") or "",
+                "side": str(cp.get("side") or "").upper(),
+                "contract_id": cp.get("contract_id"),
+                "entry_price": cp.get("avg_entry_price"),
+                "exit_price": None,
+                "margin": cp.get("margin_quote"),
+                "pnl_quote": None,
+                "funding_quote": cp.get("funding_paid_quote"),
+                "reason": BACKFILL_CLOSE_REASON,
+                "closed_at": str(cp.get("updated_at") or ""),
+                "opened_at": str(cp.get("created_at") or ""),
+                "exit_source": EXCHANGE_HISTORY_EXIT_SOURCE,
+            }
+        )
+    return rows
+
+
+def reconcile_history(
+    client: WaltClient,
+    write: bool = False,
+    limit: Optional[int] = None,
+    csv_path: str = "logs/closed_history.csv",
+    closed_ids_path: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Sinkronkan ledger lokal dengan riwayat closed API bursa. READ-ONLY terhadap bursa
+    (hanya list_positions); tidak ada prepare/execute order. Default = dry-run.
+
+    write=True menyimpan kandidat ke logs/closed_history.csv + closed_ids.json dengan backup
+    bertimestamp lebih dulu, TANPA mengirim webhook ke Google Sheet (mirror sheet tidak diubah
+    tanpa persetujuan pemilik).
+    """
+    ids_path = closed_ids_path or CLOSED_IDS_PATH
+    resp = client.list_positions(statuses=["closed"])
+    positions = _extract_positions(resp)
+    measurement = describe_closed_history(client, positions=positions, resp=resp)
+
+    rows = build_backfill_rows(positions)
+    if limit is not None:
+        rows = rows[: max(0, int(limit))]
+
+    existing = _fetch_recorded_closed_ids(csv_path) | set(_load_closed_ids(ids_path))
+    candidates = [r for r in rows if r["position_id"] not in existing]
+
+    summary: dict[str, Any] = {
+        "mode": "write" if write else "dry_run",
+        "measurement": measurement,
+        "rows_seen": len(rows),
+        "already_recorded": len(rows) - len(candidates),
+        "candidates_to_add": len(candidates),
+        "candidate_preview": [
+            {
+                "position_id": c["position_id"],
+                "asset": c["asset"],
+                "side": c["side"],
+                "opened_at": c["opened_at"],
+                "closed_at": c["closed_at"],
+                "pnl": "BELUM TERUKUR (endpoint tanpa harga keluar)",
+            }
+            for c in candidates[:10]
+        ],
+        "written": 0,
+        "backup": None,
+        "completeness_verdict": measurement["completeness_verdict"],
+    }
+
+    if not write:
+        summary["note"] = (
+            f"dry-run: tidak ada file yang diubah. Pakai --write untuk menyimpan {len(candidates)} "
+            f"baris kandidat ke {csv_path} + {ids_path}."
+        )
+        return summary
+
+    from sheet_logger import log_close
+
+    if os.path.exists(csv_path) and candidates:
+        import shutil
+
+        backup_path = f"{csv_path}.bak-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        shutil.copy2(csv_path, backup_path)
+        summary["backup"] = os.path.basename(backup_path)
+
+    for row in candidates:
+        log_close(
+            asset=row["asset"],
+            side=row["side"],
+            contract_id=int(row["contract_id"] or 0),
+            entry_price=float(row["entry_price"] or 0.0),
+            exit_price=None,
+            margin=float(row["margin"] or 0.0),
+            pnl_quote=None,
+            funding_quote=float(row["funding_quote"] or 0.0),
+            reason=row["reason"],
+            position_id=row["position_id"],
+            closed_at=row["closed_at"],
+            opened_at=row["opened_at"],
+            filepath=csv_path,
+            exit_source=row["exit_source"],
+            webhook=False,
+        )
+        _record_closed_id(row["position_id"], path=ids_path)
+        summary["written"] += 1
+
+    return summary
+
+
 def main(command: str = "scan"):
     """
     CLI entry point.
@@ -3889,7 +4162,10 @@ def main(command: str = "scan"):
         python walt_bot.py monitor               # risk monitor run
         python walt_bot.py market_execute        # execute US stocks & commodities
         python walt_bot.py crypto_execute        # execute bluechip crypto (BTC, ETH, SOL)
-        python walt_bot.py stats                 # closed positions performance stats
+        python walt_bot.py stats                 # closed positions performance stats (dengan ledger_source)
+        python walt_bot.py reconcile_history     # dry-run: ukur & bandingkan riwayat closed bursa vs ledger
+        python walt_bot.py reconcile_history --write   # simpan kandidat backfill (backup dulu, tanpa webhook)
+        python walt_bot.py reconcile_history --limit 5 # uji parsial
         python walt_bot.py open NBIS short 2.50  # buka posisi manual
         python walt_bot.py close NBIS            # tutup posisi
     """
@@ -3905,6 +4181,21 @@ def main(command: str = "scan"):
     if command == "dump_closed":
         schema = dump_closed_schema(client)
         print(json.dumps(schema, indent=2, default=str))
+        return
+
+    if command == "reconcile_history":
+        argv = sys.argv[2:]
+        write = "--write" in argv
+        limit: Optional[int] = None
+        if "--limit" in argv:
+            pos = argv.index("--limit")
+            if pos + 1 >= len(argv):
+                print("Penggunaan: reconcile_history [--write] [--limit N]")
+                return
+            limit = int(argv[pos + 1])
+        result = reconcile_history(client, write=write, limit=limit)
+        print(json.dumps(result, indent=2, default=str))
+        print(f"\nKELENGKAPAN: {result['completeness_verdict']}")
         return
 
     if command == "scan":

@@ -19,9 +19,65 @@ import httpx
 
 log = logging.getLogger("sheet_logger")
 
-DEFAULT_SPREADSHEET_ID = os.getenv("GOOGLE_SHEET_ID", "1ag6MqYnOLdZgkFwk_cs3W-22EOX5e5DGQTVvPWENHTg")
+# R6-1: ID spreadsheet WAJIB dari env `GOOGLE_SHEET_ID`. Sebelumnya ada nilai default hardcoded di
+# sini, sehingga (a) repo publik memuat identifier dan (b) kegagalan konfigurasi muncul sebagai
+# HTTP 401 senyap, bukan sebagai konfigurasi yang hilang. Sekarang: tanpa ID => status `no_config`
+# dan nol percobaan HTTP.
 DEFAULT_WEBHOOK_URL = os.getenv("GOOGLE_SHEET_WEBHOOK_URL", "")
 FALLBACK_LOG_DIR = "logs"
+
+# Status yang berarti ledger TIDAK bisa dibaca dari sheet (harus berbunyi, bukan log.debug).
+LEDGER_UNREADABLE_STATUSES = frozenset(
+    {"http_error", "html_or_unparsable", "header_mismatch", "empty", "no_config"}
+)
+_LEDGER_WARN_INTERVAL_SEC = 900.0
+_ledger_warn_at: dict[str, float] = {}
+_ledger_last_status: dict[str, tuple[str, str]] = {}
+
+
+def get_spreadsheet_id(explicit: Optional[str] = None) -> str:
+    """ID spreadsheet dari argumen eksplisit atau env GOOGLE_SHEET_ID (kosong = tidak dikonfigurasi)."""
+    return (explicit or os.environ.get("GOOGLE_SHEET_ID") or "").strip()
+
+
+def get_ledger_read_status(sheet_name: str) -> str:
+    """Status pembacaan terakhir sheet_name: ok|local_csv|http_error|html_or_unparsable|
+    header_mismatch|empty|no_config|unknown (belum pernah membaca pada proses ini)."""
+    return _ledger_last_status.get(sheet_name, ("unknown", ""))[0]
+
+
+def get_ledger_read_detail(sheet_name: str) -> str:
+    return _ledger_last_status.get(sheet_name, ("unknown", ""))[1]
+
+
+def reset_ledger_warning_state() -> None:
+    """Kosakkan jendela agregasi (dipakai test; di produksi cukup sekali per proses)."""
+    _ledger_warn_at.clear()
+
+
+def _record_ledger_status(sheet_name: str, status: str, detail: str = "") -> None:
+    _ledger_last_status[sheet_name] = (status, detail)
+
+
+def _redact_sheet_id(text: str, sheet_id: str) -> str:
+    """Pesan httpx memuat URL export (berisi ID sheet) — never print it in full (aturan Ronde 6)."""
+    if sheet_id and sheet_id in text:
+        return text.replace(sheet_id, "<GOOGLE_SHEET_ID>")
+    return text
+
+
+def _warn_ledger_unreadable(sheet_name: str, status: str, detail: str) -> None:
+    """Satu baris log.warning per (sheet, status) per 15 menit — kegagalan ledger tidak boleh senyap."""
+    if status not in LEDGER_UNREADABLE_STATUSES:
+        return
+    key = f"{sheet_name}:{status}"
+    now = time.time()
+    if now - _ledger_warn_at.get(key, 0.0) < _LEDGER_WARN_INTERVAL_SEC:
+        return
+    _ledger_warn_at[key] = now
+    log.warning(
+        f"LEDGER TIDAK TERTBACA dari sheet '{sheet_name}' (status={status}): {detail}"
+    )
 
 
 def _ensure_dir(path: str):
@@ -198,7 +254,9 @@ def log_scan_via_gsheets_cli(rows: list[list[Any]], spreadsheet_id: str) -> bool
     """Kirim data scan ke Google Sheets menggunakan gsheets CLI jika tersedia."""
     try:
         batch_req = [{"op": "append", "range": "Daily_Scans!A1", "data": rows}]
-        tmp_json = "logs/_tmp_sheet_batch.json"
+        # R6-5: path lewat modul agar fixture isolasi test bisa mengarahkan file ini (sebelumnya
+        # literal "logs/..." sehingga tidak bisa diisolasi dan tidak terpantau guard state).
+        tmp_json = os.path.join(FALLBACK_LOG_DIR, "_tmp_sheet_batch.json")
         _ensure_dir(tmp_json)
         with open(tmp_json, "w", encoding="utf-8") as f:
             json.dump(batch_req, f)
@@ -238,7 +296,7 @@ def log_scan(summary: dict, researches: dict[str, Any]) -> dict:
         webhook_ok = log_scan_via_webhook(rows, webhook_url)
 
     cli_ok = False
-    sheet_id = os.environ.get("GOOGLE_SHEET_ID", DEFAULT_SPREADSHEET_ID)
+    sheet_id = get_spreadsheet_id()
     if not webhook_ok and sheet_id:
         cli_ok = log_scan_via_gsheets_cli(rows, sheet_id)
 
@@ -355,6 +413,86 @@ def resolve_closed_positions_columns(
     return dict(_CLOSED_POSITIONS_CANONICAL_IDX), data_rows, True
 
 
+def fetch_sheet_csv_rows_ex(
+    sheet_name: str,
+    spreadsheet_id: Optional[str] = None,
+    expected_col_name: Optional[str] = None,
+    local_csv_fallback: Optional[str] = None,
+) -> tuple[list[list[str]], str]:
+    """
+    Sama seperti fetch_sheet_csv_rows, tapi mengembalikan (rows, status) sehingga pemanggil bisa
+    membedakan "sheet benar-benar kosong" dari "sheet tidak bisa dibaca".
+
+    status: ok | local_csv | http_error | html_or_unparsable | header_mismatch | empty | no_config
+    Kegagalan baca sheet dicatat sebagai log.warning TERAGREGASI (1x per 15 menit per status),
+    bukan log.debug (R6-1: ledger mati total tidak boleh senyap).
+    """
+    sheet_id = get_spreadsheet_id(spreadsheet_id)
+    if not sheet_id:
+        # Nol percobaan HTTP bila ID tidak dikonfigurasi.
+        if local_csv_fallback and os.path.exists(local_csv_fallback):
+            try:
+                with open(local_csv_fallback, mode="r", encoding="utf-8") as f:
+                    rows = list(csv.reader(f))
+                _record_ledger_status(
+                    sheet_name, "local_csv", "GOOGLE_SHEET_ID tidak diset; memakai fallback CSV lokal"
+                )
+                return rows, "local_csv"
+            except Exception as e:
+                _warn_ledger_unreadable(sheet_name, "no_config", f"fallback CSV lokal gagal dibaca: {e}")
+        _record_ledger_status(sheet_name, "no_config", "GOOGLE_SHEET_ID tidak diset dan CSV lokal tidak ada")
+        _warn_ledger_unreadable(sheet_name, "no_config", "GOOGLE_SHEET_ID tidak diset")
+        return [], "no_config"
+
+    export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
+    sheet_rows: list[list[str]] = []
+    failure_detail = ""
+    try:
+        r = httpx.get(export_url, follow_redirects=True, timeout=12.0)
+        status_code = int(getattr(r, "status_code", 0) or 0)
+        text = getattr(r, "text", "") or ""
+        if status_code != 200:
+            failure_detail = f"HTTP {status_code} pada gviz export sheet '{sheet_name}'"
+            status = "http_error"
+        elif not text.strip() or text.lstrip().startswith("<"):
+            failure_detail = f"HTTP {status_code} tapi body bukan CSV (kemungkinan halaman login/HTML)"
+            status = "html_or_unparsable"
+        else:
+            parsed = list(csv.reader(io.StringIO(text)))
+            if not parsed:
+                failure_detail = "CSV gviz mengembalikan 0 baris"
+                status = "empty"
+            elif expected_col_name and expected_col_name not in [c.strip() for c in parsed[0]]:
+                # gviz fallback ke sheet pertama bila nama tab tidak ada -> jangan dianggap data.
+                failure_detail = (
+                    f"kolom '{expected_col_name}' tidak ditemukan di header (tab '{sheet_name}' mungkin tidak ada)"
+                )
+                status = "header_mismatch"
+            else:
+                _record_ledger_status(sheet_name, "ok", f"HTTP {status_code}, {len(parsed)} baris")
+                return parsed, "ok"
+    except Exception as e:
+        status = "http_error"
+        failure_detail = f"{type(e).__name__}: {_redact_sheet_id(str(e)[:200], sheet_id)}"
+
+    _warn_ledger_unreadable(sheet_name, status, failure_detail)
+    _record_ledger_status(sheet_name, status, failure_detail)
+
+    if local_csv_fallback and os.path.exists(local_csv_fallback):
+        try:
+            with open(local_csv_fallback, mode="r", encoding="utf-8") as f:
+                sheet_rows = list(csv.reader(f))
+            _record_ledger_status(
+                sheet_name, "local_csv", f"fallback CSV lokal setelah {status}: {failure_detail}"
+            )
+            return sheet_rows, "local_csv"
+        except Exception as e:
+            _record_ledger_status(sheet_name, status, f"{failure_detail} | fallback lokal gagal: {e}")
+            return [], status
+
+    return [], status
+
+
 def fetch_sheet_csv_rows(
     sheet_name: str,
     spreadsheet_id: Optional[str] = None,
@@ -366,31 +504,17 @@ def fetch_sheet_csv_rows(
     Jika expected_col_name diberikan, memvalidasi bahwa header baris pertama mengandung kolom tersebut
     (mencegah false-positive saat Google Sheets gviz fallback ke sheet pertama jika sheet belum ada).
     Fallback ke file CSV lokal jika Google Sheet tidak dapat diakses publik.
+
+    Wrapper kompatibilitas: status pembacaan tersedia via fetch_sheet_csv_rows_ex /
+    get_ledger_read_status().
     """
-    sheet_id = spreadsheet_id or os.environ.get("GOOGLE_SHEET_ID", DEFAULT_SPREADSHEET_ID)
-    if sheet_id:
-        export_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
-        try:
-            r = httpx.get(export_url, follow_redirects=True, timeout=12.0)
-            if r.status_code == 200 and r.text and not r.text.lstrip().startswith("<"):
-                reader = list(csv.reader(io.StringIO(r.text)))
-                if reader:
-                    if expected_col_name:
-                        header_row = [c.strip() for c in reader[0]]
-                        if expected_col_name not in header_row:
-                            return []
-                    return reader
-        except Exception as e:
-            log.debug(f"CSV export fetch untuk sheet '{sheet_name}' gagal: {e}")
-
-    if local_csv_fallback and os.path.exists(local_csv_fallback):
-        try:
-            with open(local_csv_fallback, mode="r", encoding="utf-8") as f:
-                return list(csv.reader(f))
-        except Exception as e:
-            log.debug(f"Gagal baca fallback CSV lokal '{local_csv_fallback}': {e}")
-
-    return []
+    rows, _status = fetch_sheet_csv_rows_ex(
+        sheet_name,
+        spreadsheet_id=spreadsheet_id,
+        expected_col_name=expected_col_name,
+        local_csv_fallback=local_csv_fallback,
+    )
+    return rows
 
 
 def log_close(
@@ -408,10 +532,14 @@ def log_close(
     opened_at: str = "",
     filepath: str = "logs/closed_history.csv",
     exit_source: str = "",
+    webhook: bool = True,
 ) -> dict:
     """
     Catat penutupan posisi ke sheet 'Closed_Positions' via webhook dan ke logs/closed_history.csv.
     Jika exit_price / pnl_quote None (data close tidak tersedia), kolom ditulis kosong ("").
+
+    webhook=False dipakai oleh backfill riwayat dari API bursa (R6-1): menulis 52 baris lama ke
+    spreadsheet bukan operasi read-only dan belum disetujui, sehingga cukup masuk ledger lokal.
     """
     _ensure_dir(filepath)
     file_exists = os.path.exists(filepath) and os.path.getsize(filepath) > 0
@@ -448,7 +576,7 @@ def log_close(
 
     webhook_ok = False
     webhook_url = _normalize_webhook_url(os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", DEFAULT_WEBHOOK_URL))
-    if webhook_url:
+    if webhook and webhook_url:
         webhook_ok = _post_webhook(
             {
                 "action": "log_close",

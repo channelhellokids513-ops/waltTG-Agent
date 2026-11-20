@@ -2,7 +2,9 @@
  * Google Apps Script Webhook untuk Walt Perps Trading & Funding Log
  * 
  * CARA PASANG:
- * 1. Buka Google Sheet: https://docs.google.com/spreadsheets/d/1ag6MqYnOLdZgkFwk_cs3W-22EOX5e5DGQTVvPWENHTg/edit
+ * 1. Buka Google Sheet Anda: https://docs.google.com/spreadsheets/d/<GOOGLE_SHEET_ID>/edit
+ *    (ID TIDAK ditulis di sumber publik — lihat Ronde 6 [R6-1]; sumber resmi: secret/variable
+ *    GOOGLE_SHEET_ID di GitHub Actions atau env lokal Anda)
  * 2. Klik menu: Extensions (Ekstensi) > Apps Script
  * 3. Hapus kode default, paste seluruh kode ini.
  * 4. Klik: Deploy > New deployment (Penerapan Baru)
