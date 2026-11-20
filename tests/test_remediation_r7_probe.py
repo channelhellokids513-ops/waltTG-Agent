@@ -398,6 +398,9 @@ def test_header_cantik_sheet_terpetakan_ke_kolom_internal():
 
 
 def test_gviz_membaca_tab_berheader_cantik_end_to_end(monkeypatch):
+    # Memo mismatch adalah state global antar-test; tanpa dibersihkan, test ini bisa
+    # mewarisi "header_mismatch" dari test yang berjalan lebih dulu (flake urutan).
+    sheet_logger._last_header_mismatch.pop("Daily_Scans", None)
     baris = ["", "", "", "NVDA", "short", "0.84%", "", "+0.42", "bullish", "STRONG", "both_agree",
              "0.5", "0.3", "0.2", "0.1", "GO", "2.50", "alasan", "narasi"]
     baris[0] = _ts(-1)

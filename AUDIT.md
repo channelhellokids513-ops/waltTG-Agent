@@ -700,6 +700,78 @@ entry = menurunkan margin keamanan, dan itu keputusan pemilik. Pilihan yang ters
 Sampai salah satu diputuskan, sistem yang sudah live akan tetap membuka NOL posisi. Itu fakta yang
 perlu tertulis, bukan disimpulkan dari ketiadaan order.
 
+## 3l. Permintaan pemilik: strategi RR 1:3 dengan winrate > 30% (diukur 2026-11-21, 21:3xZ)
+
+**Permintaan.** "Cari strategi dengan RR 1:3 yang winrate-nya di atas 30%."
+
+**Alat yang dibangun.** `tools/rr_scan.py` — TP = 3 x SL, resolusi intrabar KONSERVATIF
+(bila TP dan SL tersentuh pada bar yang sama, trade dihitung RUGI), satu posisi per aset
+(tanpa tumpang-tindih), 20 koin universe nyata (`CRYPTO_ASSETS`), bar 4h x 1000 (~5,5
+bulan), biaya round-trip diuji pada dua tingkat: 0,18% (fee saja) dan 1,18%
+(fee + slippage yang dinyatakan venue, lihat 3k). Matematika impasnya diuji terpisah di
+`tests/test_rr_scan.py`.
+
+**Temuan 1 — target "winrate > 30%" tercapai oleh entri ACAK, dan tetap rugi.**
+Pembanding null (sinyal deterministik acak, aturan pasar identik):
+
+| SL | TP | win rate acak | gross | net setelah biaya 1,18% |
+|---|---|---|---|---|
+| 1,5% | 4,5% | **32,3%** | +0,292R | **−0,495R** |
+| 3,0% | 9,0% | 26,7% | +0,068R | −0,325R |
+| 5,0% | 15,0% | 24,5% | −0,018R | −0,254R |
+| 8,0% | 24,0% | 15,5% | −0,380R | −0,527R |
+
+Jadi "RR 1:3 dengan winrate di atas 30%" **bukan kriteria strategi**: pada lebar stop
+1,5% sebuah lemparan koin memenuhi syarat itu dan kehilangan 0,5R per trade. Win rate
+hanya berarti bila dibandingkan null pada lebar stop yang sama, dan yang membayar adalah
+EV bersih per R.
+
+**Temuan 2 — tidak ada satu pun aturan harga yang melampaui null pada jendela ini.**
+Mean-reversion (21,6%/19,4%), wick-reversal (21,9%/20,1%) dan breakdown (22,3%/22,5%)
+semuanya DI BAWAH null. Momentum breakout yang terbaik: 28,7% pada SL 1,5% (masih di
+bawah null 32,3%) dan 28,6% pada SL 8,0% dengan netR −0,002 (impas, bukan untung).
+Kesimpulan sementara yang jujur: pada ~5,5 bulan data ini, rule harga generik tidak
+memiliki tepi yang terukur.
+
+**Temuan 3 — yang membunuh RR 1:3 adalah biaya, bukan rasio imbalannya.**
+Kebutuhan win rate impas = (R + c) / 4R. Dengan c = 1,18%: SL 1,5% butuh **44,7%**,
+SL 3% butuh 34,8%, SL 5% butuh 30,9%, SL 8% butuh 28,7%. Pada stop sempit, biaya
+round-trip setara **0,79R** — hampir seluruh satu sisi taruhan habis di jalan keluar.
+
+**Temuan 4 — carry funding mengubah bentuk soal, dan ini yang koheren dengan strategi kita.**
+Funding adalah arus yang terpisah dari arah harga: EV = [p·3R − (1−p)R] − c + f·T.
+Dengan durasi tahan TERUKUR dari scan di atas dan funding harian yang benar-benar
+teramati (0,52%–0,85%, lihat 3k):
+
+| SL | tahan rata-rata | biaya (R) | impas tanpa carry | impas + f 0,52%/hari | impas + f 0,85%/hari |
+|---|---|---|---|---|---|
+| 1,5% | 0,9 hari | 0,79 | 44,7% | 36,8% | 31,8% |
+| 3,0% | 2,7 hari | 0,39 | 34,8% | 23,0% | 15,6% |
+| 5,0% | 5,9 hari | 0,24 | 30,9% | **15,6%** | **5,9%** |
+| 8,0% | 11,8 hari | 0,15 | 28,7% | 9,6% | 0,0% |
+
+Bentuk strategi yang lolos dari permintaan ini karena itu bukan "TP jauh, stop sempit",
+melainkan **stop lebar (3–5%) + tahan berhari-hari + menangkar carry**: win rate 30% yang
+Anda minta menjadi jauh melampaui kebutuhan (15,6% pada SL 5%). Efek sampingnya
+menyentuh 3k dari sisi yang benar: `expected_hold_hours` naik dari 24 jam menjadi
+~5,9 hari menurunkan kebutuhan funding harian gerbang E5 dari ~1,77%/hari menjadi
+~0,2%/hari, sehingga funding teramati 0,52–0,85% **lolos** — tapi konsekuensinya risiko
+per trade naik 3,3x, sehingga ukuran posisi (bukan TP) yang harus turun.
+
+**Batas yang belum ditutup (jangan dipakai untuk mengubah config hari ini).**
+(a) Semua ini IN-SAMPLE, tanpa walk-forward, satu jendela waktu, dan aturan yang diuji
+adalah aturan generik — bukan klaim bahwa tidak ada aturan yang bekerja.
+(b) Carry dianggap konstan pada level harian teramati; **deret funding historis tidak
+kita punya** (kolom funding `Daily_Scans` satuannya campur — lihat temuan ronde 7), jadi
+sisi penerima funding belum terverifikasi per posisi.
+(c) Dua angka biaya yang saya pakai berasal dari dunia yang BERBEDA: 1,18% adalah biaya
+dinyatakan venue (fee + slippage ~1,00% untuk clip kita, lihat 3k), sedangkan 0,18% hanya fee.
+Selisih keduanya memisahkan "mustahil" dari "longgar", tapi alat ukurnya
+`tools/contract_economics.py` BELUM ditulis; menjalankannya butuh satu rotasi OAuth
+    (keputusan pemilik). Sebelum biaya itu terukur langsung di bursa, memilih TP/SL
+    adalah menebak di antara dua dunia - bukan optimasi.
+(d) Tidak ada perubahan `strategy_config` yang saya lakukan di ronde ini.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 
