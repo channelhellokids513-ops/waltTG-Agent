@@ -59,3 +59,18 @@ jobs:
         run: |
           set -o pipefail
           { echo "### 2. \`dump_closed\` Schema + pengukuran riwayat bursa"; echo '```json'; python walt_bot.py dump_closed | tee -a "$GITHUB_STEP_SUMMARY" | tee /dev/stderr; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      # R6-1 lanjutan: baseline riwayat closed bursa vs ledger, TANPA menulis apa pun (--write tetap manual).
+      - name: Ledger reconciliation dry-run (butuh OAuth; tidak menulis berkas)
+        env:
+          WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}
+          WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
+          GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SHEET_WEBHOOK_URL: ${{ secrets.GOOGLE_SHEET_WEBHOOK_URL }}
+          GH_PAT: ${{ secrets.GH_PAT || secrets.GH_PATH || secrets.GITHUB_PAT || secrets.PAT }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          LOG_REDACT: "true"
+          WALT_TOKEN_SYNC: "on"
+        run: |
+          set -o pipefail
+          { echo "### 3. \`reconcile_history\` dry-run (riwayat bursa vs ledger; tidak ada file diubah)"; echo '```text'; python walt_bot.py reconcile_history | tee -a "$GITHUB_STEP_SUMMARY" | tee /dev/stderr; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

@@ -297,3 +297,31 @@ def test_diagnostics_stats_langkah_tanpa_token_dan_terbaca_di_log():
     assert "GOOGLE_SHEET_ID" in stats_env
     for i in (probe_idx, stats_idx):
         assert "tee /dev/stderr" in steps[i]["run"], f"langkah #{i} tidak menyalin output ke log"
+
+
+def test_diagnostics_hanya_menjalankan_reconcile_dry_run():
+    """
+    Gerbang keamanan: CI boleh MENGUKUR selisih riwayat, tapi tidak boleh menulis ledger sebagai
+    efek samping monitoring. Backfill adalah keputusan sadar operator (`--write` manual, ada backup).
+    """
+    raw = (REPO_ROOT / ".github/workflows/diagnostics.yml").read_text(encoding="utf-8")
+    wf = yaml.safe_load(raw)
+    steps = next(iter(wf["jobs"].values()))["steps"]
+    rec = [s for s in steps if "reconcile_history" in (s.get("run") or "")]
+    assert len(rec) == 1, "langkah reconcile dry-run harus ada tepat satu"
+    run = rec[0]["run"]
+    assert "reconcile_history" in run
+    assert "--write" not in run, "dilarang menulis ledger dari workflow otomatis"
+    assert "--limit" not in run, "dry-run harus mengukur SELURUH riwayat, bukan sampel"
+    idx_rec = steps.index(rec[0])
+    idx_dump = next(i for i, s in enumerate(steps) if "dump_closed" in (s.get("run") or ""))
+    assert idx_dump < idx_rec, "reconcile butuh schema dump lebih dulu sebagai konteks"
+    env = rec[0].get("env") or {}
+    assert env.get("WALT_TOKEN_SYNC") == "on", "refresh single-use wajib menulis balik secret"
+    assert "WALT_CLIENT_ID" in env and "WALT_REFRESH_TOKEN" in env
+    # langkah tanpa token wajib tetap berada di depan semua langkah ber-token
+    token_steps = [i for i, s in enumerate(steps) if any(k.startswith("WALT_") for k in (s.get("env") or {}))]
+    token_free = [i for i, s in enumerate(steps) if (s.get("run") or "").startswith(("set -o pipefail",))
+                  and not any(k.startswith("WALT_") for k in (s.get("env") or {}))]
+    assert token_steps and token_free, "struktur langkah diagnostics berubah"
+    assert max(token_free) < min(token_steps), "semua langkah tanpa-token harus selesai sebelum langkah ber-token"
