@@ -593,17 +593,50 @@ def test_workflow_mencetak_marker_state_di_step_summary(filename):
     assert "state_warm" in summary_steps[0]["run"], f"{filename}: marker dingin tidak masuk Step Summary"
 
 
-def test_marker_state_warm_ada_di_safe_summary(monkeypatch):
+def test_marker_state_warm_gagal_terkunci_fail_closed(monkeypatch):
+    """
+    Dikoreksi dari bukti produksi 2026-11-20: asumsi lama "marker hilang = hangat" adalah fail-open.
+    Sekarang kehangatan butuh bukti eksplisit; CLI lokal mendapat bukti dari berkas state nyata
+    (probe_local_state_warm), bukan dari default.
+    """
     monkeypatch.setenv("WALT_STATE_WARM", "true")
+    assert walt_bot.is_state_warm() is True
     assert walt_bot.build_safe_stdout_summary("monitor", {"actions": []})["state_warm"] is True
 
-    monkeypatch.setenv("WALT_STATE_WARM", "false")
+    for cold in ("false", "", "   ", "warm", "y", "0", "no", "truex", "hangat"):
+        monkeypatch.setenv("WALT_STATE_WARM", cold.strip())
+        assert walt_bot.is_state_warm() is False, f"nilai {cold!r} bukan bukti kehangatan"
+
+    monkeypatch.delenv("WALT_STATE_WARM", raising=False)
+    assert walt_bot.is_state_warm() is False, "marker hilang = dingin (bukan hangat)"
     assert walt_bot.build_safe_stdout_summary("monitor", {"actions": []})["state_warm"] is False
 
-    monkeypatch.delenv("WALT_STATE_WARM")
-    assert walt_bot.build_safe_stdout_summary("monitor", {"actions": []})["state_warm"] is True, (
-        "CLI lokal tetap hangat (logs/ persisten) agar perilaku lama tidak berubah"
-    )
+    for warm in ("1", "true", "TRUE", "yes", "on"):
+        monkeypatch.setenv("WALT_STATE_WARM", warm)
+        assert walt_bot.is_state_warm() is True
+
+    monkeypatch.setenv("WALT_STATE_WARM", "  true  ")
+    assert walt_bot.is_state_warm() is True, "spasi di sekitar nilai probe tetap bukti yang sah"
+
+
+def test_probe_lokal_menyimpulkan_kehangatan_dari_berkas(tmp_path, monkeypatch):
+    """Paritas dengan `state_probe` workflow: butuh regime DAN snapshot, bukan asumsi."""
+    regime = tmp_path / "market_regime.json"
+    snap = tmp_path / "open_snapshot.json"
+    regime.write_text("{}", encoding="utf-8")
+
+    assert walt_bot.probe_local_state_warm(str(regime), str(snap)) == "false"
+    snap.write_text("{}", encoding="utf-8")
+    assert walt_bot.probe_local_state_warm(str(regime), str(snap)) == "true"
+    assert walt_bot.probe_local_state_warm(str(tmp_path / "tiada.json"), str(snap)) == "false"
+
+
+def test_cli_setdefault_marker_hanya_bila_belum_ada():
+    """Marker dari CI tidak boleh ditimpa oleh probe CLI."""
+    src = io.open("walt_bot.py", encoding="utf-8").read()
+    tail = src[src.find('if __name__ == "__main__"'):]
+    assert "os.environ.setdefault(STATE_WARM_ENV, probe_local_state_warm())" in tail
+    assert "os.environ[STATE_WARM_ENV]" not in tail, "CLI tidak boleh memaksa nilai marker"
 
 
 def test_alert_state_dingin_hanya_satu_walau_delapan_kandidat(monkeypatch):

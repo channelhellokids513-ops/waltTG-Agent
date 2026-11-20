@@ -120,6 +120,21 @@ def captured_executions() -> list[dict]:
 
 
 @pytest.fixture(autouse=True)
+def assume_warm_state(monkeypatch: pytest.MonkeyPatch):
+    """
+    Prasyarat eksplisit, pengganti default lama yang fail-open.
+
+    Sebelum 2026-11-20 `is_state_warm()` mengembalikan True bila `WALT_STATE_WARM` tidak diset,
+    sehingga 7 test selama ini "lulus" tanpa menyatakan kondisi state yang mereka andalkan.
+    Sekarang produksi menuntut bukti; test wajib menyebutnya di sini (hangat = kondisi normal CI
+    setelah `state_probe` menemukan berkas state). Test yang mengejar perilaku dingin menyetel
+    "false" sendiri dan tetap menang karena fixture ini berjalan lebih dulu.
+    """
+    monkeypatch.setenv("WALT_STATE_WARM", "true")
+
+
+
+@pytest.fixture(autouse=True)
 def isolate_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, captured_closes: list[dict], captured_executions: list[dict]):
     """
     Isolasi seluruh penulisan state produksi ke tmp_path/logs secara otomatis.

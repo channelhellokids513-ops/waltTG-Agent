@@ -325,3 +325,43 @@ def test_diagnostics_hanya_menjalankan_reconcile_dry_run():
                   and not any(k.startswith("WALT_") for k in (s.get("env") or {}))]
     assert token_steps and token_free, "struktur langkah diagnostics berubah"
     assert max(token_free) < min(token_steps), "semua langkah tanpa-token harus selesai sebelum langkah ber-token"
+
+
+def test_diagnostics_hanya_satu_langkah_yang_menyentuh_oauth():
+    """
+    Dibuktikan oleh run nyata #44746581332: dua langkah ber-OAuth dalam SATU job selalu gagal di
+    langkah kedua, karena refresh token single-use dibakar langkah pertama sedangkan langkah kedua
+    memakai secret yang di-resolve saat job dimulai. Jadi keduanya wajib saling eksklusif lewat input.
+    """
+    raw = (REPO_ROOT / ".github/workflows/diagnostics.yml").read_text(encoding="utf-8")
+    wf = yaml.safe_load(raw)
+    steps = next(iter(wf["jobs"].values()))["steps"]
+    token_steps = [s for s in steps if "WALT_REFRESH_TOKEN" in (s.get("env") or {})]
+    assert len(token_steps) == 2, "diagnostics punya dump_closed + reconcile_history"
+
+    conds = [s.get("if") for s in token_steps]
+    assert all(conds), "setiap langkah ber-OAuth wajib dipagar `if:` (satu token per job)"
+    assert len(set(conds)) == len(conds), "kondisi `if:` harus berbeda -> tidak mungkin jalan bersamaan"
+    assert any("!= 'reconcile_history'" in c for c in conds) and any("== 'reconcile_history'" in c for c in conds)
+
+    inputs = wf[True]["workflow_dispatch"]["inputs"]["oauth_step"]
+    assert inputs["default"] == "dump_closed", "default harus langkah yang sudah terbukti aman"
+    assert set(inputs["options"]) == {"dump_closed", "reconcile_history"}
+
+
+@pytest.mark.parametrize("filename", ["daily-scan.yml", "market-execute.yml", "crypto-execute.yml"])
+def test_knob_dry_run_dimengerti_semua_workflow_eksekusi(filename):
+    """
+    Pelepasan bertahap butuh simulasi: `vars.DRY_RUN` harus dihormati KETIGA workflow, bukan hanya
+    daily-scan. Tanpa ini, melepas MAINTENANCE_MODE langsung berarti order nyata tanpa satu pun
+    siklus pengamatan.
+    """
+    raw = (REPO_ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
+    wf = yaml.safe_load(raw)
+    steps = next(iter(wf["jobs"].values()))["steps"]
+    envs = [s.get("env") or {} for s in steps if "DRY_RUN" in (s.get("env") or {})]
+    assert envs, f"{filename}: tidak ada langkah dengan DRY_RUN"
+    expr = envs[0]["DRY_RUN"]
+    assert "vars.DRY_RUN" in expr, f"{filename}: tidak bisa disimulasikan lewat variable ({expr})"
+    assert "github.event.inputs.dry_run" in expr, f"{filename}: input manual harus tetap menang"
+    assert expr.rstrip().endswith("|| 'false' }}"), f"{filename}: default harus false, bukan kosong"

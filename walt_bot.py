@@ -324,15 +324,31 @@ ALLOW_COLD_ENTRY_ENV = "WALT_ALLOW_COLD_ENTRY"
 _cold_state_alerted: set[str] = set()
 
 
+_WARM_TRUTHY = ("1", "true", "yes", "on")
+
+
 def is_state_warm() -> bool:
     """
-    True bila state risiko (cooldown, counter entry 24 jam, jangkar circuit breaker, closed_ids,
-    open_snapshot) berhasil dipulihkan dari cache Actions.
+    True HANYA bila ada bukti kehangatan yang eksplisit: `WALT_STATE_WARM` diisi `true` oleh
+    langkah `state_probe` workflow (atau oleh probe CLI di bawah).
 
-    Di CI langkah restore menyetel WALT_STATE_WARM dari output `cache-hit`. Default "true" untuk
-    CLI lokal (di mana logs/ memang persisten) sehingga perilaku lama tidak berubah di luar CI.
+    Default lama "true" adalah fail-open dan sudah dibuktikan berbahaya: marker yang hilang atau
+    string kosong (mis. `state_probe` gagal, atau langkah baru lupa meneruskan output probe) membuat
+    gerbang start-dingin dan proteksi deteksi-close mati tanpa suara. Prinsip ronde ini:
+    **ketiadaan bukti = dingin**, dan dingin selalu boleh dibuka sadar-sadar lewat
+    `WALT_ALLOW_COLD_ENTRY` atau dengan ditemukannya memori risiko nyata.
     """
-    return (os.getenv(STATE_WARM_ENV, "true").strip().lower() != "false")
+    raw = (os.getenv(STATE_WARM_ENV) or "").strip().lower()
+    return raw in _WARM_TRUTHY
+
+
+def probe_local_state_warm(regime_path: str = "logs/market_regime.json",
+                           snapshot_path: str = "logs/open_snapshot.json") -> str:
+    """
+    Setara dengan `state_probe` di CI untuk pemakaian CLI lokal: kehangatan disimpulkan dari berkas
+    state yang benar-benar ada, bukan dari asumsi. Return "true"/"false" (format GITHUB_OUTPUT).
+    """
+    return "true" if (os.path.exists(regime_path) and os.path.exists(snapshot_path)) else "false"
 
 
 def cold_start_override_enabled() -> bool:
@@ -4531,5 +4547,8 @@ def main(command: str = "scan"):
 if __name__ == "__main__":
     import sys
     load_local_env()  # hanya untuk CLI lokal; impor modul (dan pytest) tidak pernah menyerap .env
+    # Kekhangatan state tidak boleh diasumsikan: bila CI belum menyetel marker, simpulkan dari berkas
+    # state yang nyata ada (paritas dengan `state_probe` di workflow) — bukan default "hangat".
+    os.environ.setdefault(STATE_WARM_ENV, probe_local_state_warm())
     cmd = sys.argv[1] if len(sys.argv) > 1 else "scan"
     main(cmd)
