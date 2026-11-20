@@ -18,14 +18,14 @@ on:
           - contract_economics
           - slippage_probe
           - read_only
-        real_order:
-          description: 'PINTU KEDUA untuk langkah yang membuat order NYATA (slippage_probe). Pilihan lain = tidak ada order.'
-          required: false
-          default: 'TIDAK_ORDER'
-          type: choice
-          options:
-            - TIDAK_ORDER
-            - YA_ORDER_NYATA
+      real_order:
+        description: 'PINTU KEDUA untuk langkah yang membuat order NYATA (slippage_probe). Pilihan lain = tidak ada order.'
+        required: false
+        default: 'TIDAK_ORDER'
+        type: choice
+        options:
+          - TIDAK_ORDER
+          - YA_ORDER_NYATA
 
 concurrency:
   group: walt-diagnostics
