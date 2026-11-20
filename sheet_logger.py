@@ -115,19 +115,35 @@ def get_research_read_detail() -> str:
 def _diagnose_non_json(body: str) -> str:
     """Namakan penyebab balasan non-JSON supaya tindakannya jelas bagi operator.
 
-    Tiga kondisi yang berbeda arti (dibedakan dari isi halaman, bukan dari tebakan):
-      - deployment lama tanpa fungsi doGet  -> perlu versi baru di "Manage deployments"
-      - halaman sign-in/konsen             -> akses web app belum "Anyone"
-      - HTML lain                          -> error Apps Script / rate limit
+    Kondisi yang dibedakan (dari isi halaman, bukan tebakan):
+      - body kosong                  -> `kosong` (deployment tanpa output / salah path)
+      - tanpa doGet                  -> `deployment_tanpa_doGet` (Deploy → New version)
+      - halaman sign-in/konsen       -> `butuh_akses_publik` (Who has access ≠ Anyone)
+      - teks error Apps Script       -> `error_apps_script`
+      - HTML lain                    -> `halaman_html_apps_script`
+      - mulai seperti JSON tapi rusak -> `json_rusak`
     """
-    low = (body or "")[:4000].lower()
+    text = (body or "").strip()
+    if not text:
+        return "kosong"
+    low = text[:4000].lower()
     if "script function not found" in low and "doget" in low:
         return "deployment_tanpa_doGet"
     if "sign in" in low or "accounts.google.com" in low or "consent" in low:
         return "butuh_akses_publik"
+    if text[0] in "{[":
+        return "json_rusak"
     if "<!doctype html" in low or "<html" in low:
+        # diperiksa SEBELUM penanda error teks: halaman error Apps Script juga HTML
         return "halaman_html_apps_script"
+    if "exception" in low or low.startswith("error:") or "quota" in low:
+        return "error_apps_script"
     return "bukan_json_tanpa_struktur"
+
+
+def _body_cuplikan(body: str, limit: int = 48) -> str:
+    """Bentuk ringkas satu baris dari awalan body, untuk diagnosis di Step Summary."""
+    return " ".join((body or "")[:limit].split())
 
 
 def get_research_read_diagnosis() -> str:
@@ -147,9 +163,11 @@ def _parse_research_response(resp: Any) -> Optional[dict]:
     except Exception as exc:
         diagnosis = _diagnose_non_json(getattr(resp, "text", "") or "")
         _research_read_diagnosis = diagnosis
+        body = getattr(resp, "text", "") or ""
         detail = (
             f"content_type={resp.headers.get('content-type', '?')}; diagnosa={diagnosis}; "
-            f"cuplikan={_redact_sheet_id(str(exc), get_spreadsheet_id())[:60]}"
+            f"panjang_body={len(body)}; cuplikan='{_body_cuplikan(body)}'; "
+            f"galat={_redact_sheet_id(str(exc), get_spreadsheet_id())[:60]}"
         )
         _record_ledger_status(RESEARCH_READ_SHEET, "html_or_unparsable", detail)
         _warn_ledger_unreadable(RESEARCH_READ_SHEET, "html_or_unparsable", "webhook riset membalas non-JSON")

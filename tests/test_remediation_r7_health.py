@@ -181,8 +181,13 @@ def test_diagnosis_balasan_non_json_ternama_tepat():
         "<html><body>Sign in to continue to Google</body></html>"
     ) == "butuh_akses_publik"
     assert sheet_logger._diagnose_non_json("<!DOCTYPE html><html>quota exceeded</html>") == "halaman_html_apps_script"
+    assert sheet_logger._diagnose_non_json("") == "kosong"
+    assert sheet_logger._diagnose_non_json("   \n\t ") == "kosong"
+    assert sheet_logger._diagnose_non_json('{"status": "succ') == "json_rusak"
+    assert sheet_logger._diagnose_non_json("Exception: TypeError: x is undefined") == "error_apps_script"
     assert sheet_logger._diagnose_non_json("<html><body>Sign in required</body></html>") == "butuh_akses_publik"
     assert sheet_logger._diagnose_non_json("<meta name=robots") == "bukan_json_tanpa_struktur"
+    assert sheet_logger._body_cuplikan("a\n  b\tc") == "a b c"
 
 
 def test_diagnosis_ikut_muncul_di_status_detail_dan_terbersihkan_saat_sukses(monkeypatch):
