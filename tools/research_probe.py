@@ -32,6 +32,11 @@ def main() -> int:
     print(f"aset_segar           = {len(nama)}" + (f" ({tampil})" if nama else ""))
     if diagnosis:
         print(f"diagnosis            = {diagnosis}")
+    kolom = sheet_logger.get_last_header_mismatch("Daily_Scans")
+    if kolom:
+        # `header_mismatch` punya dua makna (tab belum dibuat vs skema beda); daftar kolom yang
+        # sebenarnya terlihat adalah satu-satunya cara membedakannya dari CI.
+        print("kolom_terlihat       = " + ", ".join(kolom[:12]) + (" ..." if len(kolom) > 12 else ""))
     if detail:
         print(f"detail               = {detail[:240]}")
 

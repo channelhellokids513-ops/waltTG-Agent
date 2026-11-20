@@ -518,6 +518,19 @@ def resolve_closed_positions_columns(
     return dict(_CLOSED_POSITIONS_CANONICAL_IDX), data_rows, True
 
 
+_last_header_mismatch: dict[str, list[str]] = {}
+
+
+def get_last_header_mismatch(sheet_name: str) -> list[str]:
+    """Nama kolom yang BENAR-BENAR terlihat saat tab `sheet_name` gagal cocok (kosong = belum ada).
+
+    Dibutuhkan ketika gviz menjawab `header_mismatch`: itu bisa berarti "tab belum dibuat"
+    (gviz jatuh ke tab pertama) atau "tab ada tapi skemanya beda" — dua penyebab dengan dua
+    tindakan berbeda, dan tanpa daftar kolomnya keduanya tampak identik di Step Summary.
+    """
+    return list(_last_header_mismatch.get(sheet_name, []))
+
+
 def fetch_sheet_csv_rows_ex(
     sheet_name: str,
     spreadsheet_id: Optional[str] = None,
@@ -569,6 +582,7 @@ def fetch_sheet_csv_rows_ex(
                 status = "empty"
             elif expected_col_name and expected_col_name not in [c.strip() for c in parsed[0]]:
                 # gviz fallback ke sheet pertama bila nama tab tidak ada -> jangan dianggap data.
+                _last_header_mismatch[sheet_name] = [str(c).strip() for c in parsed[0]][:24]
                 failure_detail = (
                     f"kolom '{expected_col_name}' tidak ditemukan di header (tab '{sheet_name}' mungkin tidak ada)"
                 )

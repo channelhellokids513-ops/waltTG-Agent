@@ -256,3 +256,34 @@ def test_probe_menyebut_sumber_yang_terpakai(monkeypatch, capsys):
     monkeypatch.setattr(sheet_logger, "get_research_read_source", lambda: "gviz")
     assert rp.main() == 0
     assert "sumber_terpakai      = gviz" in capsys.readouterr().out
+
+
+def test_header_mismatch_melaporkan_kolom_yang_sebenarnya_terlihat(monkeypatch, capsys):
+    """Dua sebab (tab belum ada vs skema beda) harus bisa dibedakan dari Step Summary."""
+    _stub(monkeypatch, "html_or_unparsable")
+    monkeypatch.setattr(
+        sheet_logger, "get_last_header_mismatch",
+        lambda name: ["Timestamp", "Balance", "Asset", "Side"] if name == "Daily_Scans" else [],
+    )
+    assert rp.main() == 1
+    out = capsys.readouterr().out
+    assert "kolom_terlihat       = Timestamp, Balance, Asset, Side" in out
+
+
+def test_perekaman_kolom_datari_pembacaan_gviz_sebenarnya(monkeypatch):
+    """Bukan hanya getter: jalur gviz nyata harus mengisi daftar kolom saat header tidak cocok."""
+    class _R:
+        status_code = 200
+        headers = {"content-type": "text/csv"}
+        # header TANPA kolom 'asset' -> tab Daily_Scans belum ada / skemanya lain
+        text = "Timestamp (UTC),Asset Name,Margin ($)\n2026-11-20T00:00:00Z,NVDA,2.50\n"
+
+    monkeypatch.setenv("GOOGLE_SHEET_ID", "id-untuk-test-bukan-id-nyata")
+    monkeypatch.setattr(sheet_logger.httpx, "get", lambda url, **kw: _R())
+    sheet_logger._last_header_mismatch.pop("Daily_Scans", None)
+
+    rows, status = sheet_logger.fetch_sheet_csv_rows_ex("Daily_Scans", expected_col_name="asset")
+    assert rows == [] and status == "header_mismatch"
+    assert sheet_logger.get_last_header_mismatch("Daily_Scans") == [
+        "Timestamp (UTC)", "Asset Name", "Margin ($)"
+    ], "nama kolom yang terlihat wajib terekam supaya penyebabnya bisa dibedakan"
