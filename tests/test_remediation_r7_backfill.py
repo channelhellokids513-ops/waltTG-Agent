@@ -163,8 +163,9 @@ def test_mode_ci_write_terpisah_rapat_dari_dry_run():
               if "python walt_bot.py reconcile_history" in (s.get("run") or "")
               and "--write" not in (s.get("run") or "")]
     assert len(tulis) == 1 and len(kering) == 1, (f"tulis={len(tulis)} kering={len(kering)}")
-    assert tulis[0]["if"] == "github.event.inputs.oauth_step == 'reconcile_write'"
-    assert kering[0]["if"] == "github.event.inputs.oauth_step == 'reconcile_history'"
+    assert tulis[0]["if"].endswith("oauth_step == 'reconcile_write'")
+    assert "always()" in tulis[0]["if"], "langkah tulis harus tetap jalan walau sensor merah"
+    assert kering[0]["if"].endswith("oauth_step == 'reconcile_history'")
     assert "--mirror-sheet" in tulis[0]["run"], "mode write harus mirror, kalau tidak ledger sheet diam"
     assert "GOOGLE_SHEET_WEBHOOK_URL" in tulis[0]["env"], "mirror tanpa URL webhook = tulis lokal doang"
     options = wf[True]["workflow_dispatch"]["inputs"]["oauth_step"]

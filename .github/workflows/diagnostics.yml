@@ -74,7 +74,7 @@ jobs:
       # bisa dibatalkan, jadi mode ini harus dipilih eksplisit (default workflow = dump_closed) dan
       # dedupe-nya membaca sheet lebih dulu — lihat tests/test_remediation_r7_backfill.py.
       - name: Ledger reconciliation WRITE + mirror sheet (butuh OAuth; menulis ledger)
-        if: github.event.inputs.oauth_step == 'reconcile_write'
+        if: always() && github.event.inputs.oauth_step == 'reconcile_write'
         env:
           WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}
           WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
@@ -89,7 +89,7 @@ jobs:
           { echo "### 4. \`reconcile_history --write --mirror-sheet\` (menulis ledger lokal + sheet)"; echo '```text'; python walt_bot.py reconcile_history --write --mirror-sheet | tee -a "$GITHUB_STEP_SUMMARY" | tee /dev/stderr; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Exchange schema dump (butuh OAuth Walt; menulis balik rotasi token)
-        if: github.event.inputs.oauth_step == 'dump_closed'
+        if: always() && github.event.inputs.oauth_step == 'dump_closed'
         env:
           WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}
           WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
@@ -106,7 +106,7 @@ jobs:
 
       # R6-1 lanjutan: baseline riwayat closed bursa vs ledger, TANPA menulis apa pun (--write tetap manual).
       - name: Ledger reconciliation dry-run (butuh OAuth; tidak menulis berkas)
-        if: github.event.inputs.oauth_step == 'reconcile_history'
+        if: always() && github.event.inputs.oauth_step == 'reconcile_history'
         env:
           WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}
           WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}

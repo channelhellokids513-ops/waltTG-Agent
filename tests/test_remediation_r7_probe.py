@@ -135,6 +135,25 @@ def test_mode_read_only_menjalankan_nol_langkah_oauth():
             assert f"'{mode}'" not in c, f"mode {mode} tidak boleh memicu langkah ber-OAuth"
 
 
+def test_sensor_merah_tidak_boleh_memblokir_langkah_lain():
+    """Regresi nyata 17:46Z: probe riset exit 1 -> langkah reconcile tidak pernah dijalankan.
+
+    Sensor yang jujur DAN langkah yang tetap jalan adalah dua kebutuhan yang tidak boleh saling
+    mengorbankan: langkah sesudahnya wajib `if: always()` supaya diagnostik tetap lengkap walau
+    satu input berteriak merah.
+    """
+    _, steps = _diag_steps()
+    probe = next(i for i, s in enumerate(steps) if "tools/research_probe.py" in (s.get("run") or ""))
+    setelah = steps[probe + 1:]
+    assert setelah, "diagnostics tidak punya langkah setelah probe — periksa struktur file"
+    for s in setelah:
+        cond = s.get("if") or ""
+        assert "always()" in cond, (
+            f"langkah '{s.get('name')}' wajib `if: always() && ...` agar tetap berjalan saat "
+            f"sensor merah (17:46Z: reconcile dilewati begitu saja)"
+        )
+
+
 # ------------------------------------------------------------------------------
 # Ronde 7: sumber KEDUA = gviz Daily_Scans (webhook Apps Script tidak bisa dipercaya buta)
 # ------------------------------------------------------------------------------
