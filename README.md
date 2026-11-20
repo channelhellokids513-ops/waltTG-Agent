@@ -148,7 +148,16 @@ Langkah pemeliharaan aman:
    ```bash
    gh secret set WALT_REFRESH_TOKEN
    ```
-6. **Lepas bertahap, jangan sekaligus** (praktik yang terbukti perlu pada 2026-11-20 — sistem yang
+6. **Ras antar-konsumen OAuth (TERJADI 2026-11-20 16:00Z, didokumentasikan supaya tidak disalahartikan).**
+   Refresh token bersifat single-use dan `concurrency:` GitHub hanya berlaku **dalam satu workflow** —
+   `risk-monitor` (tiap 10 menit) dengan `market-execute`/`crypto-execute`/dispatch manual bisa start
+   berdekatan. Yang start belakangan membaca secret yang baru saja dibakar konsumen lain → `invalid_grant`.
+   Cirinya: **run yang gagal sendirian, dan ada run OAuth hijau dalam ~15 menit terakhir.** Itu bukan
+   kematian kredensial — siklus berikutnya pulih sendiri, **jangan** melakukan re-auth (re-auth justru
+   membuat `.env` lokal tertinggal satu rotasi). Yang boleh dilakukan: hindari dispatch manual pada
+   menit kelipatan 10 (:00, :10, :20, ...), dan baca alert Telegram — ia kini menyebut dua kemungkinan
+   beserta perintah pembedanya (`gh run list --limit 6`).
+7. **Lepas bertahap, jangan sekaligus** (praktik yang terbukti perlu pada 2026-11-20 — sistem yang
    "sudah dibunyikan" langsung membuka jalur order nyata tanpa satu pun siklus pengamatan): set
    `DRY_RUN=true` **sebelum** `MAINTENANCE_MODE=false`, sehingga guard risiko bekerja nyata tetapi
    entry masih disimulasikan. Ketiga workflow entry (`daily-scan`, `market-execute`, `crypto-execute`)

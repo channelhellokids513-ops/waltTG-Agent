@@ -147,6 +147,32 @@ def test_riset_hilang_dan_error_dicatat():
     assert snap["input.riset_error"]["failed"] == 1
 
 
+def test_alert_invalid_grant_membedakan_ras_dari_kematian_kredensial(monkeypatch):
+    """Dipaksa oleh kejadian nyata 2026-11-20 16:00Z: dispatch manual 8 detik setelah risk-monitor
+    = ras rotasi single-use. Pesan lama membuat operator mengira kredensial mati dan melakukan
+    re-auth yang tidak perlu (yang justru membakar token .env)."""
+    import httpx
+    import notifier
+    import token_manager
+
+    calls: list[str] = []
+    monkeypatch.setattr(notifier, "send_telegram", lambda msg, **kw: calls.append(msg))
+    req = httpx.Request("POST", token_manager.TOKEN_URL)
+    resp = httpx.Response(400, json={"error": "invalid_grant", "error_description": "expired"}, request=req)
+    monkeypatch.setattr(token_manager.httpx, "post", lambda *a, **kw: resp)
+
+    tm = token_manager.TokenManager(client_id="cid_test", refresh_token="rt_rahasia_jangan_dicetak")
+    with pytest.raises(httpx.HTTPStatusError):
+        tm._refresh()
+
+    assert len(calls) == 1
+    alert = calls[0]
+    assert "Ras antar-konsumen" in alert and "gh run list" in alert
+    assert "JANGAN re-auth" in alert, "ras bukan kematian kredensial; re-auth justru membakar .env"
+    assert "Kredensial benar-benar habis" in alert
+    assert "rt_rahasia_jangan_dicetak" not in alert
+
+
 def test_safe_summary_memuat_input_health_dan_meta():
     walt_bot.set_input_meta("research_read_status", "local_csv")
     walt_bot.record_research_health("NVDA", _research("NVDA", failures=["V1_qwen_turbo"]))

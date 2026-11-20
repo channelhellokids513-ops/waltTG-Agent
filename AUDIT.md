@@ -429,6 +429,35 @@ Dua hal yang justru **baru terlihat** karena sensornya dipasang:
 
 Setelah penambahan ini: **256 test** (253 + 3 test diagnosis/redaksi), semuanya lulus.
 
+### Insiden 16:00Z — ras antar-konsumen OAuth yang SAYA timbulkan sendiri, dan apa yang itu ajarkan
+
+Dispatch manual `market-execute` yang saya kirim pada **16:00:10Z** start 8 detik setelah
+`risk-monitor` terjadwal 16:00:02Z. Run saya gagal `invalid_grant` (HTTP 400) — **bukan** karena
+perubahan kode, melainkan karena token refresh bersifat single-use: risk-monitor sudah membakarnya
+dan menulis token baru, sedangkan secret di job saya sudah di-resolve sebelum rotasi terjadi.
+
+Fakta penting yang tercatat dari run nyata:
+- run gagal **sendirian**; `risk-monitor` 16:00:02Z **sukses** → secret sehat, sistem pulih sendiri
+  pada siklus berikutnya. Tidak ada order (masih `DRY_RUN`), tidak ada baris ledger yang tertulis.
+- `concurrency:` GitHub hanya mengurusi **satu workflow** — jadi lintas-workflow tidak pernah
+  terlindungi. Perbaikan "tepat satu konsumen OAuth per job" (R6-followup) hanya menutup separuh
+  masalah; separuh lainnya adalah *antar* job.
+- membaca kembali secret untuk pemulihan otomatis **tidak mungkin** (API GitHub hanya mengembalikan
+  nilai terenkripsi), sehingga "self-heal" dengan mengambil token terbaru bukan opsi yang jujur.
+  Yang realistis: jangan salah baca gejalanya.
+
+Tindakan yang saya ambil: alert `invalid_grant` kini **membedakan dua sebab** dan memberi perintah
+pembedanya (`gh run list --limit 6`), karena pesan lama mengarahkan operator ke re-auth — padahal
+re-auth justru membuat `.env` lokal tertinggal satu rotasi. README memuat ciri-ciri ras dan
+larangan dispatch manual pada menit kelipatan 10. Saya berhenti men-dispatch manual setelah kejadian
+ini; diagnosis webhook riset akan datang dari jadwal alami 16:43Z.
+
+Lesson yang saya catat untuk diri sendiri: **saya adalah sumber tabrakan baru** di sistem yang
+token-nya single-use. Verifikasi produksi harus memakai siklus terjadwal, bukan mempercepatnya
+dengan dispatch beruntun.
+
+Setelah ini: **257 test**, semuanya lulus.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 

@@ -151,10 +151,16 @@ class TokenManager:
             log.error(f"TokenManager._refresh HTTP {e.response.status_code}: {snippet}")
             if e.response.status_code == 400 and "invalid_grant" in (e.response.text or "").lower():
                 _notify_telegram_safe(
-                    "⚠️ *ALERT OAUTH `invalid_grant`*: Refresh token Walt ditolak (HTTP 400). "
-                    "Kemungkinan `WALT_REFRESH_TOKEN` pada secret/`.env` tertinggal satu rotasi "
-                    "akibat tabrakan rotasi CI vs lokal. Ikuti runbook README bagian "
-                    "*Jendela Pemeliharaan & Pemulihan Kredensial* (set `MAINTENANCE_MODE=true` dulu)."
+                    "⚠️ *ALERT OAUTH `invalid_grant`*: refresh token Walt ditolak (HTTP 400). "
+                    "Ada DUA kemungkinan dengan tindakan berbeda:\n"
+                    "1) *Ras antar-konsumen* (paling sering): workflow lain merotasi token "
+                    "single-use tepat sebelum/saat workflow ini start — bisa CI vs CI (mis. "
+                    "risk-monitor + dispatch manual) atau CI vs lokal. Pembeda: "
+                    "`gh run list --limit 6`. Bila ada run OAuth *sukses* dalam ~15 menit terakhir, "
+                    "ini BUKAN kematian kredensial; siklus berikutnya pulih sendiri, JANGAN re-auth.\n"
+                    "2) *Kredensial benar-benar habis*: semua run OAuth merah beruntun. Jalankan "
+                    "runbook README *Jendela Pemeliharaan & Pemulihan Kredensial* "
+                    "(MAINTENANCE_MODE=true → python setup_walt_oauth.py → perbarui 2 secret)."
                 )
             raise
         try:
