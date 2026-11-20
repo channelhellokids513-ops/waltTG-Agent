@@ -302,16 +302,27 @@ def test_diagnostics_stats_langkah_tanpa_token_dan_terbaca_di_log():
 def test_diagnostics_hanya_menjalankan_reconcile_dry_run():
     """
     Gerbang keamanan: CI boleh MENGUKUR selisih riwayat, tapi tidak boleh menulis ledger sebagai
-    efek samping monitoring. Backfill adalah keputusan sadar operator (`--write` manual, ada backup).
+    efek samping monitoring. Backfill adalah keputusan sadar operator.
+
+    [R7-d] Mode tulis eksplisit (`reconcile_write`) kini memang ada — kunci aslinya tetap utuh:
+    langkah dry-run tidak boleh ikut menulis, dan SATU-SATUNYA langkah yang menulis wajib dipagar
+    mode yang bukan default.
     """
     raw = (REPO_ROOT / ".github/workflows/diagnostics.yml").read_text(encoding="utf-8")
     wf = yaml.safe_load(raw)
     steps = next(iter(wf["jobs"].values()))["steps"]
-    rec = [s for s in steps if "reconcile_history" in (s.get("run") or "")]
+    rec = [s for s in steps if "reconcile_history" in (s.get("run") or "")
+           and "--write" not in (s.get("run") or "")]
     assert len(rec) == 1, "langkah reconcile dry-run harus ada tepat satu"
+    penulis = [s for s in steps if "--write" in (s.get("run") or "")]
+    assert len(penulis) == 1, "tepat satu langkah yang boleh menulis ledger"
+    assert penulis[0].get("if", "").endswith("'reconcile_write'"), "penulis wajib dipagar mode eksplisit"
+    assert wf[True]["workflow_dispatch"]["inputs"]["oauth_step"]["default"] == "dump_closed", (
+        "mode default tidak boleh yang menulis"
+    )
     run = rec[0]["run"]
     assert "reconcile_history" in run
-    assert "--write" not in run, "dilarang menulis ledger dari workflow otomatis"
+    assert "--write" not in run, "dilarang menulis ledger dari jalur monitoring"
     assert "--limit" not in run, "dry-run harus mengukur SELURUH riwayat, bukan sampel"
     idx_rec = steps.index(rec[0])
     idx_dump = next(i for i, s in enumerate(steps) if "dump_closed" in (s.get("run") or ""))
@@ -337,7 +348,10 @@ def test_diagnostics_hanya_satu_langkah_yang_menyentuh_oauth():
     wf = yaml.safe_load(raw)
     steps = next(iter(wf["jobs"].values()))["steps"]
     token_steps = [s for s in steps if "WALT_REFRESH_TOKEN" in (s.get("env") or {})]
-    assert len(token_steps) == 2, "diagnostics punya dump_closed + reconcile_history"
+    assert len(token_steps) == 3, (
+        "diagnostics punya dump_closed + reconcile_history (dry-run) + reconcile_write (mirror) "
+        "— ketiganya saling eksklusif lewat input `oauth_step`"
+    )
 
     conds = [s.get("if") for s in token_steps]
     assert all(conds), "setiap langkah ber-OAuth wajib dipagar `if:` (satu token per job)"
@@ -345,7 +359,9 @@ def test_diagnostics_hanya_satu_langkah_yang_menyentuh_oauth():
 
     inputs = wf[True]["workflow_dispatch"]["inputs"]["oauth_step"]
     assert inputs["default"] == "dump_closed", "default harus langkah yang sudah terbukti aman"
-    assert set(inputs["options"]) == {"dump_closed", "reconcile_history", "read_only"}
+    assert set(inputs["options"]) == {
+        "dump_closed", "reconcile_history", "reconcile_write", "read_only"
+    }
 
     # R7: pagar diubah dari `!= 'reconcile_history'` menjadi `== 'dump_closed'`. Bentuk negasi itu
     # diam-diam menjalankan LANGKAH BER-OAUTH untuk mode ketiga (`read_only`), yang akan membakar

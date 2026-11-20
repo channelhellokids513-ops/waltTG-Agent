@@ -4479,21 +4479,55 @@ def build_backfill_rows(closed_positions: list[dict]) -> list[dict]:
     return rows
 
 
+def _recorded_closed_ids_from_sheet() -> tuple[set[str], str]:
+    """Position ID yang SUDAH ada di sheet `Closed_Positions` (sumber ledger tahan-lama).
+
+    Kenapa perlu: `reconcile_history` dulu hanya dedupe terhadap CSV lokal + closed_ids.json.
+    Di CI, CSV itu berasal dari Actions cache yang bisa ter-eviksi, sedangkan mirror backfill
+    justru MENULIS ke sheet. Dedupe tanpa membaca sheet = risiko baris duplikat permanen di
+    ledger performansi. Status baca dikembalikan supaya kegagalan gviz TIDAK dianggap "sheet
+    kosong" (prinsip: tidak ada data = None/status, bukan nol).
+    """
+    try:
+        from sheet_logger import (
+            fetch_sheet_csv_rows_ex,
+            resolve_closed_positions_columns,
+        )
+    except Exception as e:  # pragma: no cover - jalur impor
+        return set(), f"import_failed:{type(e).__name__}"
+    rows, status = fetch_sheet_csv_rows_ex("Closed_Positions", expected_col_name="Asset")
+    if status not in ("ok", "local_csv") or not rows:
+        return set(), status
+    try:
+        col_map, data_rows, _fallback = resolve_closed_positions_columns(rows)
+    except Exception as e:  # pragma: no cover
+        return set(), f"parse_failed:{type(e).__name__}"
+    idx = col_map.get("position id")
+    if idx is None:
+        return set(), "no_position_id_col"
+    ids = {str(r[idx]).strip() for r in data_rows if len(r) > idx and str(r[idx]).strip()}
+    return ids, status
+
+
 def reconcile_history(
     client: WaltClient,
     write: bool = False,
     limit: Optional[int] = None,
     csv_path: str = "logs/closed_history.csv",
     closed_ids_path: Optional[str] = None,
+    mirror_sheet: bool = False,
 ) -> dict[str, Any]:
     """
     Sinkronkan ledger lokal dengan riwayat closed API bursa. READ-ONLY terhadap bursa
     (hanya list_positions); tidak ada prepare/execute order. Default = dry-run.
 
     write=True menyimpan kandidat ke logs/closed_history.csv + closed_ids.json dengan backup
-    bertimestamp lebih dulu, TANPA mengirim webhook ke Google Sheet (mirror sheet tidak diubah
-    tanpa persetujuan pemilik).
+    bertimestamp lebih dulu. mirror_sheet=True MENAMBAH penulisan webhook ke Google Sheet —
+    operasi yang tidak bisa dibatalkan, jadi ia wajib diminta eksplisit bersama write=True.
+    Kandidat yang sudah ada di sheet tidak ditulis ulang (dedupe tiga sumber).
     """
+    if mirror_sheet and not write:
+        raise ValueError("mirror_sheet=True butuh write=True: mirror berarti menulis ke sheet")
     ids_path = closed_ids_path or CLOSED_IDS_PATH
     resp = client.list_positions(statuses=["closed"])
     positions = _extract_positions(resp)
@@ -4503,7 +4537,29 @@ def reconcile_history(
     if limit is not None:
         rows = rows[: max(0, int(limit))]
 
-    existing = _fetch_recorded_closed_ids(csv_path) | set(_load_closed_ids(ids_path))
+    sheet_ids, sheet_status = _recorded_closed_ids_from_sheet()
+    if mirror_sheet and sheet_status != "ok":
+        # Mirror = menulis ke sheet. Kalau isi sheet tidak bisa dibaca, dedupe tidak mungkin
+        # dilakukan dan menulis = berjudi dengan baris duplikat permanen di ledger performansi.
+        # Lebih baik menolak dan meminta dijalankan ulang.
+        summary_abort = {
+            "mode": "write",
+            "aborted": f"sheet tidak terbaca (status={sheet_status}) — mirror dibatalkan untuk hindari duplikat",
+            "measurement": measurement,
+            "rows_seen": len(rows),
+            "already_recorded": 0,
+            "candidates_to_add": 0,
+            "candidate_preview": [],
+            "written": 0,
+            "mirrored_ke_sheet": 0,
+            "backup": None,
+            "sheet_dedupe": {"status": sheet_status, "sudah_ada_di_sheet": 0, "sumber": "gviz Closed_Positions"},
+            "completeness_verdict": measurement["completeness_verdict"],
+        }
+        log.warning(summary_abort["aborted"])
+        return summary_abort
+
+    existing = _fetch_recorded_closed_ids(csv_path) | set(_load_closed_ids(ids_path)) | sheet_ids
     candidates = [r for r in rows if r["position_id"] not in existing]
 
     summary: dict[str, Any] = {
@@ -4511,6 +4567,11 @@ def reconcile_history(
         "measurement": measurement,
         "rows_seen": len(rows),
         "already_recorded": len(rows) - len(candidates),
+        "sheet_dedupe": {
+            "status": sheet_status,
+            "sudah_ada_di_sheet": len(sheet_ids),
+            "sumber": "gviz Closed_Positions",
+        },
         "candidates_to_add": len(candidates),
         "candidate_preview": [
             {
@@ -4560,10 +4621,12 @@ def reconcile_history(
             opened_at=row["opened_at"],
             filepath=csv_path,
             exit_source=row["exit_source"],
-            webhook=False,
+            webhook=mirror_sheet,
         )
         _record_closed_id(row["position_id"], path=ids_path)
         summary["written"] += 1
+        if mirror_sheet:
+            summary["mirrored_ke_sheet"] = int(summary.get("mirrored_ke_sheet", 0)) + 1
 
     return summary
 
@@ -4611,7 +4674,8 @@ def main(command: str = "scan"):
         python walt_bot.py crypto_execute        # execute bluechip crypto (BTC, ETH, SOL)
         python walt_bot.py stats                 # closed positions performance stats (dengan ledger_source)
         python walt_bot.py reconcile_history     # dry-run: ukur & bandingkan riwayat closed bursa vs ledger
-        python walt_bot.py reconcile_history --write   # simpan kandidat backfill (backup dulu, tanpa webhook)
+        python walt_bot.py reconcile_history --write   # simpan kandidat backfill ke ledger lokal (backup dulu)
+        python walt_bot.py reconcile_history --write --mirror-sheet  # + mirror ke Google Sheet (TIDAK bisa dibatalkan)
         python walt_bot.py reconcile_history --limit 5 # uji parsial
         python walt_bot.py open NBIS short 2.50  # buka posisi manual
         python walt_bot.py close NBIS            # tutup posisi
@@ -4633,14 +4697,19 @@ def main(command: str = "scan"):
     if command == "reconcile_history":
         argv = sys.argv[2:]
         write = "--write" in argv
+        mirror_sheet = "--mirror-sheet" in argv
+        if mirror_sheet and not write:
+            # Guard CLI: pesan yang jelas lebih murah daripada ValueError di tengah job.
+            print("Penolakan: --mirror-sheet butuh --write (mirror = menulis ke Google Sheet).")
+            return
         limit: Optional[int] = None
         if "--limit" in argv:
             pos = argv.index("--limit")
             if pos + 1 >= len(argv):
-                print("Penggunaan: reconcile_history [--write] [--limit N]")
+                print("Penggunaan: reconcile_history [--write] [--mirror-sheet] [--limit N]")
                 return
             limit = int(argv[pos + 1])
-        result = reconcile_history(client, write=write, limit=limit)
+        result = reconcile_history(client, write=write, limit=limit, mirror_sheet=mirror_sheet)
         print(json.dumps(result, indent=2, default=str))
         print(f"\nKELENGKAPAN: {result['completeness_verdict']}")
         return

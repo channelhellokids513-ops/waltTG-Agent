@@ -14,6 +14,7 @@ on:
         options:
           - dump_closed
           - reconcile_history
+          - reconcile_write
           - read_only
 
 concurrency:
@@ -68,6 +69,24 @@ jobs:
           set -o pipefail
           mkdir -p logs
           { echo "### 1b. Jalur baca riset (webhook \`doGet\` + fallback CSV)"; echo '```text'; python tools/research_probe.py | tee -a "$GITHUB_STEP_SUMMARY" | tee /dev/stderr; echo '```'; echo; } >> "$GITHUB_STEP_SUMMARY"
+
+      # [R7-d] Backfill SEDARBELUM: mirror riwayat closed bursa ke ledger sheet. Operasi tidak
+      # bisa dibatalkan, jadi mode ini harus dipilih eksplisit (default workflow = dump_closed) dan
+      # dedupe-nya membaca sheet lebih dulu — lihat tests/test_remediation_r7_backfill.py.
+      - name: Ledger reconciliation WRITE + mirror sheet (butuh OAuth; menulis ledger)
+        if: github.event.inputs.oauth_step == 'reconcile_write'
+        env:
+          WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}
+          WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
+          GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SHEET_WEBHOOK_URL: ${{ secrets.GOOGLE_SHEET_WEBHOOK_URL }}
+          GH_PAT: ${{ secrets.GH_PAT || secrets.GH_PATH || secrets.GITHUB_PAT || secrets.PAT }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          LOG_REDACT: "true"
+          WALT_TOKEN_SYNC: "on"
+        run: |
+          set -o pipefail
+          { echo "### 4. \`reconcile_history --write --mirror-sheet\` (menulis ledger lokal + sheet)"; echo '```text'; python walt_bot.py reconcile_history --write --mirror-sheet | tee -a "$GITHUB_STEP_SUMMARY" | tee /dev/stderr; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Exchange schema dump (butuh OAuth Walt; menulis balik rotasi token)
         if: github.event.inputs.oauth_step == 'dump_closed'
