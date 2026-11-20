@@ -229,3 +229,16 @@ def test_crumb_sesi_tidak_pernah_muncul_di_log():
     rec_bersih = logging.LogRecord("httpx", logging.INFO, __file__, 1, "GET /v8/finance/chart/NVDA", (), None)
     llm_research._CrumbRedactingFilter().filter(rec_bersih)
     assert rec_bersih.getMessage() == "GET /v8/finance/chart/NVDA", "baris lain tidak boleh berubah"
+
+
+def test_user_content_key_apps_script_tidak_pernah_muncul_di_log():
+    """Dibuktikan dari log nyata: GitHub membungkam secret terdaftar saja, bukan parameter URL ini."""
+    rec = logging.LogRecord(
+        "httpx", logging.INFO, __file__, 1,
+        'HTTP Request: GET https://script.googleusercontent.com/macros/echo?user_content_key=%s "HTTP/1.1 200 OK"',
+        ("AUkAhnSYNTHETIC-nilai-tidak-nyata-1234567890",), None,
+    )
+    llm_research._CrumbRedactingFilter().filter(rec)
+    rendered = rec.getMessage()
+    assert "SYNTHETIC-nilai" not in rendered
+    assert "user_content_key=<redacted>" in rendered

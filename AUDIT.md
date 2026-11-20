@@ -399,6 +399,36 @@ penulisan). Variable sudah diset eksplisit di repo: `WALT_COLD_REHYDRATE=report`
 Ukuran suite: **223 → 253 test** (+30), semuanya lulus; ledger lokal tidak disentuh
 (`logs/closed_history.csv` tetap `C9BFC1D811B6`).
 
+### Verifikasi di produksi (setelah `752d674` di-push, run `market-execute` #44766704052, 15:47–15:48 UTC)
+
+| Hal | Sebelum (13:58Z) | Sesudah (15:47Z) |
+|---|---|---|
+| Voter V1 | `Voter 1 (Qwen-Turbo) error: 404` untuk 4/4 aset | **tidak ada satu pun galat voter**; `input_health` bersih dari `input.voter_swarm` |
+| Kalender earnings | `fetch_earnings_days ...: 401` untuk 4/4 ticker | `GET /v1/test/getcrumb → 200` lalu `quoteSummary/NVDA`, `/NBIS` terambil; **bersih dari `input.earnings_source`** |
+| Gelombang kegagalan input | tidak ada | `"input_health": {"input.riset_webhook": {"failed": 1, "examples": ["html_or_unparsable"]}}` + `"input_meta": {"research_read_status": "html_or_unparsable"}` |
+| Ledger | — | `Sumber ledger: ok` (jalur gviz tetap sehat) |
+
+Dua hal yang justru **baru terlihat** karena sensornya dipasang:
+
+1. **Webhook riset Apps Script memang mati, dan kini terbukti di CI** (sebelumnya hanya fallback
+   senyap). `GET /exec → 302 → script.googleusercontent.com/macros/echo` dijawab dengan HTML,
+   sehingga pembacaan riset selalu jatuh ke CSV lokal. Sumber di repo (`google_apps_script.js`)
+   **sudah memiliki `doGet` yang lengkap** — jadi yang berbeda adalah *deployment*-nya, bukan
+   kodenya. Diagnosis kini diberi nama (`deployment_tanpa_doGet` / `butuh_akses_publik` /
+   `halaman_html_apps_script`) dan muncul di *Step Summary* lewat `research_read_diagnosis`;
+   tindakan untuk pemilik: **Deploy → Manage deployments → Edit → New version** dan pastikan
+   *Who has access = Anyone*. Alternatif yang lebih tahan lama (usulan ronde berikutnya): baca
+   `Daily_Scans` lewat **gviz CSV** yang sudah terbukti `ok`, sehingga jalur baca tidak bergantung
+   pada deployment Apps Script sama sekali.
+2. **Token sesi Apps Script ikut tercetak di log CI.** `user_content_key=...` pada URL
+   `googleusercontent` muncul apa adanya karena GitHub hanya membungkam nilai secret yang terdaftar,
+   bukan parameter hasil redirect. Filter redaksi log diperluas dari `crumb=` menjadi
+   `crumb=|user_content_key=` (+test). Catatan jujur: nilai token yang saya pakai di test adalah
+   **sintetis** — sampel nyata yang sempat saya salin dari log sengaja diganti agar tidak masuk
+   repo publik.
+
+Setelah penambahan ini: **256 test** (253 + 3 test diagnosis/redaksi), semuanya lulus.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 

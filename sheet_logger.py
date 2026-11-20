@@ -100,6 +100,7 @@ def _warn_ledger_unreadable(sheet_name: str, status: str, detail: str) -> None:
 # "fallback senyap ke CSV lokal" tidak lagi mirip pembacaan webhook yang sukses. Webhook Apps
 # Script terbukti membalas 200 + non-JSON pada 2026-11-20 dan itu tidak muncul di mana pun.
 RESEARCH_READ_SHEET = "Research_Read"
+_research_read_diagnosis: str = ""
 
 
 def get_research_read_status() -> str:
@@ -111,22 +112,49 @@ def get_research_read_detail() -> str:
     return get_ledger_read_detail(RESEARCH_READ_SHEET)
 
 
+def _diagnose_non_json(body: str) -> str:
+    """Namakan penyebab balasan non-JSON supaya tindakannya jelas bagi operator.
+
+    Tiga kondisi yang berbeda arti (dibedakan dari isi halaman, bukan dari tebakan):
+      - deployment lama tanpa fungsi doGet  -> perlu versi baru di "Manage deployments"
+      - halaman sign-in/konsen             -> akses web app belum "Anyone"
+      - HTML lain                          -> error Apps Script / rate limit
+    """
+    low = (body or "")[:4000].lower()
+    if "script function not found" in low and "doget" in low:
+        return "deployment_tanpa_doGet"
+    if "sign in" in low or "accounts.google.com" in low or "consent" in low:
+        return "butuh_akses_publik"
+    if "<!doctype html" in low or "<html" in low:
+        return "halaman_html_apps_script"
+    return "bukan_json_tanpa_struktur"
+
+
+def get_research_read_diagnosis() -> str:
+    """Diagnosis kegagalan pembacaan riset terakhir (`''` bila berhasil / belum mencoba)."""
+    return _research_read_diagnosis
+
+
 def _parse_research_response(resp: Any) -> Optional[dict]:
     """Decode balasan webhook riset; kembalikan None (dan catat status) bila bukan JSON sukses.
 
     200 + HTML adalah KEFAILAN SENSOR, bukan keberhasilan: halaman consent/error Apps Script
     juga bernilai 200. Status tercatat agar pemanggil bisa membunyikannya di Step Summary.
     """
+    global _research_read_diagnosis
     try:
         payload = resp.json()
     except Exception as exc:
+        diagnosis = _diagnose_non_json(getattr(resp, "text", "") or "")
+        _research_read_diagnosis = diagnosis
         detail = (
-            f"content_type={resp.headers.get('content-type', '?')}; "
+            f"content_type={resp.headers.get('content-type', '?')}; diagnosa={diagnosis}; "
             f"cuplikan={_redact_sheet_id(str(exc), get_spreadsheet_id())[:60]}"
         )
         _record_ledger_status(RESEARCH_READ_SHEET, "html_or_unparsable", detail)
         _warn_ledger_unreadable(RESEARCH_READ_SHEET, "html_or_unparsable", "webhook riset membalas non-JSON")
         return None
+    _research_read_diagnosis = ""
     if not isinstance(payload, dict) or payload.get("status") != "success":
         _record_ledger_status(RESEARCH_READ_SHEET, "status_not_success", f"payload={str(payload)[:60]}")
         return None

@@ -3583,12 +3583,19 @@ def market_execute(
         }
 
     # Research saham: Utamakan hasil penelitian dari Spreadsheet/CSV terlebih dahulu (hemat API & cepat)
-    from sheet_logger import fetch_latest_research_from_sheet, get_research_read_status
+    from sheet_logger import (
+        fetch_latest_research_from_sheet,
+        get_research_read_diagnosis,
+        get_research_read_status,
+    )
     cached_researches = fetch_latest_research_from_sheet()
     # Ronde 7: jalur baca riset dicatat di Step Summary. 200 + non-JSON dari Apps Script pernah
     # membuat semua siklus diam-diam memakai CSV lokal tanpa jejak keterlacakan di ringkasan.
     research_read = get_research_read_status()
     set_input_meta("research_read_status", research_read)
+    diagnosis = get_research_read_diagnosis()
+    if diagnosis:
+        set_input_meta("research_read_diagnosis", diagnosis)
     if research_read in ("http_error", "html_or_unparsable", "no_config", "exception", "status_not_success"):
         record_input_failure("input.riset_webhook", research_read)
 

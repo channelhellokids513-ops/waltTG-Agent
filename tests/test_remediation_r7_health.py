@@ -160,16 +160,50 @@ def test_safe_summary_memuat_input_health_dan_meta():
 # Webhook riset: 200 + non-JSON harus TERBACA sebagai kegagalan sensor
 # ------------------------------------------------------------------------------
 class _Resp:
-    def __init__(self, status_code=200, payload=None, raise_json=None, headers=None):
+    def __init__(self, status_code=200, payload=None, raise_json=None, headers=None, text=""):
         self.status_code = status_code
         self._payload = payload
         self._raise_json = raise_json
-        self.headers = headers or {}
+        self.headers = headers or {"content-type": "text/html; charset=utf-8"}
+        self.text = text
 
     def json(self):
         if self._raise_json:
             raise self._raise_json
         return self._payload
+
+
+def test_diagnosis_balasan_non_json_ternama_tepat():
+    assert sheet_logger._diagnose_non_json(
+        "Error: Requested script has no accessible function; Script function not found: doGet"
+    ) == "deployment_tanpa_doGet"
+    assert sheet_logger._diagnose_non_json(
+        "<html><body>Sign in to continue to Google</body></html>"
+    ) == "butuh_akses_publik"
+    assert sheet_logger._diagnose_non_json("<!DOCTYPE html><html>quota exceeded</html>") == "halaman_html_apps_script"
+    assert sheet_logger._diagnose_non_json("<html><body>Sign in required</body></html>") == "butuh_akses_publik"
+    assert sheet_logger._diagnose_non_json("<meta name=robots") == "bukan_json_tanpa_struktur"
+
+
+def test_diagnosis_ikut_muncul_di_status_detail_dan_terbersihkan_saat_sukses(monkeypatch):
+    from datetime import datetime, timezone
+    html = _Resp(200, raise_json=ValueError("Expecting value: line 1 column 1"),
+                 text="Error: Script function not found: doGet")
+    monkeypatch.setattr(sheet_logger.httpx, "get", lambda url, **k: html)
+    sheet_logger.fetch_latest_research_from_sheet(
+        webhook_url="https://example.invalid/exec", csv_path="logs/_tidak_ada_r7.csv"
+    )
+    assert sheet_logger.get_research_read_diagnosis() == "deployment_tanpa_doGet"
+    assert "diagnosa=deployment_tanpa_doGet" in sheet_logger.get_research_read_detail()
+
+    fresh = datetime.now(timezone.utc).isoformat()
+    ok = _Resp(200, {"status": "success", "data": {"NVDA": {"timestamp": fresh}}})
+    monkeypatch.setattr(sheet_logger.httpx, "get", lambda url, **k: ok)
+    sheet_logger.fetch_latest_research_from_sheet(
+        webhook_url="https://example.invalid/exec", csv_path="logs/_tidak_ada_r7.csv"
+    )
+    assert sheet_logger.get_research_read_status() == "ok"
+    assert sheet_logger.get_research_read_diagnosis() == "", "sukses wajib menghapus diagnosis lama"
 
 
 def test_webhook_non_json_dicatat_dan_tidak_dianggap_sukses(monkeypatch, caplog):

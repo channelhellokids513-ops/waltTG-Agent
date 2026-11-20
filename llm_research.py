@@ -35,20 +35,23 @@ log = logging.getLogger("llm_research")
 
 
 class _CrumbRedactingFilter(logging.Filter):
-    """Jangan pernah menuliskan crumb sesi Yahoo ke log (CI publik menyimpan teks log ini).
+    """Jangan pernah menuliskan token sesi pihak ketiga ke log (CI publik menyimpan teks log ini).
 
-    Crumb terikat cookie anonim dan bukan kredensial akun, tapi ia adalah token sesi:
-    mengecualikannya dari log adalah kebiasaan yang benar dan murah.
+    Dua kasus yang TERBUKA muncul di log nyata 2026-11-20:
+      - Yahoo:   `crumb=...`  (terikat cookie sesi; bukan kredensial akun, tapi token sesi)
+      - Apps Script: `user_content_key=...` pada URL `script.googleusercontent.com/macros/echo`
+        — GitHub Actions hanya membungkam nilai secret yang terdaftar, jadi parameter ini lolos
+        apa adanya ke log yang bisa dibaca publik.
     """
 
-    PATTERN = re.compile(r"(crumb=)[^&\s\"']+")
+    PATTERN = re.compile(r"((?:crumb|user_content_key)=)[^&\s\"']+")
 
     def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
         try:
             msg = record.getMessage()
         except Exception:
             return True
-        if "crumb=" in msg:
+        if "crumb=" in msg or "user_content_key=" in msg:
             record.msg = self.PATTERN.sub(r"\1<redacted>", msg)
             record.args = ()
         return True
