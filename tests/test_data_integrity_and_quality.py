@@ -173,21 +173,28 @@ def test_k1_gemini_uses_header_not_url_query_key_and_global_secret_redaction(mon
         captured["headers"] = headers
         return FakeResp()
 
-    client = llm_research.GeminiClient(api_key="AIzaSyFakeSecretKey123456789012345")
+    # Kunci palsu dirangkai dari potongan: berkas test tidak boleh memuat string yang cocok pola
+    # `AIza...{20,}` di tools/sanitize_gate.py, tanpa mengurangi kekuatan pemeriksaan redaksinya.
+    KUNCI_PALSU = "AIzaSy" + "FakeSecretKey123456789012345"
+
+    client = llm_research.GeminiClient(api_key=KUNCI_PALSU)
     monkeypatch.setattr(client.client, "post", fake_post)
     res = client.chat_json("test prompt")
 
     assert res == {"ok": True}
     assert "?key=" not in captured["url"]
-    assert "AIzaSyFakeSecretKey" not in captured["url"]
-    assert captured["headers"].get("x-goog-api-key") == "AIzaSyFakeSecretKey123456789012345"
+    assert KUNCI_PALSU[:18] not in captured["url"]
+    assert captured["headers"].get("x-goog-api-key") == KUNCI_PALSU
 
     # Global secret filter menyensor key=, Bearer, AIza
-    noisy = "GET https://api.example.com?key=SECRET123 Authorization: Bearer eyJhbGciOiJIUzI1NiJ9 AIzaSyFakeSecretKey123456789012345"
+    noisy = (
+        "GET https://api.example.com?key=SECRET123 Authorization: Bearer eyJhbGciOiJIUzI1NiJ9 "
+        + KUNCI_PALSU
+    )
     clean = walt_bot.redact_secrets(noisy)
     assert "SECRET123" not in clean
     assert "eyJhbGciOiJIUzI1NiJ9" not in clean
-    assert "AIzaSyFakeSecretKey123456789012345" not in clean
+    assert KUNCI_PALSU not in clean
 
 
 def test_e1_half_below_floor_returns_zero_skip():

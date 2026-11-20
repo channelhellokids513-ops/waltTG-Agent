@@ -58,8 +58,8 @@ def test_google_oauth_bind_and_strict_mode_and_logout(tmp_path, monkeypatch):
     assert auth.authorize(1001, "view_finance")[0] is False
 
     # Simulasikan user whitelist login via Google OAuth
-    auth.add_or_update_user("rizal@gmail.com", "admin")
-    status, rec, _ = auth._bind_google_email(telegram_id=5555, chat_id=5555, email="rizal@gmail.com")
+    auth.add_or_update_user("owner@example.com", "admin")
+    status, rec, _ = auth._bind_google_email(telegram_id=5555, chat_id=5555, email="owner@example.com")
     assert status == "success"
     assert rec["role"] == "admin"
     assert auth.authorize(5555, "manage_users")[0] is True

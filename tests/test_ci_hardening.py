@@ -56,7 +56,7 @@ def test_w5_log_redact_hides_balance_margin_pnl_and_order_id(monkeypatch):
     monkeypatch.setenv("LOG_REDACT", "true")
     raw = (
         "Balance available: $10.37 | Equity $15.43 (Available $10.37) | "
-        "margin $2.52 | PnL $+0.45 | order_id=01a1f2df-2d85-7341 | user@gmail.com"
+        "margin $2.52 | PnL $+0.45 | order_id=01a1f2df-2d85-7341 | user@example.com"
     )
     redacted = walt_bot.redact_sensitive_text(raw)
     assert "$10.37" not in redacted
@@ -64,7 +64,7 @@ def test_w5_log_redact_hides_balance_margin_pnl_and_order_id(monkeypatch):
     assert "$2.52" not in redacted
     assert "$+0.45" not in redacted
     assert "01a1f2df-2d85-7341" not in redacted
-    assert "user@gmail.com" not in redacted
+    assert "user@example.com" not in redacted
     assert "***" in redacted
 
     # Formatter mengikuti LOG_REDACT=true
@@ -123,7 +123,7 @@ def test_s1_shared_strategy_config_loader_fallback_and_bounds(monkeypatch, tmp_p
 
     # 5. Serialisasi shared config tidak membocorkan ID Telegram atau email
     serialized = strategy_config.serialize_shared_strategy_config(
-        {**strategy_config.DEFAULT_STRATEGY_CONFIG, "updated_by": "admin@gmail.com", "telegram_id": 123456}
+        {**strategy_config.DEFAULT_STRATEGY_CONFIG, "updated_by": "admin@example.com", "telegram_id": 123456}
     )
-    assert "admin@gmail.com" not in serialized
+    assert "admin@example.com" not in serialized
     assert "123456" not in serialized

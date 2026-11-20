@@ -342,11 +342,22 @@ def test_diagnostics_hanya_satu_langkah_yang_menyentuh_oauth():
     conds = [s.get("if") for s in token_steps]
     assert all(conds), "setiap langkah ber-OAuth wajib dipagar `if:` (satu token per job)"
     assert len(set(conds)) == len(conds), "kondisi `if:` harus berbeda -> tidak mungkin jalan bersamaan"
-    assert any("!= 'reconcile_history'" in c for c in conds) and any("== 'reconcile_history'" in c for c in conds)
 
     inputs = wf[True]["workflow_dispatch"]["inputs"]["oauth_step"]
     assert inputs["default"] == "dump_closed", "default harus langkah yang sudah terbukti aman"
-    assert set(inputs["options"]) == {"dump_closed", "reconcile_history"}
+    assert set(inputs["options"]) == {"dump_closed", "reconcile_history", "read_only"}
+
+    # R7: pagar diubah dari `!= 'reconcile_history'` menjadi `== 'dump_closed'`. Bentuk negasi itu
+    # diam-diam menjalankan LANGKAH BER-OAUTH untuk mode ketiga (`read_only`), yang akan membakar
+    # refresh token single-use hanya untuk sebuah probe baca. Pagar afirmatif membuat mode
+    # tanpa-OAuth benar-benar tanpa-OAuth.
+    assert all("==" in c and "!=" not in c for c in conds), (
+        "pagar OAuth harus afirmatif (== <mode>) supaya mode baru tidak ikut menyentuh token"
+    )
+    mode_by_step = {c.split("==")[1].strip().strip("'") for c in conds}
+    assert mode_by_step <= set(inputs["options"]), f"pagar merujuk mode tak dikenal: {mode_by_step}"
+    bebas_oauth = set(inputs["options"]) - mode_by_step
+    assert bebas_oauth == {"read_only"}, "harus ada tepat satu mode diagnostik tanpa OAuth"
 
 
 @pytest.mark.parametrize("filename", ["daily-scan.yml", "market-execute.yml", "crypto-execute.yml"])

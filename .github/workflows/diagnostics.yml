@@ -7,13 +7,14 @@ on:
   workflow_dispatch:
     inputs:
       oauth_step:
-        description: 'Refresh token Walt single-use: tepat SATU langkah per job yang boleh menyentuh OAuth'
+        description: 'Refresh token Walt single-use: tepat SATU langkah per job yang boleh menyentuh OAuth (read_only = nol OAuth)'
         required: false
         default: 'dump_closed'
         type: choice
         options:
           - dump_closed
           - reconcile_history
+          - read_only
 
 concurrency:
   group: walt-diagnostics
@@ -54,8 +55,22 @@ jobs:
           mkdir -p logs
           { echo "### 1. \`stats\` Summary (sumber: sheet/CSV, tidak menyentuh bursa)"; echo '```text'; python walt_bot.py stats | tee -a "$GITHUB_STEP_SUMMARY" | tee /dev/stderr; echo '```'; echo; } >> "$GITHUB_STEP_SUMMARY"
 
+      # R7: jalur baca riset bisa diverifikasi SEBANYAK yang dibutuhkan tanpa menyentuh token
+      # (redeploy Apps Script harus terbukti dari CI, bukan dari dugaan — dan dispatch workflow
+      # entry hanya untuk mengujinya justru berisiko membakar token yang sedang dipakai siklus lain).
+      - name: Research read probe (read-only, tanpa kredensial Walt)
+        env:
+          GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SHEET_WEBHOOK_URL: ${{ secrets.GOOGLE_SHEET_WEBHOOK_URL }}
+          STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}
+          LOG_REDACT: "true"
+        run: |
+          set -o pipefail
+          mkdir -p logs
+          { echo "### 1b. Jalur baca riset (webhook \`doGet\` + fallback CSV)"; echo '```text'; python tools/research_probe.py | tee -a "$GITHUB_STEP_SUMMARY" | tee /dev/stderr; echo '```'; echo; } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Exchange schema dump (butuh OAuth Walt; menulis balik rotasi token)
-        if: github.event.inputs.oauth_step != 'reconcile_history'
+        if: github.event.inputs.oauth_step == 'dump_closed'
         env:
           WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}
           WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
