@@ -6,6 +6,7 @@ dan referensi sumber cek harga aktual untuk Bot Telegram Walt Trading.
 from __future__ import annotations
 
 import json
+import time
 import urllib.parse
 from typing import Any
 
@@ -94,18 +95,24 @@ def _fetch_hyperliquid_candles(asset: str, interval: str = "1h", limit: int = 48
         return []
     candles = []
     for row in rows[-limit:]:
+        # Hyperliquid returns the in-progress candle too; a forming bar would leak
+        # the current (unclosed) high/low into structure detection.
+        if int(row.get("T", 0)) > end_ms:
+            continue
         candles.append({
             "t": int(row["t"]),
             "o": float(row["o"]),
             "h": float(row["h"]),
             "l": float(row["l"]),
             "c": float(row["c"]),
+            "v": float(row.get("v") or 0.0),
         })
     return candles
 
 
 def _fetch_binance_candles(asset: str, interval: str = "1h", limit: int = 48) -> list[dict[str, Any]]:
     symbol = f"{asset.upper()}USDT"
+    limit = max(1, min(int(limit), 1000))  # the klines endpoint rejects limit > 1000
     r = httpx.get(
         "https://api.binance.com/api/v3/klines",
         params={"symbol": symbol, "interval": interval, "limit": limit},
@@ -113,27 +120,40 @@ def _fetch_binance_candles(asset: str, interval: str = "1h", limit: int = 48) ->
     )
     r.raise_for_status()
     rows = r.json()
+    now_ms = int(time.time() * 1000)
     candles = []
     for row in rows:
+        # row[6] is the candle's close time: skip the still-open bar (lookahead guard).
+        if int(row[6]) > now_ms:
+            continue
         candles.append({
             "t": int(row[0]),
             "o": float(row[1]),
             "h": float(row[2]),
             "l": float(row[3]),
             "c": float(row[4]),
+            "v": float(row[5]),
         })
     return candles
 
 
 def _fetch_yahoo_candles(asset: str, interval: str = "1h", limit: int = 48) -> list[dict[str, Any]]:
     ticker = YAHOO_TICKER_MAP.get(asset.upper(), asset.upper())
-    range_map = {"15m": "5d", "1h": "5d", "4h": "1mo", "1d": "3mo"}
+    # A 48-bar chart only ever needed a few days; a liquidity-structure window needs
+    # hundreds of bars, so the range has to scale with the requested limit.
+    if limit > 700:
+        deep_map = {"15m": "5d", "1h": "3mo", "4h": "6mo", "1d": "2y"}
+    elif limit > 200:
+        deep_map = {"15m": "5d", "1h": "1mo", "4h": "3mo", "1d": "1y"}
+    else:
+        deep_map = {"15m": "5d", "1h": "5d", "4h": "1mo", "1d": "3mo"}
+    range_map = deep_map
     yf_interval = "1h" if interval == "4h" else interval
     r = httpx.get(
         f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(ticker)}",
         params={"interval": yf_interval, "range": range_map.get(interval, "5d")},
         headers={"User-Agent": "Mozilla/5.0"},
-        timeout=10.0,
+        timeout=15.0,
     )
     r.raise_for_status()
     data = r.json()
@@ -146,17 +166,27 @@ def _fetch_yahoo_candles(asset: str, interval: str = "1h", limit: int = 48) -> l
     highs = quote.get("high") or []
     lows = quote.get("low") or []
     closes = quote.get("close") or []
+    volumes = quote.get("volume") or []
+    step_ms = 3_600_000
+    if len(timestamps) > 1:
+        step_ms = max(1, (int(timestamps[-1]) - int(timestamps[0])) * 1000 // (len(timestamps) - 1))
+    now_ms = int(time.time() * 1000)
     candles = []
-    for t, o, h, l, c in zip(timestamps, opens, highs, lows, closes):
+    for index, (t, o, h, l, c) in enumerate(zip(timestamps, opens, highs, lows, closes)):
         if None in (t, o, h, l, c):
             continue
-        candles.append({
+        if int(t) * 1000 + step_ms > now_ms:
+            continue  # the newest bucket is still forming: never score a partial bar
+        candle = {
             "t": int(t) * 1000,
             "o": float(o),
             "h": float(h),
             "l": float(l),
             "c": float(c),
-        })
+        }
+        if index < len(volumes) and volumes[index] is not None:
+            candle["v"] = float(volumes[index])
+        candles.append(candle)
     return candles[-limit:]
 
 
