@@ -365,6 +365,7 @@ def log_close(
     closed_at: str = "",
     opened_at: str = "",
     filepath: str = "logs/closed_history.csv",
+    exit_source: str = "",
 ) -> dict:
     """
     Catat penutupan posisi ke sheet 'Closed_Positions' via webhook dan ke logs/closed_history.csv.

@@ -1145,10 +1145,47 @@ def _parse_positive_finite_price(raw: Any) -> Optional[float]:
     return round(val, 4)
 
 
-# avg_fill_price/fill_price/execution_price/mark_price: belum terverifikasi dari respons API nyata — konfirmasi via workflows/diagnostics.yml (Ronde 4 Item 4) sebelum andalkan
+# Vonis final (terverifikasi CI diagnostics.yml #44565856937): endpoint list positions(statuses=["closed"])
+# TIDAK punya field harga keluar (hanya 17 kunci). Daftar kunci fill/position/mark di bawah dikhususkan
+# untuk respons execute() close yang hingga kini belum terverifikasi dari satu penutupan guard riil.
 _CLOSE_FILL_PRICE_KEYS: tuple[str, ...] = ("avg_fill_price", "fill_price", "execution_price", "price")
 _CLOSE_POSITION_PRICE_KEYS: tuple[str, ...] = ("avg_close_price", "close_price", "exit_price")
 _CLOSE_MARK_PRICE_KEYS: tuple[str, ...] = ("mark_price",)
+CLOSE_EXIT_PROXY_MAX_AGE_H = 6.0  # Batas kesegaran (jam) updated_at untuk proksi latest_rate pada exchange-close
+
+
+def _parse_positive_finite_float(raw: Any) -> Optional[float]:
+    """Konversi nilai numerik positif terhingga tanpa pembulatan (mis. value_base/size kontrak)."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(val) or val <= 0.0:
+        return None
+    return val
+
+
+def _is_closed_timestamp_fresh(
+    ts_str: str,
+    max_age_h: float = CLOSE_EXIT_PROXY_MAX_AGE_H,
+    now_utc: Optional[datetime] = None,
+) -> bool:
+    """True hanya jika timestamp close/updated_at valid dan berumur <= max_age_h jam."""
+    raw = str(ts_str or "").strip()
+    if not raw:
+        return False
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        now = now_utc or datetime.now(timezone.utc)
+        age_h = (now - dt).total_seconds() / 3600.0
+        return age_h <= max_age_h
+    except Exception as exc:
+        log.debug(f"Gagal parse timestamp close '{raw}' ({type(exc).__name__}): {exc}")
+        return False
 
 
 def _parse_sane_exit_price(raw: Any, entry_price: float) -> Optional[float]:
@@ -2059,6 +2096,7 @@ def _detect_and_log_exchange_closes(
                 closed_by_cid_entry[(c_cid, c_ent)] = cp
 
         from sheet_logger import log_close
+        rate_failures: list[str] = []
         for prev_key in missing_keys:
             prev_info = prev_snapshot.get(prev_key, {})
             cid_int = int(prev_info.get("contract_id") or (prev_key if prev_key.isdigit() else 0))
@@ -2084,13 +2122,6 @@ def _detect_and_log_exchange_closes(
                 or prev_info.get("entry_price")
                 or 0.0
             )
-            raw_exit = (
-                cp.get("avg_close_price")
-                or cp.get("close_price")
-                or cp.get("exit_price")
-            )
-            exit_price: Optional[float] = float(raw_exit) if raw_exit is not None and float(raw_exit) > 0 else None
-
             margin = float(
                 cp.get("margin_quote")
                 or cp.get("margin")
@@ -2104,7 +2135,38 @@ def _detect_and_log_exchange_closes(
                 or prev_info.get("funding_paid")
                 or 0.0
             )
-            closed_at = str(cp.get("closed_at") or cp.get("updated_at") or "")
+            closed_at = str(cp.get("updated_at") or cp.get("closed_at") or "")
+
+            raw_exit = (
+                cp.get("avg_close_price")
+                or cp.get("close_price")
+                or cp.get("exit_price")
+            )
+            exit_price: Optional[float] = _parse_positive_finite_price(raw_exit)
+            exit_source = "exchange_closed_field" if exit_price is not None else ""
+
+            # Endpoint list positions(statuses=["closed"]) tidak mengembalikan harga keluar (17 kunci).
+            # Bila record closed ditemukan & updated_at masih segar (<= CLOSE_EXIT_PROXY_MAX_AGE_H),
+            # ambil mark live saat deteksi via latest_rate sebagai proksi jujur.
+            if exit_price is None and cp and asset and not str(asset).startswith("CID_"):
+                if not _is_closed_timestamp_fresh(closed_at, max_age_h=CLOSE_EXIT_PROXY_MAX_AGE_H):
+                    exit_source = "stale"
+                    log.debug(
+                        f"Close {asset} stale/tanpa updated_at valid ('{closed_at}') — tidak memakai proksi latest_rate"
+                    )
+                else:
+                    try:
+                        rate_resp = client.latest_rate(f"{asset}-USD-PERP")
+                        raw_rate = rate_resp.get("rate") if isinstance(rate_resp, dict) else None
+                        proxy_exit = _parse_sane_exit_price(raw_rate, entry_price)
+                        if proxy_exit is not None:
+                            exit_price = proxy_exit
+                            exit_source = "mark_at_detection"
+                    except Exception as exc:
+                        log.debug(
+                            f"Gagal fetch latest_rate proksi close {asset} ({type(exc).__name__}): {exc}"
+                        )
+                        rate_failures.append(str(asset))
 
             raw_pnl = (
                 cp.get("realized_pnl_quote")
@@ -2114,8 +2176,20 @@ def _detect_and_log_exchange_closes(
             if raw_pnl is not None:
                 pnl_quote: Optional[float] = float(raw_pnl)
             elif entry_price > 0 and exit_price is not None:
-                move = (exit_price - entry_price) / entry_price if side == "long" else (entry_price - exit_price) / entry_price
-                pnl_quote = margin * leverage * move
+                # Perpetual PnL linear terhadap ukuran kontrak (size_base = value_base), bukan turunan margin.
+                size_base = _parse_positive_finite_float(cp.get("value_base"))
+                if size_base is not None:
+                    pnl_quote = (
+                        (exit_price - entry_price) * size_base
+                        if side == "long"
+                        else (entry_price - exit_price) * size_base
+                    )
+                else:
+                    move = (exit_price - entry_price) / entry_price if side == "long" else (entry_price - exit_price) / entry_price
+                    pnl_quote = margin * leverage * move
+                    log.debug(
+                        f"PnL close {asset} memakai fallback margin*leverage*move (value_base tidak valid)"
+                    )
             else:
                 pnl_quote = None
 
@@ -2129,6 +2203,8 @@ def _detect_and_log_exchange_closes(
                     sl=prev_info.get("sl"),
                     pnl_quote=pnl_quote,
                 )
+            if exit_source == "mark_at_detection" and "[exit≈mark@deteksi]" not in reason:
+                reason = f"{reason} [exit≈mark@deteksi]"
 
             try:
                 log_close(
@@ -2143,8 +2219,9 @@ def _detect_and_log_exchange_closes(
                     reason=reason,
                     position_id=dedupe_id,
                     closed_at=closed_at,
-                    opened_at=str(cp.get("opened_at") or cp.get("created_at") or prev_info.get("opened_at") or ""),
+                    opened_at=str(cp.get("created_at") or cp.get("opened_at") or prev_info.get("opened_at") or ""),
                     filepath=closed_csv_path,
+                    exit_source=exit_source,
                 )
                 _record_closed_id(dedupe_id, path=closed_ids_path)
                 known_closed_ids.add(dedupe_id)
@@ -2158,6 +2235,7 @@ def _detect_and_log_exchange_closes(
                 })
             except Exception as err:
                 log.warning(f"Gagal log_close untuk {asset}: {err}")
+        _log_failure_summary("detect_exchange_closes.latest_rate", rate_failures, total=len(missing_keys))
 
     return current_snapshot, closed_events
 
