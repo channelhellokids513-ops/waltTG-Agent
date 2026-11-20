@@ -251,7 +251,87 @@ def test_csv_lokal_hanya_dipakai_setelah_webhook_dan_gviz_gagal(monkeypatch):
     assert res == {} and sheet_logger.get_research_read_source() == ""
 
 
+# ------------------------------------------------------------------------------
+# Toleransi format waktu sheet (bug yang dibuktikan CI #44777562090 16:51:50Z)
+# ------------------------------------------------------------------------------
+def test_format_waktu_asil_dari_sheet_terbaca():
+    """String persis yang dulu membuat seluruh tab Daily_Scans dianggap tidak ada."""
+    dt = sheet_logger.parse_sheet_timestamp("2026-11-15 5:40:00")
+    assert dt is not None and (dt.year, dt.month, dt.day, dt.hour, dt.minute) == (2026, 11, 15, 5, 40)
+    assert dt.tzinfo is not None, "tanpa zona wajib dianggap UTC (kolomnya bernama Timestamp (UTC))"
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("2026-11-20T13:58:25+00:00", (20, 13, 58)),
+        ("2026-11-20T13:58:25Z", (20, 13, 58)),
+        ("2026-11-20T13:58:25.936465+00:00", (20, 13, 58)),
+        ("2026-11-20 13:58", (20, 13, 58)),
+        ("2026-11-20T10:00:00-08:00", (20, 18, 0)),   # zona dihormati, bukan dianggap UTC
+    ],
+)
+def test_format_waktu_iso_tetap_bekerja(raw, expected):
+    dt = sheet_logger.parse_sheet_timestamp(raw)
+    assert dt is not None
+    utc = dt.astimezone(timezone.utc)
+    assert (utc.day, utc.hour, utc.minute) == expected
+
+
+def test_format_tanggal_gaya_amdan_dan_nomor_seri():
+    assert sheet_logger.parse_sheet_timestamp("11/15/2026 5:40:00").month == 11
+    assert sheet_logger.parse_sheet_timestamp("15/11/2026 5:40").month == 11  # day-first bila a>12
+    assert sheet_logger.parse_sheet_timestamp("11/15/2026 2:05 PM").hour == 14
+    seri = sheet_logger.parse_sheet_timestamp("45977.5")  # nomor seri Sheets
+    assert seri is not None and seri.year == 2025
+
+
+def test_sampah_tetap_ditolak_bukan_dipaksakan():
+    for junk in ("", "   ", "kemarin", "0", "NVDA", "tidak diketahui"):
+        assert sheet_logger.parse_sheet_timestamp(junk) is None, junk
+
+
+def test_is_research_fresh_menerima_format_sheet(monkeypatch):
+    now = datetime(2026, 11, 20, 12, 0, tzinfo=timezone.utc)
+    segar = "2026-11-20 9:40:00"          # 2 jam 20 menit -> segar untuk jendela 6 jam
+    basi = "2026-11-15 5:40:00"           # 5 hari -> basi
+    assert sheet_logger._is_research_fresh(segar, 6.0, now_utc=now) is True
+    assert sheet_logger._is_research_fresh(basi, 6.0, now_utc=now) is False
+    assert sheet_logger._is_research_fresh("bukan waktu", 6.0, now_utc=now) is False
+
+
+def test_statistik_gviz_membedakan_basi_dari_waktu_tak_dikenal(monkeypatch):
+    """'aset_segar = 0' harus bisa dijelaskan: basi, tak dikenali, atau memang kosong."""
+    baris_basi = ["", "", "", "NVDA"] + [""] * 15
+    baris_basi[0] = "2026-11-15 5:40:00"
+    baris_basi[1] = "15.26"
+    baris_aneh = ["", "", "", "AAPL"] + [""] * 15
+    baris_aneh[0] = "beberapa waktu lalu"
+    baris_segar = ["", "", "", "SPY"] + [""] * 15
+    baris_segar[0] = _ts(-1)
+    rows = [HEADER_CANTIK, baris_basi, baris_aneh, baris_segar]
+    monkeypatch.setattr(sheet_logger, "fetch_sheet_csv_rows_ex", lambda name, **kw: (rows, "ok"))
+
+    res, status = sheet_logger.fetch_latest_research_from_gviz(max_age_hours=6.0)
+    stat = sheet_logger.get_gviz_scan_stats()
+    assert status == "ok" and list(res) == ["SPY"]
+    assert stat["baris"] == 3 and stat["segar"] == 1
+    assert stat["basi"] == 1 and stat["waktu_tidak_dikenali"] == 1
+    assert stat["terbaru"] and "2026-11" in stat["terbaru"]
+
+
+def test_probe_mencetak_statistik_gviz(monkeypatch, capsys):
+    _stub(monkeypatch, "empty")
+    monkeypatch.setattr(
+        sheet_logger, "get_gviz_scan_stats",
+        lambda: {"baris": 39, "segar": 0, "basi": 38, "waktu_tidak_dikenali": 1, "terbaru": "x"},
+    )
+    assert rp.main() == 0
+    assert "gviz_statistik       = baris=39" in capsys.readouterr().out
+
+
 def test_probe_menyebut_sumber_yang_terpakai(monkeypatch, capsys):
+
     _stub(monkeypatch, "ok")
     monkeypatch.setattr(sheet_logger, "get_research_read_source", lambda: "gviz")
     assert rp.main() == 0

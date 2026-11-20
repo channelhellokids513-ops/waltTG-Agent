@@ -36,7 +36,11 @@ def main() -> int:
     if kolom:
         # `header_mismatch` punya dua makna (tab belum dibuat vs skema beda); daftar kolom yang
         # sebenarnya terlihat adalah satu-satunya cara membedakannya dari CI.
-        print("kolom_terlihat       = " + ", ".join(kolom[:12]) + (" ..." if len(kolom) > 12 else ""))
+        print("kolom_terlihat       = " + ", ".join(kolom[:20]) + (" ..." if len(kolom) > 20 else ""))
+    stat = sheet_logger.get_gviz_scan_stats()
+    if stat:
+        # "0 aset segar" tanpa angka ini tidak bisa ditindaklanjuti: basi, tak dikenali, atau kosong?
+        print("gviz_statistik       = " + ", ".join(f"{k}={v}" for k, v in stat.items()))
     if detail:
         print(f"detail               = {detail[:240]}")
 

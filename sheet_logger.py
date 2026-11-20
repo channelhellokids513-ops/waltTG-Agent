@@ -14,7 +14,7 @@ import re
 import time
 import logging
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 import httpx
 
@@ -818,6 +818,78 @@ def log_pnl_tracker(summary: dict, filepath: str = "logs/pnl_tracker.csv") -> di
     return {"logged": True, "webhook_logged": webhook_ok, "date": date_utc, "row": row}
 
 
+# --- Toleransi format waktu sheet (Ronde 7) ----------------------------------
+# Dibuktikan CI #44777562090 16:51:50Z: `_is_research_fresh gagal parse timestamp
+# '2026-11-15 5:40:00'`. Google Sheets menulis ulang ISO yang kita kirim ke bentuknya sendiri
+# (pemisah spasi, jam tanpa nol, tanpa zona). Filter kesegaran yang gagal parse SELALU berarti
+# "basi", jadi efeknya sama dengan riset yang tidak pernah ada — tanpa satu pun peringatan yang
+# menjelaskan. Parser ini menerima bentuk yang benar-benar terlihat, bukan hanya ISO yang rapi.
+_PARTIAL_ISO = re.compile(
+    r"^(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{1,2})(?::(\d{1,2})(?:\.\d+)?)?\s*(Z|[+-]\d{2}:?\d{2})?$",
+    re.IGNORECASE,
+)
+_US_DATE = re.compile(
+    r"^(\d{1,2})/(\d{1,2})/(\d{4})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?$", re.IGNORECASE
+)
+_SERIAL = re.compile(r"^\d{5}(?:\.\d+)?$")
+_EXCEL_EPOCH = datetime(1899, 12, 30, tzinfo=timezone.utc)
+
+_gviz_scan_stats: dict[str, Any] = {}
+
+
+def get_gviz_scan_stats() -> dict[str, Any]:
+    """Statistik pembacaan gviz Daily_Scans terakhir (baris/segar/basi/waktu tak dikenal/terbaru)."""
+    return dict(_gviz_scan_stats)
+
+
+def parse_sheet_timestamp(raw: Any) -> Optional[datetime]:
+    """Ubah nilai waktu dari sheet menjadi datetime aware UTC, atau None bila benar-benar tak dikenal.
+
+    Tanpa zona dianggap UTC — kolomnya memang bernama `Timestamp (UTC)`.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        pass
+
+    m = _PARTIAL_ISO.match(text)
+    if m:
+        y, mo, d, hh, mm, ss, tz = m.groups()
+        base = datetime(int(y), int(mo), int(d), int(hh), int(mm), int(ss or 0))
+        if not tz:
+            return base.replace(tzinfo=timezone.utc)
+        norm = tz.replace("Z", "+00:00")
+        if re.match(r"^[+-]\d{4}$", norm):
+            norm = norm[:3] + ":" + norm[3:]
+        return base.replace(tzinfo=datetime.fromisoformat(norm).tzinfo)
+
+    m = _US_DATE.match(text)
+    if m:
+        a, b, y, hh, mm, ss, ampm = m.groups()
+        a, b = int(a), int(b)
+        # Ambigu: lembar berbahasa Inggris-US menulis bulan lebih dulu. Bila angka pertama > 12
+        # itu mustahil bulan, jadi otomatis day-first. Selain itu ikuti asumsi locale sheet (US).
+        month, day = (b, a) if a > 12 else (a, b)
+        hour = int(hh) % 12
+        if ampm and ampm.upper() == "PM":
+            hour += 12
+        try:
+            return datetime(int(y), month, day, hour, int(mm), int(ss or 0), tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
+    if _SERIAL.match(text):
+        try:
+            return _EXCEL_EPOCH + timedelta(days=float(text))
+        except (OverflowError, ValueError):
+            return None
+    return None
+
+
 def _is_research_fresh(
     timestamp_str: Any,
     max_age_hours: float,
@@ -827,16 +899,13 @@ def _is_research_fresh(
     raw = str(timestamp_str or "").strip()
     if not raw:
         return False
-    try:
-        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        now = now_utc or datetime.now(timezone.utc)
-        age_hours = (now - dt).total_seconds() / 3600.0
-        return 0.0 <= age_hours <= max_age_hours or age_hours < 0.0
-    except Exception as e:
-        log.warning(f"_is_research_fresh gagal parse timestamp '{raw}' ({type(e).__name__}): {e}")
+    dt = parse_sheet_timestamp(raw)
+    if dt is None:
+        log.warning(f"_is_research_fresh: format waktu tidak dikenal '{raw[:40]}' -> dianggap basi")
         return False
+    now = now_utc or datetime.now(timezone.utc)
+    age_hours = (now - dt).total_seconds() / 3600.0
+    return 0.0 <= age_hours <= max_age_hours or age_hours < 0.0
 
 
 def get_research_read_source() -> str:
@@ -986,19 +1055,36 @@ def fetch_latest_research_from_gviz(
         return {}, "header_mismatch"
 
     researches: dict[str, Any] = {}
+    stats: dict[str, Any] = {
+        "baris": len(rows) - 1, "segar": 0, "basi": 0,
+        "waktu_tidak_dikenali": 0, "tanpa_asset": 0, "terbaru": None,
+    }
+    terbaru: Optional[datetime] = None
     for row in rows[1:]:
         item = {
             name: (row[i] if i < len(row) else "")
             for name, i in idx.items()
             if name not in GVIS_SCAN_WITHHELD
         }
+        dt = parse_sheet_timestamp(item.get("timestamp_utc"))
+        if dt is not None and (terbaru is None or dt > terbaru):
+            terbaru = dt
         asset = str(item.get("asset") or "").strip().upper()
         if not asset:
+            stats["tanpa_asset"] += 1
             continue
+        # Keputusan kesegaran tetap SATU sumber (_is_research_fresh); parse di atas hanya untuk
+        # membedakan "basi" dari "format waktu tidak dikenal" — dua diagnosis yang berbeda.
         if not _is_research_fresh(item.get("timestamp_utc"), max_age_hours, now_utc=now_utc):
+            stats["basi" if dt is not None else "waktu_tidak_dikenali"] += 1
             continue
+        stats["segar"] += 1
         # baris berikutnya menimpa: urutan tab = kronologis, jadi yang tersisa = paling baru
         researches[asset] = _research_from_row(item)
+
+    stats["terbaru"] = terbaru.isoformat() if terbaru else None
+    _gviz_scan_stats.clear()
+    _gviz_scan_stats.update(stats)
     return researches, "ok" if researches else "empty"
 
 
