@@ -43,7 +43,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p logs
-          { echo "### 1. \`stats\` Summary (sumber: sheet/CSV, tidak menyentuh bursa)"; echo '```text'; python walt_bot.py stats | tee -a "$GITHUB_STEP_SUMMARY"; echo '```'; echo; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "### 1. \`stats\` Summary (sumber: sheet/CSV, tidak menyentuh bursa)"; echo '```text'; python walt_bot.py stats | tee -a "$GITHUB_STEP_SUMMARY" | tee /dev/stderr; echo '```'; echo; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Exchange schema dump (butuh OAuth Walt; menulis balik rotasi token)
         env:
@@ -58,4 +58,4 @@ jobs:
           WALT_TOKEN_SYNC: "on"  # R6-fix: refresh OAuth membakar token single-use => wajib menulis balik
         run: |
           set -o pipefail
-          { echo "### 2. \`dump_closed\` Schema + pengukuran riwayat bursa"; echo '```json'; python walt_bot.py dump_closed | tee -a "$GITHUB_STEP_SUMMARY"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "### 2. \`dump_closed\` Schema + pengukuran riwayat bursa"; echo '```json'; python walt_bot.py dump_closed | tee -a "$GITHUB_STEP_SUMMARY" | tee /dev/stderr; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

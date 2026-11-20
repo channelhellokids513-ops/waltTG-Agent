@@ -276,3 +276,24 @@ def test_sheet_probe_fallback_env_file(tmp_path, monkeypatch):
 
     monkeypatch.setenv("GOOGLE_SHEET_ID", "id-dari-environment")
     assert sp.load_env_fallback() == "id-dari-environment", "environment selalu menang atas file"
+
+
+def test_diagnostics_stats_langkah_tanpa_token_dan_terbaca_di_log():
+    """
+    Bukti yang bisa diaudit: langkah stats harus (a) berjalan sebelum langkah bursa, (b) tidak
+    membawa env WALT_*, dan (c) menyalin stdout ke log (tee /dev/stderr) — tanpa (c) angkanya
+    hanya ada di Step Summary dan tidak terjejak di log run.
+    """
+    wf = yaml.safe_load((REPO_ROOT / ".github/workflows/diagnostics.yml").read_text(encoding="utf-8"))
+    steps = next(iter(wf["jobs"].values()))["steps"]
+    stats_idx = next((i for i, s in enumerate(steps) if "walt_bot.py stats" in (s.get("run") or "")), None)
+    exchange_idx = next((i for i, s in enumerate(steps) if "dump_closed" in (s.get("run") or "")), None)
+    probe_idx = next((i for i, s in enumerate(steps) if "tools/sheet_probe.py" in (s.get("run") or "")), None)
+
+    assert stats_idx is not None and exchange_idx is not None and probe_idx is not None
+    assert probe_idx < stats_idx < exchange_idx, "urutan: probe -> stats -> langkah bursa"
+    stats_env = steps[stats_idx].get("env") or {}
+    assert not any(k.startswith("WALT_") for k in stats_env), "stats tidak boleh butuh kredensial Walt"
+    assert "GOOGLE_SHEET_ID" in stats_env
+    for i in (probe_idx, stats_idx):
+        assert "tee /dev/stderr" in steps[i]["run"], f"langkah #{i} tidak menyalin output ke log"
