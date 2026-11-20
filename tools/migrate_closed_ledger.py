@@ -107,9 +107,118 @@ def migrate_closed_ledger(
     }
 
 
+def is_synthetic_fixture_row(row: list[str], col_map: dict[str, int]) -> bool:
+    """
+    Kriteria konservatif baris sintetis dari fixture test_risk.py:
+      - Asset == 'NVDA'
+      - Contract ID == '1'
+      - Entry Price == 100.0
+      - Margin == 2.5
+      - Position ID == '1:100.0:' ATAU kosong '' (baris 10-kolom pra-D2 dari fixture yang sama)
+    """
+    def _c(name: str, default_idx: int) -> str:
+        idx = col_map.get(name, default_idx)
+        return str(row[idx]).strip() if 0 <= idx < len(row) else ""
+
+    asset = _c("asset", 1).upper()
+    cid = _c("contract id", 3)
+    pid = _c("position id", 10)
+    if asset != "NVDA" or cid != "1" or pid not in ("1:100.0:", ""):
+        return False
+    try:
+        entry = float(_c("entry price ($)", 4))
+        margin = float(_c("margin ($)", 6))
+    except ValueError:
+        return False
+    return abs(entry - 100.0) < 1e-9 and abs(margin - 2.5) < 1e-9
+
+
+def purge_synthetic_rows(
+    csv_path: str = "logs/closed_history.csv",
+    apply: bool = False,
+) -> dict[str, Any]:
+    """
+    Hapus baris artefak fixture test dari ledger lokal `csv_path` secara konservatif.
+    Default dry-run; --apply membuat backup .bak-<UTC> terlebih dahulu.
+    """
+    path = Path(csv_path)
+    if not path.exists():
+        return {
+            "exists": False,
+            "applied": False,
+            "removed_count": 0,
+            "kept_count": 0,
+            "backup_path": None,
+            "candidates_sample": [],
+        }
+
+    with path.open("r", encoding="utf-8", newline="") as f:
+        rows = list(csv.reader(f))
+
+    if not rows:
+        return {
+            "exists": True,
+            "applied": False,
+            "removed_count": 0,
+            "kept_count": 0,
+            "backup_path": None,
+            "candidates_sample": [],
+        }
+
+    col_map, data_rows, _used_fb = sheet_logger.resolve_closed_positions_columns(rows)
+    header_row = rows[0] if _is_header_row(rows[0]) else list(sheet_logger.CLOSED_POSITIONS_HEADERS)
+
+    kept_rows: list[list[str]] = []
+    removed_rows: list[list[str]] = []
+    for r in data_rows:
+        if _is_header_row(r):
+            continue
+        if is_synthetic_fixture_row(r, col_map):
+            removed_rows.append(r)
+        else:
+            kept_rows.append(r)
+
+    backup_path: str | None = None
+    if apply and removed_rows:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        bak = path.parent / f"{path.name}.bak-{ts}"
+        shutil.copy2(path, bak)
+        backup_path = str(bak)
+        with path.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(header_row)
+            writer.writerows(kept_rows)
+
+    sample = [
+        {
+            "asset": r[col_map.get("asset", 1)] if len(r) > 1 else "",
+            "contract_id": r[col_map.get("contract id", 3)] if len(r) > 3 else "",
+            "entry": r[col_map.get("entry price ($)", 4)] if len(r) > 4 else "",
+            "reason": r[col_map.get("alasan close", 9)] if len(r) > 9 else "",
+            "position_id": r[col_map.get("position id", 10)] if len(r) > 10 else "",
+        }
+        for r in removed_rows[:5]
+    ]
+    return {
+        "exists": True,
+        "applied": bool(apply and removed_rows),
+        "removed_count": len(removed_rows),
+        "kept_count": len(kept_rows),
+        "backup_path": backup_path,
+        "candidates_sample": sample,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Migrasi bentuk kolom logs/closed_history.csv ke header 15 kolom (dry-run default)."
+        description="Migrasi & pembersihan artefak fixture pada ledger lokal logs/closed_history.csv (dry-run default)."
+    )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default="migrate",
+        choices=("migrate", "purge-synthetic"),
+        help="Subcommand: 'migrate' (default) atau 'purge-synthetic'.",
     )
     parser.add_argument(
         "--path",
@@ -122,10 +231,23 @@ def main(argv: list[str] | None = None) -> int:
         help="Terapkan perubahan ke file lokal (membuat backup .bak-<UTC> terlebih dahulu).",
     )
     args = parser.parse_args(argv)
-    res = migrate_closed_ledger(csv_path=args.path, apply=args.apply)
     mode = "APPLY" if args.apply else "DRY-RUN"
+
+    if args.command == "purge-synthetic":
+        res = purge_synthetic_rows(csv_path=args.path, apply=args.apply)
+        print(
+            f"[{mode} purge-synthetic] path={args.path} | removed={res['removed_count']} | "
+            f"kept={res['kept_count']} | applied={res['applied']} | backup={res['backup_path']}"
+        )
+        if res["candidates_sample"]:
+            print("Contoh kandidat (maks 5):")
+            for item in res["candidates_sample"]:
+                print(f"  - {item}")
+        return 0
+
+    res = migrate_closed_ledger(csv_path=args.path, apply=args.apply)
     print(
-        f"[{mode}] path={args.path} | total_data_rows={res['total_rows']} | "
+        f"[{mode} migrate] path={args.path} | total_data_rows={res['total_rows']} | "
         f"header_updated={res['header_updated']} | padded_rows={res['padded_rows']} | "
         f"changed={res['changed']} | backup={res['backup_path']}"
     )

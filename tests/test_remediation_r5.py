@@ -444,4 +444,59 @@ def test_r5_4_extract_close_exit_price_terminal_fallback_is_honest_unavailable()
     assert src2 == "unavailable"
 
 
+def test_r5_5_purge_synthetic_removes_only_fixture_rows_and_preserves_real_trades(tmp_path):
+    import csv
+    from tools.migrate_closed_ledger import purge_synthetic_rows
+
+    csv_file = tmp_path / "closed_history.csv"
+    real_row = [
+        "2026-11-20T01:00:00+00:00", "BTC", "SHORT", "42", "91000.0", "89500.0",
+        "2.5", "0.0824", "0.012", "Exchange Auto-Close TP [exit≈mark@deteksi]",
+        "42:91000.0:2026-11-19T20:00:00Z", "2026-11-20T01:00:00Z", "d11f2da8",
+        "2026-11-19T20:00:00Z", "mark_at_detection",
+    ]
+    synth_row_1 = [
+        "2026-11-19T10:00:00+00:00", "NVDA", "SHORT", "1", "100.0", "101.8",
+        "2.5", "-0.09", "0.05", "SL 1.50% breached (migrasi)",
+        "1:100.0:", "2026-11-19T10:00:00Z", "d11f2da8", "", "",
+    ]
+    synth_row_legacy = [
+        "2026-11-18T10:00:00+00:00", "NVDA", "SHORT", "1", "100.0", "101.8",
+        "2.5", "-0.09", "0.05", "TP breached", "", "", "", "", "",
+    ]
+    with csv_file.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(sheet_logger.CLOSED_POSITIONS_HEADERS)
+        w.writerow(synth_row_1)
+        w.writerow(real_row)
+        w.writerow(synth_row_legacy)
+
+    # Dry-run default tidak mengubah file
+    raw_before = csv_file.read_text(encoding="utf-8")
+    res_dry = purge_synthetic_rows(str(csv_file), apply=False)
+    assert res_dry["applied"] is False
+    assert res_dry["removed_count"] == 2
+    assert res_dry["kept_count"] == 1
+    assert csv_file.read_text(encoding="utf-8") == raw_before
+
+    # Apply membuat backup, menghapus 2 baris sintetis, mempertahankan 1 trade riil
+    res_apply = purge_synthetic_rows(str(csv_file), apply=True)
+    assert res_apply["applied"] is True
+    assert res_apply["backup_path"] and Path(res_apply["backup_path"]).exists()
+    rows_after = list(csv.reader(csv_file.open("r", encoding="utf-8")))
+    assert len(rows_after) == 2
+    assert rows_after[1] == real_row
+    assert all(r[10] != "1:100.0:" for r in rows_after[1:])
+
+
+def test_r5_5_diagnostics_workflow_enables_pipefail():
+    diag_path = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "diagnostics.yml"
+    raw = diag_path.read_text(encoding="utf-8")
+    pf_idx = raw.find("set -o pipefail")
+    tee_idx = raw.find("tee -a")
+    assert pf_idx != -1, "diagnostics.yml wajib menyetel 'set -o pipefail'"
+    assert pf_idx < tee_idx, "'set -o pipefail' harus muncul sebelum pipeline tee"
+
+
+
 
