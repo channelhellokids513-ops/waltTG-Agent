@@ -3754,8 +3754,7 @@ def compute_closed_stats(
         banner = (
             f"LEDGER TIDAK TERTBACA ({sheet_status}) — angka 0 di bawah BUKAN berarti tidak ada trade"
         )
-        print(banner)
-        log.warning(f"{banner} | detail: {sheet_detail}")
+        log.warning(f"{banner} | detail: {sheet_detail}")  # teksnya juga dicetak ke stdout via quality_line
     col_map, data_rows, used_fallback = resolve_closed_positions_columns(rows)
     if rows and used_fallback:
         log.warning(
@@ -3783,6 +3782,8 @@ def compute_closed_stats(
     trades = []
     unknown_count = 0
     unmeasured_backfill_count = 0
+    disputed_zero_count = 0
+    disputed_reasons: dict[str, int] = {}
     seen_keys: set[str] = set()
     trade_parse_failures: list[str] = []
     reason_breakdown: dict[str, int] = {
@@ -3822,6 +3823,31 @@ def compute_closed_stats(
             # BUKAN kegagalan parsing dan BUKAN trade rugi.
             if _cell(r, idx_exit_src) == EXCHANGE_HISTORY_EXIT_SOURCE:
                 unmeasured_backfill_count += 1
+            continue
+
+        # R6-6: angka nol yang menyamar sebagai data. Baris warisan pra-Ronde 5 menulis
+        # Exit Price = Entry Price (fallback harga masuk) dengan PnL 0 dan tanpa kolom sumber
+        # harga. Ia selama ini dihitung sebagai LOSS, padahal tidak ada harga keluar yang diketahui.
+        # Breakeven RIIL (sumber exchange_fill/response_position) tetap dihitung normal.
+        src_lbl = _cell(r, idx_exit_src).strip().lower()
+        try:
+            entry_cell_val = float(_cell(r, idx_entry) or 0.0)
+            exit_cell_val = float(raw_exit or 0.0)
+            pnl_cell_val = float(raw_pnl or 0.0)
+        except ValueError:
+            entry_cell_val = exit_cell_val = pnl_cell_val = None
+        if (
+            entry_cell_val is not None
+            and exit_cell_val is not None
+            and entry_cell_val > 0
+            and abs(exit_cell_val - entry_cell_val) <= 1e-9
+            and abs(pnl_cell_val) <= 1e-9
+            and src_lbl in ("", "entry_fallback")
+        ):
+            disputed_zero_count += 1
+            disputed_reasons[reason_raw or "(tanpa alasan)"] = (
+                disputed_reasons.get(reason_raw or "(tanpa alasan)", 0) + 1
+            )
             continue
 
         try:
@@ -3983,7 +4009,29 @@ def compute_closed_stats(
         },
         "pnl_terukur": total_trades,
         "belum_terukur_pnl": unmeasured_backfill_count,
+        # R6-6: baris PnL=0 tanpa sumber harga (Exit=Entry warisan) tidak boleh dihitung kalah.
+        "pnl_diragukan": disputed_zero_count,
+        "diragukan_alasan": disputed_reasons,
     }
+
+    if disputed_zero_count:
+        note = (
+            f"⚠️ {disputed_zero_count} baris ledger ber-PnL 0.00 karena Exit=Entry TANPA sumber harga "
+            f"(warisan pra-Ronde 5) — dikeluarkan dari win-rate; alasan: {disputed_reasons}"
+        )
+        print(note)
+        log.warning(note)
+
+    quality_line = (
+        f"LEDGER TIDAK TERTBACA ({sheet_status}) — angka 0 di bawah BUKAN berarti tidak ada trade"
+        if ledger_unreadable
+        else (
+            f"Sumber ledger: `{sheet_status}` | PnL terukur: `{total_trades}` | "
+            f"belum terukur (backfill bursa): `{unmeasured_backfill_count}` | "
+            f"diragukan (PnL=0 tanpa sumber harga): `{disputed_zero_count}`"
+        )
+    )
+    print(quality_line)
 
     eq_line = (
         f"Perubahan Ekuitas (PnL\\_Tracker): `${equity_change:+.4f}` (`${equity_start:.2f}` → `${equity_latest:.2f}`)"
@@ -4000,7 +4048,7 @@ def compute_closed_stats(
         (
             f"LEDGER TIDAK TERTBACA ({sheet_status}) — angka 0 di bawah BUKAN berarti tidak ada trade"
             if ledger_unreadable
-            else f"Sumber ledger: `{stats['ledger_source']['rows_from']}` | PnL terukur: `{total_trades}` | belum terukur (backfill bursa): `{unmeasured_backfill_count}`"
+            else quality_line
         ),
         f"Total Trade Valid: *{total_trades}* (Win: {len(wins)} | Loss: {len(losses)}) | UNKNOWN: *{unknown_count}*",
         f"Win Rate (tanpa UNKNOWN): *{win_rate_pct:.1f}%*",

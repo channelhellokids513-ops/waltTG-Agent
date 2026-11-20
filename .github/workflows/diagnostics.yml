@@ -25,6 +25,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Sheet read probe (read-only, tanpa kredensial Walt)
+        env:
+          GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || secrets.GOOGLE_SHEET_ID }}
+        run: |
+          set -o pipefail
+          { echo "### 0. Sheet read probe (sanitized, sha8 saja)"; echo '```text'; python tools/sheet_probe.py | tee /dev/stderr; echo '```'; echo; } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run read-only dump_closed and stats
         env:
           WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}

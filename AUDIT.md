@@ -190,6 +190,47 @@ kesalahan keputusan ronde ini sendiri yang dipaksa keluar oleh bukti.
 
 Ini **bukan** keadaan normal: sistem tidak akan memantau atau membuka posisi sampai kredensial dipulihkan dan variabel dikembalikan ke `false`.
 
+## 3e. Jalur baca sheet HIDUP — dan langsung mengubah kesimpulan (2026-11-20, 11:4x-12:0x UTC)
+
+Pemilik memberi akses **Viewer** pada spreadsheet. gviz export kini menjawab `HTTP 200 CSV` untuk
+keempat tab (sebelumnya 401). Ini menjawab tiga pertanyaan yang selama ini berstatus
+"TIDAK BISA DIVERIFIKASI", dan sekaligus membuka satu temuan akuntansi baru.
+
+| Yang sebelumnya tidak terjawab | Sekarang | Bukti |
+|---|---|---|
+| Apakah tab `Closed_Positions` ada di target Apps Script? | **ADA** | `probe`: `Closed_Positions ok rows=17 header=14kol (10 bernama)` — header hanya menamai 10 kolom pertama, tapi baris data punya 14 field (kolom 11-14: Position ID, Closed At, Strategy Version, Opened At). |
+| Apakah webhook Apps Script pernah menulis `Closed_Positions`? | **PERNAH, tapi tidak lengkap** | 17 baris nyata, stempel terakhir 2026-11-19T23:40Z, hash strategi `d11f2da8` terisi di baris baru. |
+| Berapa riwayat riil yang tercatat? | **Bursa 52 closed vs sheet 17 baris → selisih 35 penutupan tidak pernah masuk ledger.** | Angka 52 dari `history_measurement` diagnostics; 17 dari census sheet. Inilah bukti operasional bahwa ketergantungan pada cache Actions (S2) benar-benar memakan rekam jejak, bukan hanya risiko teoretis. |
+| Apakah sheet yang dipakai pemilik sama dengan yang dipakai CI? | **Pemilik: sha8 `06bded7f`, length 44.** Sisi CI akan dicetak oleh langkah baru `sheet probe` di `diagnostics.yml` (jalur ini tidak butuh token Walt, jadi hasilnya keluar walaupun kredensial mati). | `python tools/sheet_probe.py` + `Sheet fingerprint: sha8=06bded7f length=44`. |
+
+**Temuan akuntansi baru (`S5`, P1): angka nol yang menyamar sebagai data.** Dari 17 baris
+`Closed_Positions`, **9 baris** memiliki `Exit Price ($) == Entry Price ($)`, `PnL ($) = 0`, dan
+**tanpa** kolom sumber harga (baris 14 kolom, warisan penulis pra-Ronde 5 yang memakai harga masuk
+sebagai fallback harga keluar). Sebelum ronde ini, `stats` menghitungnya sebagai **LOSS**: laporan
+sebelumnya membaca `Total Trade Valid: 11 (Win 2 | Loss 9)`, `Avg Loss: $0.0000 (0.00%)` — yaitu 9
+"kerugian" yang sebenarnya *tidak ada datanya*. Setelah koreksi:
+
+```
+Sumber ledger: ok | PnL terukur: 2 | belum terukur (backfill bursa): 0 | diragukan (PnL=0 tanpa sumber harga): 9
+Total Trade Valid: 2 (Win: 2 | Loss: 0) | UNKNOWN: 6
+```
+
+**Yang perlu digarisbawahi:** **impas riil tetap dihitung** — syarat `diragukan` memerlukan
+`Exit == Entry` **dan** `PnL == 0` **dan** sumber harga kosong/`entry_fallback`. Test
+`test_census_breakeven_riil_bukan_baris_diragukan` dan
+`test_stats_tetap_menghitung_impas_dari_fill` mengunci sisi itu; 211 test hijau.
+
+**Kesimpulan yang harus dibaca orang lain dengan jujur:** dengan 2 trade terukur, 6 UNKNOWN, dan
+35 penutupan yang tidak ada di ledger sama sekali, **performa strategi saat ini BELUM TERUKUR**.
+Perubahan ekuitas periode berjalan (± -2% dari saldo awal) juga tidak bisa dijajarkan dengan
+`Net PnL` laporan, karena estimasi fee kini hanya menutupi trade terukur. Ronde 7 (strategi market)
+**wajib** dimulai dari kelengkapan riwayat, bukan dari tuning SL/TP: jalankan
+`reconcile_history --write` setelah kredensial pulih (52 baris masuk sebagai `belum_terukur_pnl`),
+lalu biarkan satu sampai dua minggu penutupan berjalan dengan `exchange_fill`/`response_position`
+terisi sebelum menilai efek perubahan parameter.
+
+
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 - Status CI dibaca lewat GitHub API, bukan lewat klaim laporan: daftar run `main` (status/kesimpulan),
@@ -329,6 +370,13 @@ mempertahankan semuanya:
    sengaja tanpa PnL dan tampil sebagai `belum_terukur_pnl`; mencampurkannya ke win-rate adalah
    fabrikasi. Ledger tidak boleh ditulis massal sebagai efek samping monitoring — itu tugas
    `reconcile_history --write` yang eksplisit.
+10. **(Ronde 6, pasca-akses Viewer) Nol tanpa sumber harga bukan hasil, melainkan data yang hilang.**
+    Baris dengan `Exit == Entry`, `PnL == 0`, dan kolom sumber harga kosong/`entry_fallback` wajib
+    tampil sebagai `pnl_diragukan` dan dikeluarkan dari win/loss. Impas **riil** (sumber
+    `exchange_fill`/`response_position`) tetap dihitung. Dan sebelum strategi mana pun dinilai,
+    sensus tiga sumber wajib dibaca bersama: hitungan bursa (`history_measurement`), census
+    `Closed_Positions` (`tools/sheet_probe.py`), dan ledger lokal — ketiganya boleh berbeda, dan
+    perbedaan itu adalah temuannya, bukan angka yang harus dirapikan.
 
 ## 7. ID spreadsheet: status terbaru (yang disanitasi hanya nilainya, bukan keberadaannya)
 
