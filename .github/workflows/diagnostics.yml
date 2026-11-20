@@ -16,7 +16,16 @@ on:
           - reconcile_history
           - reconcile_write
           - contract_economics
+          - slippage_probe
           - read_only
+        real_order:
+          description: 'PINTU KEDUA untuk langkah yang membuat order NYATA (slippage_probe). Pilihan lain = tidak ada order.'
+          required: false
+          default: 'TIDAK_ORDER'
+          type: choice
+          options:
+            - TIDAK_ORDER
+            - YA_ORDER_NYATA
 
 concurrency:
   group: walt-diagnostics
@@ -139,6 +148,31 @@ jobs:
           set -o pipefail
           { echo "### 2. contract_economics - biaya round-trip terukur (read-only)"; echo '```text'; } >> "$GITHUB_STEP_SUMMARY"
           python tools/contract_economics.py | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # Ronde 8: satu order NYATA untuk mengukur slippage murni. Butuh DUA konfirmasi:
+      # oauth_step=slippage_probe DAN real_order=YA_ORDER_NYATA. Alatnya sendiri menolak
+      # bila MAINTENANCE_MODE != true atau masih ada posisi terbuka.
+      - name: Slippage probe (ORDER NYATA - buka lalu tutup satu clip terkecil)
+        if: always() && github.event.inputs.oauth_step == 'slippage_probe' && github.event.inputs.real_order == 'YA_ORDER_NYATA'
+        env:
+          WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}
+          WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
+          GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SHEET_WEBHOOK_URL: ${{ secrets.GOOGLE_SHEET_WEBHOOK_URL }}
+          GH_PAT: ${{ secrets.GH_PAT || secrets.GH_PATH || secrets.GITHUB_PAT || secrets.PAT }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MAINTENANCE_MODE: ${{ vars.MAINTENANCE_MODE }}
+          LOG_REDACT: "true"
+          WALT_TOKEN_SYNC: "on"
+          SLIPPAGE_PROBE_CONFIRM: "saya-ersetuju-order-nyata"
+        run: |
+          set -o pipefail
+          { echo "### 3. slippage_probe - satu order nyata (buka lalu tutup)"; echo '```text'; } >> "$GITHUB_STEP_SUMMARY"
+          python tools/slippage_probe.py | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Ledger reconciliation dry-run (butuh OAuth; tidak menulis berkas)
