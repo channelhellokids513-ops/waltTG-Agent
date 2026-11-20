@@ -54,8 +54,94 @@ def test_pemeriksa_dijalankan_ci_dengan_angka_produksi():
     )
 
 
+def test_gerbang_e5_menutup_semua_jalur_entry_otomatis():
+    """Alat koherensi mengklasifikasi floor-longgar sebagai CATATAN karena E5 menahan entry
+    otomatis. Kalau invarian ini patah (jalur baru tanpa E5 / CLI manual dipakai otomatis),
+    catatan itu adalah rugi nyata -> test ini yang berteriak.
+
+    Cakupan: `crypto_execute` mendelegasi ke `market_execute` (dites di bawah), jadi dua call
+    site `check_funding_vs_fee_gate` = dua jalur otomatis yang ada.
+    """
+    import re
+    src = (REPO_ROOT / "walt_bot.py").read_text(encoding="utf-8")
+
+    # petakan setiap open_position( ke fungsi pembungkusnya
+    def fungsi_yang_melingkupi(pos: int) -> str:
+        potongan = src[:pos]
+        ketemu = re.findall(r"^def ([a-z_]+)\(", potongan, re.MULTILINE)
+        return ketemu[-1] if ketemu else "?"
+
+    calls_open = [m.start() for m in re.finditer(r"(?<!def )open_position\(", src)]
+    pembungkus = sorted({fungsi_yang_melingkupi(p) for p in calls_open})
+    otomatis = {f for f in pembungkus if f != "main"}
+    assert otomatis, f"tidak menemukan pemanggil open_position: {pembungkus}"
+
+    calls_gate = [fungsi_yang_melingkupi(m.start()) for m in re.finditer(r"check_funding_vs_fee_gate\(", src)]
+    for fungsi in sorted(otomatis):
+        assert fungsi in calls_gate, (
+            f"jalur entry otomatis `{fungsi}` memanggil open_position TANPA gerbang E5 "
+            f"(jalur tergerbang: {sorted(set(calls_gate))})"
+        )
+    # crypto_execute tidak punya jalur sendiri: ia delegasi (kalau nanti diubah jadi mandiri,
+    # test di atas akan merah karena ia jadi pemanggil open_position tanpa gerbang)
+    assert "market_execute(" in src[src.index("def crypto_execute"):]
+
+
 def test_default_kode_koheren():
-    assert cc.check(BASE) == [], "default kode harus lulus pemeriksaannya sendiri"
+    galat, catatan = cc.check(BASE)
+    assert galat == [], f"default kode harus lulus pemeriksaannya sendiri: {galat}"
+    assert catatan, "default justru menyimpan kenyataan tuning yang wajib dilaporkan, bukan disembunyikan"
+
+
+def test_semua_kata_kunci_keluar_dari_keranjang_yang_tepat():
+    """Klasifikasi galat vs catatan adalah keputusan sadar: galat = data/uang rusak senyap."""
+    galat, catatan = cc.check(BASE)
+    teks = " || ".join(galat + catatan)
+    assert "E5" in teks and "min_funding_daily" in teks
+
+
+def test_biaya_alat_sama_dengan_mesin():
+    """Alat tidak lagi menyalin konstanta fee: ia memanggil gerbang engine, jadi kesamaannya
+    dibuktikan lewat biaya, bukan lewat angka yang diketik dua kali."""
+    import walt_bot
+    assert cc.round_trip_cost(0.0) == pytest.approx(2.0 * walt_bot.TAKER_FEE_PER_SIDE)
+    # slippage teramati 1.00% -> biaya 1.18%, persis angka yang tercetak di log SKIP produksi
+    assert cc.round_trip_cost(cc.SLIPPAGE_TERAMATI) == pytest.approx(0.0118, abs=1e-6)
+    assert cc.e5_ambang(cc.SLIPPAGE_TERAMATI) == pytest.approx(0.0177, abs=5e-4), (
+        "req produksi = 1.770%; kalau angka ini melenceng, alatnya tidak lagi mengukur engine yang sama"
+    )
+
+
+def test_tabel_e5_memuat_kasus_teramati_dan_optimistik():
+    label = [l for l, _b, _a in cc.e5_tabel()]
+    assert any("teramati" in x for x in label) and any("optimistik" in x for x in label)
+
+
+@pytest.mark.parametrize(
+    "ubah, frasa_kunci, keranjang",
+    [
+        ({"max_research_age_hours": 6.0}, "kadens daily-scan", "galat"),
+        ({"tp_calm_pct": 0.0010}, "TP bersih negatif", "galat"),
+        ({"daily_loss_limit_pct": 0.005}, "circuit breaker", "galat"),
+        ({"expected_hold_hours": 0.0}, "wajib > 0", "galat"),
+        ({"min_funding_daily": 0.0001}, "DI BAWAH biaya round-trip", "catatan"),
+    ],
+)
+def test_pemeriksa_merah_untuk_pasangan_angga_yang_mustahil(ubah, frasa_kunci, keranjang):
+    galat, catatan = cc.check({**BASE, **ubah})
+    kotak = {"galat": galat, "catatan": catatan}[keranjang]
+    assert any(frasa_kunci in g for g in kotak), (
+        f"{ubah}: '{frasa_kunci}' harus muncul di {keranjang}; galat={galat} catatan={catatan}"
+    )
+    if keranjang == "galat":
+        assert galat, f"{ubah} wajib dihitung sebagai galat, bukan catatan"
+
+
+def test_ubah_kadens_memaksa_jendela_diperiksa_ulang(monkeypatch):
+    """Kalau scan dipercepat, jendela lama tidak boleh lolos sebagai 'koheren' secara palsu."""
+    monkeypatch.setattr(cc, "DAILY_SCAN_CADENCE_HOURS", 24.0)
+    galat, _catatan = cc.check(BASE)  # jendela 13j < kadens 24j
+    assert any("kadens daily-scan" in g for g in galat)
 
 
 def test_jendela_riset_mengikuti_kadens_scan():
@@ -71,35 +157,6 @@ def test_default_masih_dalam_rentang_spesifikasinya_sendiri():
             continue
         assert spec["min"] <= nilai <= spec["max"], f"{kunci}={nilai} keluar rentang {spec['min']}-{spec['max']}"
     assert strategy_config.STRATEGY_PARAM_SPECS["max_research_age_hours"]["max"] >= DEFAULT_RESEARCH_AGE_HOURS
-
-
-def test_taker_fee_tool_sama_dengan_mesin():
-    """Alat koherensi menyalin konstanta biaya; kalau walt_bot berubah, alatnya wajib ikut."""
-    import walt_bot
-    assert cc.TAKER_FEE_PER_SIDE == walt_bot.TAKER_FEE_PER_SIDE
-
-
-@pytest.mark.parametrize(
-    "ubah, frasa_kunci",
-    [
-        ({"max_research_age_hours": 6.0}, "kadens daily-scan"),
-        ({"min_funding_daily": 0.001}, "ekspektasi NEGATIF"),
-        ({"tp_calm_pct": 0.0010}, "TP bersih negatif"),
-        ({"daily_loss_limit_pct": 0.005}, "circuit breaker"),
-        ({"expected_hold_hours": 0.0}, "wajib > 0"),
-    ],
-)
-def test_pemeriksa_merah_untuk_pasangan_angga_yang_mustahil(ubah, frasa_kunci):
-    galat = cc.check({**BASE, **ubah})
-    assert galat, f"konfigurasi {ubah} seharusnya dilaporkan"
-    assert any(frasa_kunci in g for g in galat), f"{galat} tidak menyebut '{frasa_kunci}'"
-
-
-def test_ubah_kadens_memaksa_jendela_diperiksa_ulang(monkeypatch):
-    """Kalau scan dipercepat, jendela lama tidak boleh lolos sebagai 'koheren' secara palsu."""
-    monkeypatch.setattr(cc, "DAILY_SCAN_CADENCE_HOURS", 24.0)
-    galat = cc.check(BASE)  # jendela 13j < kadens 24j
-    assert any("kadens daily-scan" in g for g in galat)
 
 
 def test_main_keluar_nol_dan_satu(monkeypatch, capsys):
