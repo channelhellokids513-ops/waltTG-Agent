@@ -25,9 +25,10 @@ publik di `STRATEGY.md`, `PRD.md`, `README.md`, dan kode sumber.
 | 2 | `aa545d2`..`2ff2c35` (13 commit) | 4 defect kritis jalur-dingin + 5 tinggi + 5 sedang | 51 → 81 test lulus; 0 run `failure`; bukti runtime: risk-monitor success pada commit akhir |
 | 3 | `b3d8577`..`f8234a3` termasuk 1 commit tambahan (6 commit) | Hardening registry trailing, kejujuran exit price, noise log, kedaulatan kredensial, kebersihan repo | 81 → 112 test lulus; diff guard 0 nilai strategi berubah; 0 test lama diedit |
 | 4 | `0927fb9`..`f8234a3` (6 commit) | Kill-switch maintenance, alert `invalid_grant`, workflow diagnostik read-only, `.gitignore` artefak audit | 112 lulus; 14 run CI terakhir success; diagnostics menghasilkan bukti skema API riil |
-| 5 | belum dieksekusi | Integritas data ledger + jalur yang masih bisa rusak senyap | lihat §5 |
+| 5 | `8e72599`..`e68e0eb` (5 commit) | Integritas data ledger + jalur yang masih bisa rusak senyap | 112 → **124 lulus**; `ledger_delta = 0` setelah satu `pytest` penuh; guard anti-pencemaran terbukti **MERAH** (`exit=1` saat 125 test hijau); migrasi ledger **0 nilai lama berubah** + idempoten; purge 301 baris (0 kandidat riil); kill-switch terbukti `skipped`→`success` |
+| 6 | belum dieksekusi | Kebenaran data: ledger dari API bursa, integritas cache CI, cakupan watchdog | lihat §3b dan §5b |
 
-Metode verifikasi yang dipakai di setiap ronde (dan yang akan dipakai lagi untuk ronde 5):
+Metode verifikasi yang dipakai di setiap ronde (dan yang akan dipakai lagi untuk ronde 6):
 bukan membaca laporan agen, tapi menjalankan ulang — `pytest -q`, diff guard untuk tiap konstanta
 strategi, diff guard untuk `timeout-minutes`/`concurrency`/`python-version`, scan pola `except`,
 scan literal angka, reproduksi mandiri skenario crash, pembacaan metadata CI dari GitHub API,
@@ -76,6 +77,29 @@ agar cocok dengan prompt ronde 5.
 | **N6** | P1 | **Rantai crash `entry_price` nol — belum pernah muncul di laporan ronde mana pun.** Dua properti `Position` membagi oleh `entry_price` tanpa penjagaan. | Lokasi properti + 4 konsumen di jalur produksi (termasuk pemanggilan di dalam siklus monitor). Satu posisi dengan harga masuk kosong = monitor 10 menit mati sebelum sempat mengevaluasi SL/TP posisi lain. Semua pembagian harga lain sudah terjaga; tinggal dua ini |
 | **N7** | Info | Kill-switch pemeliharaan baru terbukti di unit test (parse YAML), belum terbukti membuat run CI benar-benar `skipped`. | Variabel repo belum pernah diset; guard inert secara default (perilaku yang memang dirancang aman) |
 
+## 3b. Temuan pasca-ronde 5 (bahan ronde 6 — semuanya terukur, bukan dugaan)
+
+Ronde 5 menutup N1-N7. Verifikasi independen terhadap ronde 5 kemudian membuka lapisan **sistem dan
+workflow** yang belum pernah diaudit ronde 2-5, dan menemukan bahwa masalah terbesarnya justru bukan
+di Python.
+
+| ID | Sev | Temuan | Bukti keras (2026-11-20) |
+|---|---|---|---|
+| **S1** | P0 | **Tidak ada satu pun tempat yang bisa membaca riwayat penutupan, padahal trading memakai uang riil.** | Run diagnostik pada SHA tip: `"closed_positions_count": 52` dan `vars.STRATEGY_CONFIG_JSON` berisi `"dry_run":false`. Baca sheet: di CI **HTTP 404** (`Closed_Positions`, `PnL_Tracker`), di lokal **HTTP 401** untuk keempat tab. `stats` mencetak `Total Trade Valid: 0` di kedua dunia. Dua ID sheet yang dipakai dua lingkungan berperilaku **berlainan** — belum dirumuskan mana yang otoritatif. |
+| **S1b** | P0 | **Kegagalan baca itu senyap.** | `sheet_logger.py:383-384` dan `walt_bot.py:2029-2030` hanya `log.debug`, lalu mengembalikan kosong. Efek lanjutan: dedupe jatuh ke `closed_ids.json` (cache saja) → risiko pencatatan ganda setelah cache dipangkas. |
+| **S2** | P0 | **State risiko hidup di Actions cache tanpa deteksi cache-miss.** | Keempat workflow trading restore `logs/` (`walt-logs-state-`) + save `if: always()`; `risk-monitor` menambah `walt-snapshot-`. Nol langkah yang membaca `cache-hit`. Yang hilang saat cache dipangkas GitHub (7 hari tak diakses / kuota): cooldown re-entry, counter 8 entry/hari & 2 entry/aset/24 jam, jangkar *daily circuit breaker*, `closed_ids`, `open_snapshot`. Efek terburuk yang belum ada tamengnya: snapshot kosong dibaca sebagai "semua posisi tertutup" (banjiri baris `UNKNOWN`) dan limit harian kembali nol. |
+| **W1** | P1 | **Watchdog hanya mengawasi satu workflow.** | `watchdog.yml` cek sukses risk-monitor ≤30 menit. `market-execute`, `crypto-execute`, `daily-scan` tidak punya cron GitHub — dipicu Google Cloud Scheduler eksternal. Job Scheduler mati = entry berhenti tanpa satu pun alert. |
+| **V1** | P1 | Dua jalur tulis produksi di luar daftar pengawasan guard ronde 5. | `logs/security_audit.jsonl` (`telegram_auth.py:61`) dan `logs/_tmp_sheet_batch.json` (`sheet_logger.py:201`) tidak ada di `_STATE_FILES`; jalur kedua juga memakai literal path sehingga tidak bisa diarahkan fixture isolasi. |
+| **V2** | P2 | `notifier.py:19` bisa mematikan pemanggilnya di konsol Windows. | Preview dicetak pada cabang kredensial `dummy` (jalur lokal paling umum). Repro: rc=1 `UnicodeEncodeError` dengan `PYTHONIOENCODING=cp1252`, rc=0 dengan UTF-8. Pre-existing, tidak disentuh ronde 5. |
+| **V3** | P2 | README §172 mengklaim "Tanpa Hardcode Sheet ID", padahal `sheet_logger.py:22` masih memakai ID sebagai default. | Klaim dokumentasi vs kode bertentangan; dan `.env` lokal tidak memuat `GOOGLE_SHEET_ID` maupun `GOOGLE_SHEET_WEBHOOK_URL` → tulis lokal tidak pernah sampai ke sheet. |
+| **C1** | P2 | Workflow berlabel read-only **menulis kredensial**. | Log diagnostik: `PUT .../actions/secrets/WALT_REFRESH_TOKEN` → `204`. Inilah mekanisme yang membuat `.env` lokal selalu tertinggal satu rotasi. |
+| **C2** | P2 | Least-privilege & reproducibility belum dibereskan. | `permissions:` hanya ada di 1 dari 7 workflow; `requirements*.txt` memakai rentang `>=`; 23 rujukan `uses:` masih tag mayor. |
+| **D1** | Info | Baseline ronde 5 **sah** berubah: ledger lokal kini hanya header, `stats` = 0 trade. | Bukan regresi — konsekuensi purge yang benar. Tapi artinya nol rekam jejak riil tersimpan di lokal, dan yang riil ada di bursa (S1). |
+
+**Yang justru terverifikasi baik:** queue `concurrency` satu group tanpa cancel ✓, `set -o pipefail`
+di 5 workflow ✓, nol `continue-on-error` ✓, nol `pull_request_target` ✓, `tests.yml` tanpa secrets ✓,
+redaksi bekerja di log publik ✓, `python-version` konsisten ✓.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 - Status CI dibaca lewat GitHub API, bukan lewat klaim laporan: daftar run `main` (status/kesimpulan),
@@ -91,7 +115,7 @@ agar cocok dengan prompt ronde 5.
   `timeout-minutes`/`concurrency`/`python-version` pada workflow lama, 0 berkas test lama
   yang berubah isinya (kecuali penambahan fixture yang diwajibkan ronde 5).
 
-## 5. Ruang lingkup ronde 5 (sudah ditulis ke prompt, belum dieksekusi)
+## 5. Ronde 5 — ruang lingkup dan hasil (dieksekusi 2026-11-20, diverifikasi independen)
 
 1. **[R5-1]** Karantina seluruh tulis test ke direktori sementara + hook yang membuat pytest
    **gagal** bila berkas state produksi bertambah. Syarat lulus: delta baris ledger = 0.
@@ -114,6 +138,48 @@ empat bukti remote yang harus menunjuk SHA identik (lokal, tracking ref, daftar 
 dan sudut pandang GitHub), kemudian menunggu CI pada SHA terakhir sampai terminal dengan 0
 `failure`. Dilarang force-push, `reset --hard`, dan revert diam-diam. Tanpa bukti push, sebuah item
 tidak boleh dilaporkan selesai.
+
+**Hasil verifikasi ronde 5** (semuanya saya ukur ulang, bukan membaca laporan agen):
+
+- 124 test lulus; delta ledger **0** dan hash `closed_history.csv` tidak berubah setelah `pytest`.
+- Guard anti-pencemaran saya pancing dengan menulis 1 baris langsung ke ledger: **125 test hijau
+  tapi `exit=1`** + pesan `LEDGER TERCEMAR` → guard tidak vakum.
+- Premis ronde 5 saya reproduksi di worktree commit lama: di `f8234a3` suite menciptakan **5 baris**
+  sintetis dan `pnl_pct_margin` benar-benar melempar `ZeroDivisionError` → N1 & N6 nyata.
+- Migrasi (pada salinan file campuran 10/14 kolom): semua jadi 15 kolom, **0 nilai lama berubah**
+  sel-demi-sel, apply kedua `changed=False`, digest reader by-name identik pra/pasca → netral-output.
+- Purge: 301 baris = 7 signature, semuanya pola fixture (`cid=1`, `entry=100.0`, `NVDA`, `margin=2.5`),
+  termasuk 20 baris dalam satu detik yang sama → **0 kandidat trade riil** yang hilang.
+- Assert lama: 9 dari 9 berkas test warisan jumlah assert-nya identik; nol nilai strategi berubah;
+  nol perubahan `timeout-minutes`/`concurrency`/`python-version`; 1.375 baris diff bersih dari rahasia.
+- CI: 25 run terakhir = 24 success + 1 skipped, **0 failure**; kill-switch terbukti nyata lalu `false`.
+
+## 5b. Ronde 6 — ruang lingkup (prompt sudah ditulis, belum dieksekusi)
+
+1. **[R6-1][P0]** Jadikan API bursa sumber kebenaran: `walt_bot.py reconcile_history` (read-only,
+   kunci dedupe **memakai ulang** `make_position_dedupe_key` supaya backfill dan deteksi live
+   collapse ke identitas yang sama), baris backfill jujur (`Exit Price Source =
+   "exchange_history_no_exit"`, PnL kosong — endpoint tidak punya harga keluar), plus
+   `ledger_source` dan pemisahan `pnl_terukur` vs `belum_terukur_pnl` di `stats`. Kegagalan baca
+   naik dari `log.debug` ke `log.warning` teragregasi, dan `DEFAULT_SPREADSHEET_ID` dihapus dari
+   kode. (Menutup S1, S1b, V3, dan sebagian §7.)
+2. **[R6-2][P0]** Deteksi `cache-hit` di keempat workflow + perilaku start dingin yang konservatif:
+   snapshot kosong tidak boleh memicu banjir `UNKNOWN`, rehidrasi dedupe dari API, dan jalur entry
+   **menolak** membuka posisi ketika limit harian/cooldown tidak diketahui (`WALT_ALLOW_COLD_ENTRY`
+   sebagai override sadar). Termasuk bukti nyata dengan cache yang dihapus. (Menutup S2.)
+3. **[R6-3][P1]** Watchdog mengawasi keempat workflow dengan ambang usia per-cadensi (diambil dari
+   tabel jadwal di dokumentasi, bukan angka karangan), tabel status ke Step Summary, fallback
+   dispatch hanya untuk yang stale, `MAINTENANCE_MODE` tetap lebih dulu keluar. (Menutup W1.)
+4. **[R6-4][P2]** `permissions:` eksplisit di 7 workflow, `requirements*.txt` dikunci `==`,
+   `uses:` di-pin ke SHA, dan mode read-only untuk sinkronisasi token (`diagnostics.yml` tidak lagi
+   menulis secret; jalur trading tetap berotasi). (Menutup C1, C2.)
+5. **[R6-5][P3]** Sisa kebersihan: dua jalur tulis ke `_STATE_FILES` dengan **bukti merah** untuk
+   masing-masing, `notifier` aman-encoding (repro cp1252 jadi rc 0), `purge-fixture-ids` untuk
+   `closed_ids.json`, dan penghapusan artefak sisa probe. (Menutup V1, V2, V3-sisa.)
+
+FASE AKHIR ronde 6 mengikuti pola ronde 5 (satu item satu commit, push, empat bukti remote identik,
+CI terminal 0 failure) ditambah bukti hidup per item — termasuk grep log `diagnostics.yml` yang
+**tidak** memuat `PUT .../actions/secrets/`, dan pengukuran delta ledger = 0 selama uji cache dingin.
 
 
 ---
@@ -141,32 +207,52 @@ mempertahankan semuanya:
 5. **Guard yang tidak bisa merah bukan guard.** Setiap ronde menambahkan test yang lebih dulu
    dibuktikan gagal sebelum perbaikan; itu syarat, bukan formalitas.
 
-## 7. Catatan kebersihan yang masih terbuka (yang disanitasi hanya nilainya, bukan keberadaannya)
+## 7. ID spreadsheet: status terbaru (yang disanitasi hanya nilainya, bukan keberadaannya)
 
-ID spreadsheet Google dipakai sebagai **nilai default di dalam kode sumber**, sehingga berkas kode
-yang publik sudah memuatnya. Dokumen ini tidak mengulang nilai itu. Yang perlu dilakukan suatu hari
-(kandidat ronde berikutnya, belum dieksekusi):
+ID spreadsheet Google masih dipakai sebagai **nilai default di dalam kode sumber**
+(`sheet_logger.py:22`), sehingga berkas kode publik memuatnya. Dokumen ini tidak mengulang nilainya;
+bila perlu dirujuk, gunakan sidik jarinya: `len=44`, `sha8=06bded7f`.
 
-- jadikan ID spreadsheet wajib dari konfigurasi (env/secret) tanpa default di kode, sehingga
-  kegagalan baca muncul sebagai error jelas dan bukan sebagai 404 senyap seperti yang terjadi
-  pada `stats` di runner CI;
-- putuskan apakah ID sheet boleh memang publik (jika sheet hanya bisa ditulis lewat webhook,
-  membaca lewat ekspor CSV tetap butuh akses; 404 di CI menunjukkan batas ini belum dirumuskan);
-- simpan jejak keputusan itu di dokumen ini supaya tidak menjadi misteri lintas ronde.
+Fakta terukur 2026-11-20 yang mengubah status item ini dari "kebersihan" menjadi **korelan S1**:
+
+- membaca lewat ekspor CSV dari lingkungan lokal terhadap ID default itu → **HTTP 401 untuk keempat
+  tab** (artinya seluruh spreadsheet tidak untuk baca publik);
+- membaca di runner CI (ID dari secret) → **HTTP 404** untuk `Closed_Positions` dan `PnL_Tracker`;
+- `README` §172 mengklaim "Tanpa Hardcode Sheet ID" — kontradiksi dengan kode, dan harus dikoreksi;
+- `.env` lokal tidak memuat `GOOGLE_SHEET_ID` maupun `GOOGLE_SHEET_WEBHOOK_URL` → penulisan dari
+  lokal tidak pernah mencapai sheet mana pun;
+- karena 401 (lokal) dan 404 (CI) adalah dua perilaku berbeda, **belum terbukti** kedua lingkungan
+  memakai spreadsheet yang sama.
+
+Yang akan dilakukan (sudah masuk ronde 6, [R6-1]): hapus default dari kode, `GOOGLE_SHEET_ID` wajib
+dari konfigurasi, kegagalan baca menjadi warning teragregasi yang menyebut status HTTP, dan koreksi
+README. Keputusan yang masih harus diambil pemilik: mana yang jadi sumber kebenaran — spreadsheet,
+CSV lokal, atau API bursa. Arah yang dipilih ronde 6: **API bursa** sebagai otoritas riwayat,
+sheet sebagai cermin baca-manusia.
 
 ## 8. Cara memakai jejak ini
 
-- **Ingin tahu apa yang berubah dan kenapa:** §1 dan §3; SHA commit ada di `git log` dengan tag
-  `[P0-*]`, `[P1-*]`, `[P2-*]` (ronde 2), `[R3-n]` (ronde 3), `[R4-n]` (ronde 4), `[R5-n]` (ronde 5).
+- **Ingin tahu apa yang berubah dan kenapa:** §1, §3, dan §3b; SHA commit ada di `git log` dengan tag
+  `[P0-*]`, `[P1-*]`, `[P2-*]` (ronde 2), `[R3-n]` (ronde 3), `[R4-n]` (ronde 4), `[R5-n]` (ronde 5),
+  `[R6-n]` (ronde 6, belum).
 - **Ingin memverifikasi klaim:** §1 metode + §4 bukti. Jangan mengandalkan laporan agen; jalankan
   ulang `pytest -q`, guard diff, dan pembacaan CI dari GitHub API.
 - **Ingin melanjutkan pekerjaan:** prompt eksekusi per ronde berada di mesin pemilik
   (`Antigravity_prompt.md` + arsip), dan sengaja tidak di-commit karena repo ini publik.
-- **Angka di §3 (N2) bukan laporan performa.** Rekam jejak trading riil baru bermakna setelah
-  ronde 5 Item 2 dan 5 selesai, karena sampai saat itu penutupan oleh bursa tidak terukur.
+- **Angka di §3 (N2) bukan laporan performa, dan §5 tidak membuatnya jadi performa.** Ronde 5 sudah
+  menghapus artefak fixture (ledger lokal kini hanya header), jadi `stats` menunjuk 0 trade. Yang riil
+  justru **belum terbaca sama sekali**: bursa melaporkan 52 posisi closed (S1) sementara sheet tidak
+  bisa dibaca di kedua dunia. Rekam jejak baru bisa dihitung setelah [R6-1], dan untuk riwayat hasil
+  backfill PnL-nya jujur berstatus **belum terukur** (endpoint tidak menyediakan harga keluar).
+- **Sebelum menyetel strategi market, dua hal ini harus hijau:** [R6-1] (riwayat terbaca + kegagalan
+  berbunyi) dan [R6-2] (state risiko tidak bisa hilang senyap). Tanpa keduanya, efek perubahan SL/TP/
+  cadence tidak mungkin diukur, dan limit harian bisa tereset tanpa siapa pun tahu.
 
 ---
 
-*Dokumen ini dibuat otomatis dari hasil verifikasi ronde 2-5 dan disanitasi oleh scrubber yang
-memuat nilai konfigurasi lokal ke memori semata-mata sebagai pola penghapusan; tidak ada nilai
-rahasia yang pernah ditulis ke berkas ini.*
+*Dokumen ini disusun dari hasil verifikasi independen ronde 2-5 dan rencana ronde 6, lalu disanitasi
+oleh scrubber yang memuat nilai konfigurasi lokal ke memori semata-mata sebagai pola penghapusan.
+Scrubber-nya sendiri diuji dengan menanam satu nilai `.env` asli + sembilan pola rahasia sintetis:
+seluruhnya terdeteksi (10 kecocokan pola + 1 literal, verdict LOLOS), jadi "0 kecocokan" pada dokumen
+ini berarti bersih — bukan berarti patrolinya mati. Sidik jari (`sha8`) sengaja dipakai sebagai
+pengganti nilai agar jejak audit tetap bisa dicocokkan tanpa membocorkan identifier.*
