@@ -2,7 +2,7 @@
 Multi-Voter AI Research Layer (4-Voter Swarm + Qwen-Max Aggregator).
 Implementasi Standar PRD 3.5:
   - 4 Voter dengan Keseimbangan Vendor 50/50:
-      V1: Alibaba Qwen-Turbo (Quick Signal Analyst)
+      V1: Alibaba Qwen-Flash  (Quick Signal Analyst)  [dulu qwen-turbo, dipensiunkan upstream]
       V2: Alibaba Qwen-Plus  (Balanced Equity Analyst)
       V3: Google Gemini-Flash-Latest (Realtime Web & Breaking News Validator)
       V4: Google Gemini-Pro-Latest   (Deep Multi-Angle & Contrarian Reasoner)
@@ -25,6 +25,7 @@ Environment Variables:
 import os
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Literal, Optional, Any
@@ -32,15 +33,50 @@ import httpx
 
 log = logging.getLogger("llm_research")
 
+
+class _CrumbRedactingFilter(logging.Filter):
+    """Jangan pernah menuliskan crumb sesi Yahoo ke log (CI publik menyimpan teks log ini).
+
+    Crumb terikat cookie anonim dan bukan kredensial akun, tapi ia adalah token sesi:
+    mengecualikannya dari log adalah kebiasaan yang benar dan murah.
+    """
+
+    PATTERN = re.compile(r"(crumb=)[^&\s\"']+")
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
+        try:
+            msg = record.getMessage()
+        except Exception:
+            return True
+        if "crumb=" in msg:
+            record.msg = self.PATTERN.sub(r"\1<redacted>", msg)
+            record.args = ()
+        return True
+
+
+def _install_crumb_redaction() -> None:
+    for name in ("httpx", "httpcore"):
+        target = logging.getLogger(name)
+        if not any(isinstance(f, _CrumbRedactingFilter) for f in target.filters):
+            target.addFilter(_CrumbRedactingFilter())
+
+
+_install_crumb_redaction()
+
 DASHSCOPE_BASE = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 # Default Model Specifications
-MODEL_V1 = "qwen-turbo"
+# Ronde 7: `qwen-turbo` TERBUKTI mati di hulu — probe langsung ke dashscope-intl pada
+# 2026-11-20 menjawab 404 {"code":"model_not_found"}, sedangkan `qwen-flash` (penerusnya),
+# `qwen-plus` (V2) dan `qwen-max` (aggregator) menjawab 200. Varian *-latest menjawab 403
+# (akun ini tidak punya akses), jadi TIDAK dipakai sebagai default. Setiap voter bisa
+# dioverride lewat variable GitHub tanpa mengubah kode.
+MODEL_V1 = os.getenv("DASHSCOPE_MODEL_V1", "qwen-flash")
 MODEL_V2 = os.getenv("DASHSCOPE_MODEL", "qwen-plus")
 MODEL_V3 = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
-MODEL_V4 = "gemini-pro-latest"
-MODEL_AGGREGATOR = "qwen-max"
+MODEL_V4 = os.getenv("GEMINI_MODEL_V4", "gemini-pro-latest")
+MODEL_AGGREGATOR = os.getenv("DASHSCOPE_MODEL_AGG", "qwen-max")
 
 # P1-P7 Weights
 PARAM_WEIGHTS: dict[str, float] = {
@@ -79,6 +115,11 @@ class Research:
     voters_count: int = 0
     voter_verdicts: dict[str, Any] = field(default_factory=dict)
     aggregator_details: dict[str, Any] = field(default_factory=dict)
+    # Ronde 7: kegagalan input TIDAK BOLEH senyap. Daftar voter yang gagal (nama voter) dan
+    # status sumber kalender earnings dipakai pemanggil untuk agregasi + Step Summary, sehingga
+    # siklus 3/4 voter tidak lagi dilaporkan sebagai siklus sehat.
+    voter_failures: list[str] = field(default_factory=list)
+    earnings_status: str = "unknown"  # unknown | ok | no_data | past_only | http_error:<kode> | exception:<tipe> | no_crumb
 
 
 # =============================================================================
@@ -113,9 +154,12 @@ class QwenClient:
         }
         r = self.client.post("/chat/completions", json=payload)
         
-        # Tangani jika qwen-turbo kena rate limit (429) -> fallback otomatis ke qwen-plus
-        if r.status_code == 429 and target_model == MODEL_V1:
-            log.warning(f"Qwen model {target_model} rate limited (429). Fallback ke {MODEL_V2}...")
+        # Fallback otomatis V1 -> V2. Dua punca yang TERBUKA berbeda tetapi sama-sama berarti
+        # "voter ini tidak bisa dipakai siklus ini": 429 (rate limit) dan 404 (model dipensiunkan
+        # upstream — kasus qwen-turbo, 2026-11-20). Tanpa 404, swarm diam-diam kehilangan 1 voter.
+        if r.status_code in (404, 429) and target_model == MODEL_V1:
+            reason = "rate limited (429)" if r.status_code == 429 else "model not found (404)"
+            log.warning(f"Qwen model {target_model} {reason}. Fallback ke {MODEL_V2}...")
             payload["model"] = MODEL_V2
             r = self.client.post("/chat/completions", json=payload)
 
@@ -228,32 +272,103 @@ def fetch_headlines(ticker: str, limit: int = 10) -> list[str]:
         return []
 
 
-def fetch_earnings_days(ticker: str) -> Optional[int]:
-    """Hitung hari menuju jadwal rilis earnings berikutnya via Yahoo Finance."""
+# --- Sesi Yahoo bersama (cookie + crumb) -------------------------------------
+# Ronde 7: `v10/quoteSummary` menolak tanpa crumb (401 "Invalid Crumb") — inilah sebabnya
+# proteksi "earnings H-7" buta data. Crumb TERIKAT pada cookie sesi: probe 2026-11-20
+# membuktikan crumb yang sama + klien baru tetap 401. Karena itu cookie dan crumb diambil
+# pada SATU klien yang dipakai ulang sepanjang proses.
+YAHOO_BASE = "https://query1.finance.yahoo.com"
+YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0"}
+_yahoo_state: Optional[tuple[Optional[httpx.Client], Optional[str]]] = None
+
+
+def _yahoo_session() -> tuple[Optional[httpx.Client], Optional[str]]:
+    """Bangun (klien ber-cookie, crumb) sekali per proses; (None, None) bila crumb tak diperoleh."""
+    global _yahoo_state
+    if _yahoo_state is not None:
+        return _yahoo_state
+    client: Optional[httpx.Client] = None
     try:
-        r = httpx.get(
-            f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}",
-            params={"modules": "calendarEvents"},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=15.0,
+        client = httpx.Client(headers=YAHOO_HEADERS, timeout=15.0, follow_redirects=True)
+        client.get("https://fc.yahoo.com")  # status diabaikan; yang dicari header Set-Cookie
+        r = client.get(f"{YAHOO_BASE}/v1/test/getcrumb")
+        crumb = r.text.strip() if r.status_code == 200 else None
+        _yahoo_state = (client, crumb or None)
+    except Exception as exc:
+        if client is not None:
+            try:
+                client.close()
+            except Exception:
+                pass
+        log.warning(f"_yahoo_session gagal: {type(exc).__name__}: {str(exc)[:120]}")
+        _yahoo_state = (None, None)
+    return _yahoo_state
+
+
+def _parse_next_earnings_days(payload: dict, now: datetime) -> tuple[Optional[int], str]:
+    """Ambil tanggal earnings BERIKUTNYA. Status: ok | no_data | past_only.
+
+    `past_only` penting: bila jadwal berikutnya belum dipublikasi, Yahoo mengisi slot
+    "earningsDate" dengan tanggal rilis TERAKHIR (dibuktikan NVDA 2026-11-20: 2026-11-17).
+    `max(0, hari)` atas tanggal seperti itu akan menjadi 0 dan gerbang "earnings H-7" mem-SKIP aset
+    itu selamanya — jadi tanggal di masa lalu BUKAN "H-0", melainkan "belum diketahui".
+    """
+    events = ((payload.get("quoteSummary") or {}).get("result") or [{}])[0].get("calendarEvents") or {}
+    earnings = events.get("earnings") or {}
+    if not earnings:
+        return None, "no_data"
+    parsed: list[datetime] = []
+    for item in earnings.get("earningsDate") or []:
+        ts = item.get("raw") if isinstance(item, dict) else item
+        try:
+            parsed.append(datetime.fromtimestamp(float(ts)))
+        except (TypeError, ValueError, OSError):
+            continue
+    if not parsed:
+        return None, "no_data"
+    future = [d for d in parsed if d >= now]
+    if not future:
+        return None, "past_only"
+    return max(0, (min(future) - now).days), "ok"
+
+
+def fetch_earnings_days_with_status(
+    ticker: str,
+    client: Optional[httpx.Client] = None,
+    crumb: Optional[str] = None,
+) -> tuple[Optional[int], str]:
+    """Hari menuju earnings berikutnya + status sumber yang jujur.
+
+    Status: `ok`, `no_data` (mis. ETF memang tanpa earnings), `past_only` (jadwal berikutnya
+    belum dipublikasi), `no_crumb`, `http_error:<kode>`, `exception:<tipe>`. Tiga terakhir
+    = gangguan sumber data dan wajib dialarm; dua pertama = kondisi data, bukan outage.
+    """
+    if client is None:
+        client, crumb = _yahoo_session()
+    if client is None or not crumb:
+        return None, "no_crumb"
+    try:
+        r = client.get(
+            f"{YAHOO_BASE}/v10/finance/quoteSummary/{ticker}",
+            params={"modules": "calendarEvents", "crumb": crumb},
         )
-        r.raise_for_status()
-        earnings = (
-            r.json().get("quoteSummary", {})
-            .get("result", [{}])[0]
-            .get("calendarEvents", {})
-            .get("earnings", {})
-            .get("earningsDate", [])
-        )
-        if not earnings:
-            return None
-        ts = earnings[0].get("raw")
-        if not ts:
-            return None
-        return max(0, (datetime.fromtimestamp(ts) - datetime.now()).days)
-    except Exception as e:
-        log.warning(f"fetch_earnings_days {ticker}: {e}")
-        return None
+        if r.status_code == 404:
+            # Bukan gangguan: instrumen tanpa kalender earnings (ETF seperti SPY) memang
+            # menjawab "Not Found" di quoteSummary. 401/403/5xx tetap dihitung outage.
+            log.info(f"fetch_earnings_days {ticker}: tidak ada kalender earnings (HTTP 404)")
+            return None, "no_data"
+        if r.status_code != 200:
+            log.warning(f"fetch_earnings_days {ticker}: HTTP {r.status_code}")
+            return None, f"http_error:{r.status_code}"
+        return _parse_next_earnings_days(r.json(), datetime.now())
+    except Exception as exc:
+        log.warning(f"fetch_earnings_days {ticker}: {type(exc).__name__}: {str(exc)[:120]}")
+        return None, f"exception:{type(exc).__name__}"
+
+
+def fetch_earnings_days(ticker: str) -> Optional[int]:
+    """Kontrak lama dipertahankan: hanya jumlah hari (None bila tidak diketahui)."""
+    return fetch_earnings_days_with_status(ticker)[0]
 
 
 # =============================================================================
@@ -779,7 +894,7 @@ def research_stock(
         except Exception as e:
             log.warning(f"Inisialisasi Gemini gagal: {e}")
 
-    days_earnings = fetch_earnings_days(ticker)
+    days_earnings, earnings_status = fetch_earnings_days_with_status(ticker)
     headlines = fetch_headlines(ticker)
 
     if not headlines:
@@ -792,12 +907,14 @@ def research_stock(
             fetched_at=now_iso,
             consensus="NO_DATA",
             overall_consensus_level="NO_DATA",
+            earnings_status=earnings_status,
         )
 
     # 1. Jalankan 4 Voters secara Paralel (Swarm Voting)
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     voter_verdicts: dict[str, dict] = {}
+    voter_failures: list[str] = []
     tasks = {}
     with ThreadPoolExecutor(max_workers=4) as executor:
         if qwen:
@@ -811,10 +928,22 @@ def research_stock(
             voter_name = tasks[future]
             try:
                 res = future.result()
-                if res:
-                    voter_verdicts[voter_name] = res
             except Exception as e:
+                voter_failures.append(voter_name)
                 log.warning(f"Execution {voter_name} error: {e}")
+                continue
+            if res:
+                voter_verdicts[voter_name] = res
+            else:
+                # run_voter_* menelan exception-nya sendiri dan mengembalikan None: tanpa cabang
+                # ini, voter yang mati 100% (kasus qwen-turbo 404) tidak pernah tercatat gagal.
+                voter_failures.append(voter_name)
+
+    if voter_failures:
+        log.warning(
+            f"Swarm terdegradasi untuk {ticker}: {len(voter_verdicts)}/{len(tasks)} voter berhasil; "
+            f"gagal: {', '.join(sorted(voter_failures))}"
+        )
 
     voters_count = len(voter_verdicts)
     if voters_count == 0:
@@ -827,6 +956,8 @@ def research_stock(
             fetched_at=now_iso,
             consensus="NONE",
             overall_consensus_level="NONE",
+            earnings_status=earnings_status,
+            voter_failures=voter_failures,
         )
 
     # 2. Pre-processing Varians & Konsensus P1-P7
@@ -895,6 +1026,8 @@ def research_stock(
         voters_count=voters_count,
         voter_verdicts=voter_verdicts,
         aggregator_details=agg_result,
+        earnings_status=earnings_status,
+        voter_failures=voter_failures,
     )
 
 

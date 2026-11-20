@@ -96,6 +96,43 @@ def _warn_ledger_unreadable(sheet_name: str, status: str, detail: str) -> None:
     )
 
 
+# Ronde 7: jalur BACA RISET memakai registrasi status yang sama dengan label khusus, supaya
+# "fallback senyap ke CSV lokal" tidak lagi mirip pembacaan webhook yang sukses. Webhook Apps
+# Script terbukti membalas 200 + non-JSON pada 2026-11-20 dan itu tidak muncul di mana pun.
+RESEARCH_READ_SHEET = "Research_Read"
+
+
+def get_research_read_status() -> str:
+    """ok | local_csv | empty | http_error | html_or_unparsable | no_config | unknown."""
+    return get_ledger_read_status(RESEARCH_READ_SHEET)
+
+
+def get_research_read_detail() -> str:
+    return get_ledger_read_detail(RESEARCH_READ_SHEET)
+
+
+def _parse_research_response(resp: Any) -> Optional[dict]:
+    """Decode balasan webhook riset; kembalikan None (dan catat status) bila bukan JSON sukses.
+
+    200 + HTML adalah KEFAILAN SENSOR, bukan keberhasilan: halaman consent/error Apps Script
+    juga bernilai 200. Status tercatat agar pemanggil bisa membunyikannya di Step Summary.
+    """
+    try:
+        payload = resp.json()
+    except Exception as exc:
+        detail = (
+            f"content_type={resp.headers.get('content-type', '?')}; "
+            f"cuplikan={_redact_sheet_id(str(exc), get_spreadsheet_id())[:60]}"
+        )
+        _record_ledger_status(RESEARCH_READ_SHEET, "html_or_unparsable", detail)
+        _warn_ledger_unreadable(RESEARCH_READ_SHEET, "html_or_unparsable", "webhook riset membalas non-JSON")
+        return None
+    if not isinstance(payload, dict) or payload.get("status") != "success":
+        _record_ledger_status(RESEARCH_READ_SHEET, "status_not_success", f"payload={str(payload)[:60]}")
+        return None
+    return payload
+
+
 def _ensure_dir(path: str):
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
@@ -757,11 +794,16 @@ def fetch_latest_research_from_sheet(
             max_age_hours = 6.0
 
     url = _normalize_webhook_url(webhook_url or os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", DEFAULT_WEBHOOK_URL))
+    if not url:
+        _record_ledger_status(RESEARCH_READ_SHEET, "no_config", "GOOGLE_SHEET_WEBHOOK_URL tidak diset")
     if url:
         try:
             r = httpx.get(url, follow_redirects=True, timeout=12.0)
+            if r.status_code != 200:
+                _record_ledger_status(RESEARCH_READ_SHEET, "http_error", f"HTTP {r.status_code}")
+                _warn_ledger_unreadable(RESEARCH_READ_SHEET, "http_error", f"webhook riset HTTP {r.status_code}")
             if r.status_code == 200:
-                res = r.json()
+                res = _parse_research_response(r)
                 if isinstance(res, dict) and res.get("status") == "success":
                     data = res.get("data", {})
                     researches: dict[str, Research] = {}
@@ -812,9 +854,19 @@ def fetch_latest_research_from_sheet(
                     if stale_skipped:
                         log.info(f"⏳ {stale_skipped} data riset dari Webhook diabaikan karena basi (> {max_age_hours:.1f} jam).")
                     if researches:
+                        _record_ledger_status(RESEARCH_READ_SHEET, "ok", f"{len(researches)} aset segar dari webhook")
                         log.info(f"✓ Berhasil memuat {len(researches)} data riset segar dari Google Sheets Webhook ({list(researches.keys())})")
                         return researches
+                    _record_ledger_status(
+                        RESEARCH_READ_SHEET,
+                        "empty",
+                        f"webhook sukses tapi 0 riset segar (basi>{max_age_hours:.1f}j: {stale_skipped})",
+                    )
         except Exception as e:
+            _record_ledger_status(
+                RESEARCH_READ_SHEET, "exception",
+                _redact_sheet_id(f"{type(e).__name__}: {e}", get_spreadsheet_id())[:120],
+            )
             log.warning(f"Gagal mengambil riset dari Google Sheets Webhook: {e}")
 
     # Fallback ke CSV lokal jika ada
@@ -873,7 +925,13 @@ def fetch_latest_research_from_sheet(
                 if stale_skipped:
                     log.info(f"⏳ {stale_skipped} baris riset CSV lokal diabaikan karena basi (> {max_age_hours:.1f} jam).")
                 if researches:
-                    log.info(f"✓ Berhasil memuat {len(researches)} data riset segar dari file CSV lokal ({list(researches.keys())})")
+                    prev_status = get_research_read_status()  # status jalur webhook, sebelum ditimpa
+                    _record_ledger_status(RESEARCH_READ_SHEET, "local_csv", f"{len(researches)} aset dari CSV lokal")
+                    log.info(
+                        f"✓ Berhasil memuat {len(researches)} data riset segar dari file CSV lokal "
+                        f"({list(researches.keys())}) | webhook riset TIDAK terpakai "
+                        f"(status_webhook={prev_status})"
+                    )
                     return researches
         except Exception as e:
             log.warning(f"Gagal membaca riset dari CSV lokal: {e}")

@@ -60,6 +60,7 @@ jobs:
           DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
           DASHSCOPE_API_GEMINI_KEY: ${{ secrets.DASHSCOPE_API_GEMINI_KEY || secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-flash-latest' }}
+          DASHSCOPE_MODEL_V1: ${{ vars.DASHSCOPE_MODEL_V1 || 'qwen-flash' }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || secrets.GOOGLE_SHEET_ID }}
@@ -70,6 +71,8 @@ jobs:
           LOG_REDACT: "true"
           STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}
           WALT_STATE_WARM: ${{ steps.state_probe.outputs.warm }}
+          # R7: jarak ledger-vs-bursa saat start dingin; default `report` = tidak ada penulisan.
+          WALT_COLD_REHYDRATE: ${{ vars.WALT_COLD_REHYDRATE || 'report' }}
         run: |
           mkdir -p logs
           set -o pipefail

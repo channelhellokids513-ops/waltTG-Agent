@@ -59,6 +59,7 @@ jobs:
           WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
           DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
           DASHSCOPE_MODEL: ${{ vars.DASHSCOPE_MODEL || 'qwen-plus' }}
+          DASHSCOPE_MODEL_V1: ${{ vars.DASHSCOPE_MODEL_V1 || 'qwen-flash' }}
           DASHSCOPE_API_GEMINI_KEY: ${{ secrets.DASHSCOPE_API_GEMINI_KEY || secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-flash-latest' }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

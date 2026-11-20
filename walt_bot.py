@@ -29,7 +29,13 @@ from typing import Any, Literal, Optional
 import httpx  # pip install httpx
 
 from token_manager import TokenManager
-from llm_research import QwenClient, GeminiClient, research_stock, Research
+from llm_research import (
+    QwenClient,
+    GeminiClient,
+    research_stock,
+    Research,
+    fetch_earnings_days_with_status,
+)
 from notifier import send_telegram
 
 
@@ -449,6 +455,76 @@ def _log_failure_summary(
             log.debug(f"Gagal kirim alert agregasi Telegram ({context}) ({type(exc).__name__}): {exc}")
 
 
+# --- Register kesehatan input (Ronde 7) --------------------------------------
+# Prinsip: "run success" harus berarti "semua input yang dipakai benar-benar hidup".
+# Kegagalan voter, sumber earnings, dan objek riset yang hilang dicatat per siklus, lalu
+# dikeluarkan SEKALI sebagai baris ringkasan (via _log_failure_summary) + blok di Step Summary.
+# Tanpa ini, swarm 3/4 voter atau kalender earnings 401 tetap menghasilkan siklus hijau.
+_INPUT_FAILURES: dict[str, list[str]] = {}
+_INPUT_PROBED: dict[str, int] = {}
+
+# Status earnings yang berarti sumber datanya terganggu (bukan sekadar kondisi data).
+EARNINGS_OUTAGE_PREFIXES = ("http_error", "exception", "no_crumb")
+
+
+def record_input_failure(context: str, item: str) -> None:
+    """Catat satu kegagalan untuk sebuah konteks; duplikat (siklus berulang) diabaikan."""
+    bucket = _INPUT_FAILURES.setdefault(context, [])
+    if item not in bucket:
+        bucket.append(item)
+
+
+def reset_input_health() -> None:
+    """Kosongkan register (dipakai test dan setiap akhir siklus CLI)."""
+    _INPUT_FAILURES.clear()
+    _INPUT_PROBED.clear()
+    _INPUT_META.clear()
+
+
+def record_research_health(asset: str, research: Optional[Research]) -> None:
+    """Konsumsi satu hasil riset: catat degradasi swarm dan gangguan sumber earnings."""
+    _INPUT_PROBED["research_assets"] = _INPUT_PROBED.get("research_assets", 0) + 1
+    if research is None:
+        record_input_failure("input.riset_hilang", asset)
+        return
+    for voter in getattr(research, "voter_failures", None) or []:
+        record_input_failure("input.voter_swarm", f"{asset}:{voter}")
+    status = str(getattr(research, "earnings_status", "ok") or "ok")
+    if status.startswith(EARNINGS_OUTAGE_PREFIXES):
+        record_input_failure("input.earnings_source", f"{asset}:{status}")
+
+
+def input_health_snapshot() -> dict[str, Any]:
+    """Ringkasan aman-untuk-republik-public: hanya konteks, jumlah, dan maksimal 5 nama."""
+    return {
+        context: {"failed": len(items), "examples": items[:5]}
+        for context, items in sorted(_INPUT_FAILURES.items())
+    }
+
+
+# Status input yang bukan kegagalan tetap, tapi wajib TERLIHAT (mis. riset dibaca dari CSV lokal
+# karena webhook tidak membalas JSON): dialirkan ke Step Summary tanpa memicu alert Telegram.
+_INPUT_META: dict[str, Any] = {}
+
+
+def set_input_meta(key: str, value: Any) -> None:
+    _INPUT_META[key] = value
+
+
+def input_meta_snapshot() -> dict[str, Any]:
+    return dict(sorted(_INPUT_META.items()))
+
+
+def flush_input_health() -> dict[str, Any]:
+    """Rangkum register menjadi peringatan teragregasi (plus alert Telegram bila lewat ambang)."""
+    if not _INPUT_FAILURES:
+        return {}
+    total = max(1, _INPUT_PROBED.get("research_assets", 0))
+    for context in sorted(_INPUT_FAILURES):
+        _log_failure_summary(context, _INPUT_FAILURES[context], total=total)
+    return input_health_snapshot()
+
+
 # =============================================================================
 # CLIENT — thin wrapper for Walt MCP over HTTP
 # =============================================================================
@@ -789,34 +865,15 @@ def rank_opportunities(
 
 def check_earnings_date(ticker: str) -> Optional[int]:
     """
-    Cek days_to_earnings via Yahoo Finance API (gratis, no key).
-    Return None kalau tidak ketemu atau error.
+    Hari menuju earnings berikutnya, atau None bila tidak diketahui.
+
+    Ronde 7: dulu endpoint ini punya salinan parser sendiri dan menjawab 401 (Yahoo menuntut
+    cookie+crumb). Sekarang sumbernya SATU dengan jalur swarm (llm_research) — dua salinan
+    parser berarti dua salinan bug. Status sumber (`no_data`/`past_only`/`http_error:*`)
+    dilaporkan oleh fetch_earnings_days_with_status untuk agregasi kesehatan input.
     """
-    try:
-        url = f"https://query1.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
-        params = {"modules": "calendarEvents"}
-        r = httpx.get(url, params=params, timeout=10.0,
-                      headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        data = r.json()
-        earnings = (
-            data.get("quoteSummary", {})
-            .get("result", [{}])[0]
-            .get("calendarEvents", {})
-            .get("earnings", {})
-            .get("earningsDate", [])
-        )
-        if not earnings:
-            return None
-        earnings_ts = earnings[0].get("raw")
-        if not earnings_ts:
-            return None
-        from datetime import datetime as dt
-        days = (dt.fromtimestamp(earnings_ts) - dt.now()).days
-        return max(0, days)
-    except Exception as e:
-        log.warning(f"earnings lookup failed for {ticker}: {e}")
-        return None
+    days, _status = fetch_earnings_days_with_status(ticker)
+    return days
 
 
 def get_news_sentiment(ticker: str) -> tuple[str, str]:
@@ -2218,6 +2275,27 @@ def _infer_close_reason_from_price(
     return "UNKNOWN (data close tidak tersedia)"
 
 
+COLD_REHYDRATE_ENV = "WALT_COLD_REHYDRATE"
+
+
+def cold_rehydrate_mode() -> str:
+    """
+    Kebijakan start dingin terhadap jarak ledger-vs-bursa (Ronde 7).
+
+    `report` (default) = ukur & bunyikan, nol penulisan — perilaku warisan Ronde 6.
+    `write`            = tutup jarak memakai `reconcile_history(write=True)`: backup lebih dulu,
+                         label jujur `exchange_history_no_exit`, PnL tetap kosong (belum terukur).
+    Keadaan dingin tidak lagi berarti kehilangan data permanen, TAPI menulis riwayat tetap harus
+    keputusan yang dinyatakan operator — bukan efek samping sebuah siklus monitoring.
+    """
+    mode = (os.environ.get(COLD_REHYDRATE_ENV, "report").strip().lower() or "report")
+    return mode if mode in ("report", "write") else "report"
+
+
+def _dry_run_requested() -> bool:
+    return os.getenv("DRY_RUN", "false").strip().lower() == "true"
+
+
 def _handle_cold_detect_cycle(
     client: WaltClient,
     current_snapshot: dict[str, dict],
@@ -2228,9 +2306,10 @@ def _handle_cold_detect_cycle(
     R6-2: cache Actions miss. Snapshot lama tidak bisa dipercaya (hilang, atau basi dari
     restore-keys parsial), jadi diff snapshot DILEWATI dan nol baris close ditulis jalur ini.
 
-    Yang tetap dikerjakan: ukur jarak antara riwayat bursa dan ledger memakai SATU skema kunci,
-    lalu beri tahu operator cara menutupnya secara eksplisit (reconcile_history --write).
-    Menulis riwayat ke ledger bukan keputusan otomatis sebuah siklus monitoring.
+    Yang selalu dikerjakan: ukur jarak antara riwayat bursa dan ledger memakai SATU skema kunci.
+    R7: jarak itu kini bisa DITUTUP otomatis bila operator menyetel WALT_COLD_REHYDRATE=write —
+    sebelumnya setiap eviksi cache meninggalkan lubang permanen di ledger (bukti: 52 vs 17 baris).
+    Penulisan tetap diblokir saat DRY_RUN, dan tidak pernah terjadi pada mode `report`.
     """
     try:
         api_keys = rehydrate_closed_keys_from_exchange(client)
@@ -2239,14 +2318,60 @@ def _handle_cold_detect_cycle(
             f"🧊 [START DINGIN] rehidrasi riwayat dari API gagal ({type(exc).__name__}: {str(exc)[:120]}) "
             "— siklus deteksi dilewati, nol baris close ditulis"
         )
+        set_input_meta("cold_rehydrate", {"status": "exchange_unreachable"})
         return current_snapshot, []
 
     known = set(_load_closed_ids(closed_ids_path)) | _fetch_recorded_closed_ids(closed_csv_path)
     gap = sorted(api_keys - known)
+    mode = cold_rehydrate_mode()
     log.warning(
         f"🧊 [START DINGIN] cache miss terdeteksi: {len(api_keys)} posisi closed di bursa, "
         f"{len(gap)} belum tercatat di ledger. Diff snapshot dilewati (nol baris UNKNOWN). "
-        "Backfill sadar: `python walt_bot.py reconcile_history --write`."
+        f"mode={mode}"
+        + ("" if mode == "write" else " — backfill manual: `python walt_bot.py reconcile_history --write`.")
+    )
+
+    if not gap:
+        set_input_meta("cold_rehydrate", {"status": "clean", "exchange_closed": len(api_keys), "gap": 0})
+        return current_snapshot, []
+
+    if mode != "write":
+        set_input_meta(
+            "cold_rehydrate",
+            {"status": "report_only", "exchange_closed": len(api_keys), "gap": len(gap)},
+        )
+        return current_snapshot, []
+
+    if _dry_run_requested():
+        set_input_meta(
+            "cold_rehydrate",
+            {"status": "blocked_dry_run", "exchange_closed": len(api_keys), "gap": len(gap)},
+        )
+        log.warning("🧊 [START DINGIN] WALT_COLD_REHYDRATE=write tetapi DRY_RUN aktif — nol penulisan.")
+        return current_snapshot, []
+
+    try:
+        result = reconcile_history(
+            client, write=True, csv_path=closed_csv_path, closed_ids_path=closed_ids_path
+        )
+    except Exception as exc:
+        record_input_failure("input.cold_rehydrate", type(exc).__name__)
+        log.warning(f"🧊 [START DINGIN] backfill gagal ({type(exc).__name__}: {str(exc)[:120]})")
+        return current_snapshot, []
+
+    set_input_meta(
+        "cold_rehydrate",
+        {
+            "status": "written",
+            "exchange_closed": len(api_keys),
+            "gap": len(gap),
+            "written": result.get("written"),
+            "backup": result.get("backup"),
+        },
+    )
+    log.warning(
+        f"🧊 [START DINGIN] rehidrasi write selesai: {result.get('written')} baris kandidat masuk "
+        f"ke {closed_csv_path} (backup={result.get('backup')}); PnL baris tersebut BELUM TERUKUR."
     )
     return current_snapshot, []
 
@@ -3110,11 +3235,13 @@ def scan_with_research(
                     funding_daily=opp.get("funding_daily"),
                     recommended_side=opp.get("recommended_side"),
                 )
+                record_research_health(asset, researches[asset])
                 log.info(
                     f"  ✓ research {asset}: {researches[asset].news_sentiment} "
                     f"(Consensus: {researches[asset].consensus})"
                 )
             except Exception as e:
+                record_input_failure("input.riset_error", f"{asset}:{type(e).__name__}")
                 log.warning(f"  ✗ research {asset} failed: {e}")
 
     # Eksekusi instan jika auto_execute aktif
@@ -3175,7 +3302,9 @@ def scan_with_research(
                         funding_daily=opp.funding_daily,
                         recommended_side=opp.side,
                     )
+                    record_research_health(asset, researches[asset])
                 except Exception as e:
+                    record_input_failure("input.riset_error", f"{asset}:{type(e).__name__}")
                     log.warning(f"  ✗ research {asset} failed: {e}")
             research = researches.get(asset)
             verdict, reason, mult = decide_go_nogo(opp, research)
@@ -3454,8 +3583,14 @@ def market_execute(
         }
 
     # Research saham: Utamakan hasil penelitian dari Spreadsheet/CSV terlebih dahulu (hemat API & cepat)
-    from sheet_logger import fetch_latest_research_from_sheet
+    from sheet_logger import fetch_latest_research_from_sheet, get_research_read_status
     cached_researches = fetch_latest_research_from_sheet()
+    # Ronde 7: jalur baca riset dicatat di Step Summary. 200 + non-JSON dari Apps Script pernah
+    # membuat semua siklus diam-diam memakai CSV lokal tanpa jejak keterlacakan di ringkasan.
+    research_read = get_research_read_status()
+    set_input_meta("research_read_status", research_read)
+    if research_read in ("http_error", "html_or_unparsable", "no_config", "exception", "status_not_success"):
+        record_input_failure("input.riset_webhook", research_read)
 
     qwen = QwenClient() if os.getenv("DASHSCOPE_API_KEY") else None
     gemini = (
@@ -3496,7 +3631,9 @@ def market_execute(
                         funding_daily=opp.funding_daily,
                         recommended_side=opp.side,
                     )
+                    record_research_health(opp.base_asset, researches[opp.base_asset])
                 except Exception as e:
+                    record_input_failure("input.riset_error", f"{opp.base_asset}:{type(e).__name__}")
                     log.warning(f"research {opp.base_asset}: {e}")
 
     # Decide + execute
@@ -4118,11 +4255,18 @@ def build_safe_stdout_summary(command: str, result: Any) -> dict[str, Any]:
         # Ronde 6: jawaban atas "execute close memberi harga fill atau tidak" — hanya nama kunci.
         "close_fill_missing_count": CLOSE_FILL_MISSING_COUNT,
         "close_response_shapes": sorted(CLOSE_SCHEMA_PROBED)[:2],
+        # Ronde 7: dict kosong = semua input terukur hidup; non-kosong = ada input yang mati,
+        # dan itu harus terbaca di Step Summary, bukan tenggelam di baris log.
+        "input_health": input_health_snapshot(),
+        "input_meta": input_meta_snapshot(),
     }
     return {k: v for k, v in summary.items() if v is not None}
 
 
 def _emit_cli_result(command: str, result: Any) -> None:
+    # Ronde 7: satu rangkuman kegagalan input per siklus (warning teragregasi + alert Telegram
+    # bila lewat ambang) SEBELUM ringkasan dibuat, supaya health-nya ikut tersimpan & tercetak.
+    flush_input_health()
     safe_summary = build_safe_stdout_summary(command, result)
     try:
         os.makedirs("logs", exist_ok=True)
