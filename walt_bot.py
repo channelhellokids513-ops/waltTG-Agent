@@ -577,7 +577,19 @@ class Position:
 
     @property
     def pnl_pct_margin(self) -> float:
-        """PnL unrealized sebagai % dari margin."""
+        """
+        PnL unrealized sebagai % dari margin.
+        Jika entry_price <= 0 atau non-finite (atau current_price tidak valid), kembalikan 0.0
+        (berarti 'tidak ada sinyal' sehingga guard/trailing tidak menembak dan monitor tidak crash).
+        """
+        if (
+            self.entry_price is None
+            or self.current_price is None
+            or not math.isfinite(self.entry_price)
+            or not math.isfinite(self.current_price)
+            or self.entry_price <= 0
+        ):
+            return 0.0
         if self.side == "long":
             move = (self.current_price - self.entry_price) / self.entry_price
         else:
@@ -586,7 +598,19 @@ class Position:
 
     @property
     def profit_pct_price(self) -> float:
-        """Profit sebagai % pergerakan harga searah posisi."""
+        """
+        Profit sebagai % pergerakan harga searah posisi.
+        Jika entry_price <= 0 atau non-finite (atau current_price tidak valid), kembalikan 0.0
+        (berarti 'tidak ada sinyal' sehingga trailing/TP tidak terpicu palsu).
+        """
+        if (
+            self.entry_price is None
+            or self.current_price is None
+            or not math.isfinite(self.entry_price)
+            or not math.isfinite(self.current_price)
+            or self.entry_price <= 0
+        ):
+            return 0.0
         if self.side == "long":
             return (self.current_price - self.entry_price) / self.entry_price
         return (self.entry_price - self.current_price) / self.entry_price
@@ -1198,16 +1222,17 @@ def _parse_sane_exit_price(raw: Any, entry_price: float) -> Optional[float]:
     return val
 
 
-def _extract_close_exit_price(res: Any, pos: Position) -> tuple[float, str]:
+def _extract_close_exit_price(res: Any, pos: Position) -> tuple[Optional[float], str]:
     """
     Ekstrak harga keluar dengan rantai fallback eksplisit (dari paling akurat ke paling lemah):
       1. exchange_fill     : harga fill riil dari objek order/top-level respons execute close.
       2. response_position : harga posisi penutupan pada respons close (jika dikembalikan API).
       3. mark_price_proxy  : mark price dari respons close (proxy, bukan harga fill riil).
       4. snapshot_estimate : pos.current_price (estimasi snapshot, bukan fill riil).
-      5. entry_fallback    : pos.entry_price (fallback terakhir bila snapshot tidak valid).
+      5. entry_fallback    : pos.entry_price (hanya jika entry_price benar-benar positif & finite).
+      6. unavailable       : (None, "unavailable") bila tidak ada satu pun kandidat yang valid.
     """
-    entry = float(pos.entry_price or 0.0)
+    entry = float(pos.entry_price) if _parse_positive_finite_float(pos.entry_price) is not None else 0.0
     if isinstance(res, dict):
         # 1. Harga fill riil dari objek order/top-level hasil close
         order_obj = res.get("order")
@@ -1249,11 +1274,11 @@ def _extract_close_exit_price(res: Any, pos: Position) -> tuple[float, str]:
     if snap_price is not None:
         return snap_price, "snapshot_estimate"
 
-    # 5. Fallback terakhir: pos.entry_price (bukan snapshot)
+    # 5. Fallback terakhir jujur: entry_price bila valid, selain itu (None, "unavailable")
     entry_fallback = _parse_positive_finite_price(pos.entry_price)
     if entry_fallback is not None:
         return entry_fallback, "entry_fallback"
-    return round(float(pos.current_price), 4), "entry_fallback"
+    return None, "unavailable"
 
 
 def _execute_validated_close(
@@ -1278,10 +1303,11 @@ def _execute_validated_close(
             "result": res,
         }
     final_exit_price, exit_price_source = _extract_close_exit_price(res, pos)
+    price_lbl = f"{final_exit_price:.4f}" if final_exit_price is not None else "None"
     log.debug(
-        f"Close exit price {pos.base_asset}: {final_exit_price:.4f} (sumber={exit_price_source})"
+        f"Close exit price {pos.base_asset}: {price_lbl} (sumber={exit_price_source})"
     )
-    _record_position_close(pos, reason, exit_price=final_exit_price)
+    _record_position_close(pos, reason, exit_price=final_exit_price, exit_source=exit_price_source)
     return {
         "action": "CLOSE",
         "detail": detail or reason,
@@ -1294,6 +1320,7 @@ def _record_position_close(
     pos: Position,
     reason: str,
     exit_price: Optional[float] = None,
+    exit_source: str = "",
 ) -> None:
     """Catat penutupan posisi ke Closed_Positions (Google Sheet), logs/closed_history.csv, closed_ids, dan set cooldown."""
     pos_key = make_position_dedupe_key({
@@ -1303,21 +1330,31 @@ def _record_position_close(
         "opened_at": pos.opened_at,
     })
     resolved_exit_price = _parse_positive_finite_price(exit_price)
+    resolved_source = exit_source
     if resolved_exit_price is None:
         resolved_exit_price = _parse_positive_finite_price(pos.current_price)  # estimasi snapshot, bukan fill riil
+        if resolved_exit_price is not None and not resolved_source:
+            resolved_source = "snapshot_estimate"
     if resolved_exit_price is None:
         resolved_exit_price = _parse_positive_finite_price(pos.entry_price)
+        if resolved_exit_price is not None and not resolved_source:
+            resolved_source = "entry_fallback"
+    if resolved_exit_price is None and not resolved_source:
+        resolved_source = "unavailable"
     try:
         from sheet_logger import log_close
-        if resolved_exit_price is not None and pos.entry_price > 0:
+        entry_ok = _parse_positive_finite_float(pos.entry_price) is not None
+        if resolved_exit_price is not None and entry_ok:
             move = (
                 (resolved_exit_price - pos.entry_price) / pos.entry_price
                 if pos.side == "long"
                 else (pos.entry_price - resolved_exit_price) / pos.entry_price
             )
-            pnl_quote = move * pos.leverage * pos.margin
-        else:
+            pnl_quote: Optional[float] = move * pos.leverage * pos.margin
+        elif entry_ok and resolved_exit_price is not None:
             pnl_quote = pos.pnl_pct_margin * pos.margin
+        else:
+            pnl_quote = None
         log_close(
             asset=pos.base_asset,
             side=pos.side,
@@ -1331,6 +1368,7 @@ def _record_position_close(
             position_id=pos_key,
             closed_at=datetime.now(timezone.utc).isoformat(),
             opened_at=pos.opened_at,
+            exit_source=resolved_source,
         )
         _record_closed_id(pos_key)
     except Exception as e:
@@ -1355,6 +1393,15 @@ def evaluate_and_apply_position_risk(
     4. Eksekusi Atomik: Kirim SATU request auto_close_set ke exchange untuk menghindari
        error 'auto_close_already_pending'.
     """
+    # --- Guard entry_price tidak valid (<= 0 / non-finite) ---
+    if _parse_positive_finite_float(pos.entry_price) is None:
+        log.debug(f"Skip evaluasi risiko {pos.base_asset}: entry_price tidak valid ({pos.entry_price!r})")
+        return {
+            "action": "SKIP",
+            "reason": "entry_price tidak valid",
+            "detail": "entry_price tidak valid",
+        }
+
     # --- 1. Lapis 2: Funding Flip Sign (dengan Hysteresis) → Tutup Posisi Segera ---
     funding_flipped = (
         (pos.side == "long" and current_funding_daily > 0)
@@ -2281,6 +2328,7 @@ def _run_single_monitor_pass(
 
     actions = list(closed_actions)
     remaining_positions: list[Position] = []
+    invalid_entry_assets: list[str] = []
 
     for p_raw in active_positions:
         cid = p_raw["contract_id"]
@@ -2330,6 +2378,8 @@ def _run_single_monitor_pass(
                         pos.tp = float(res["tp"])
                     if res.get("sl") is not None:
                         pos.sl = float(res["sl"])
+                elif res.get("action") == "SKIP" and "entry_price" in str(res.get("reason", "")):
+                    invalid_entry_assets.append(pos.base_asset)
                 detail_str = res.get("detail") or ""
                 if cycle_label:
                     detail_str = f"[{cycle_label}] {detail_str}"
@@ -2345,6 +2395,11 @@ def _run_single_monitor_pass(
         if not closed_now:
             remaining_positions.append(pos)
 
+    _log_failure_summary(
+        "risk_monitor.invalid_entry_price",
+        invalid_entry_assets,
+        total=len(active_positions),
+    )
     _save_open_snapshot(current_snapshot, snapshot_path=snapshot_path)
     return remaining_positions, current_snapshot, actions, len(active_positions)
 

@@ -357,3 +357,91 @@ def test_r5_3_reader_corrupt_header_logs_single_warning_and_falls_back(tmp_path,
     assert len(hdr_warns) == 1
 
 
+def test_r5_4_zero_entry_price_properties_and_all_consumers_do_not_crash(caplog):
+    from unittest.mock import MagicMock
+
+    pos_zero = walt_bot.Position(
+        contract_id=10,
+        base_asset="NVDA",
+        side="long",
+        leverage=2,
+        margin=2.5,
+        entry_price=0.0,
+        current_price=100.0,
+        tp=None,
+        sl=None,
+        funding_paid=0.0,
+        liquidation_price=0.0,
+        position_id="pos_zero_1",
+        opened_at="2026-11-20T00:00:00+00:00",
+    )
+    # Properti aman -> 0.0 (tanpa ZeroDivisionError)
+    assert pos_zero.pnl_pct_margin == 0.0
+    assert pos_zero.profit_pct_price == 0.0
+
+    # Semua konsumen utama tidak raise ZeroDivisionError:
+    client = MagicMock()
+    # 1. _record_position_close
+    walt_bot._record_position_close(pos_zero, reason="TP breached", exit_price=None)
+    # 2. evaluate_and_apply_position_risk -> SKIP dengan reason eksplisit
+    res_eval = walt_bot.evaluate_and_apply_position_risk(client, pos_zero, current_funding_daily=-0.006)
+    assert res_eval is not None
+    assert res_eval["action"] == "SKIP"
+    assert "entry_price" in res_eval["reason"]
+    # 3. apply_layer4_trailing
+    assert walt_bot.apply_layer4_trailing(client, pos_zero) is None
+    # 4. decide_dynamic_monitor_cadence
+    sub, delay, reason_cad = walt_bot.decide_dynamic_monitor_cadence([pos_zero])
+    assert isinstance(sub, bool) and isinstance(delay, int) and isinstance(reason_cad, str)
+
+    # Agregasi 1 warning di _run_single_monitor_pass untuk posisi ber-entry_price=0
+    client_mon = MagicMock()
+    client_mon.list_positions.return_value = {
+        "positions": [
+            {
+                "contract_id": 10,
+                "contract_base_asset": "NVDA",
+                "side": "long",
+                "leverage": 2,
+                "margin_quote": "2.5",
+                "avg_entry_price": "0",
+                "funding_paid_quote": "0",
+                "liquidation_price": "0",
+                "status": "open",
+            }
+        ]
+    }
+    client_mon.latest_rate.return_value = {"rate": "100.0"}
+    contracts_by_id = {10: {"contract_id": 10, "funding_rate_hourly": "-0.0003"}}
+    with caplog.at_level("WARNING", logger="walt-bot"):
+        _rem, _snap, actions, _cnt = walt_bot._run_single_monitor_pass(
+            client_mon, contracts_by_id, snapshot_path="logs/open_snapshot.json"
+        )
+    assert any(a["action"] == "SKIP" for a in actions)
+    inv_warns = [r for r in caplog.records if r.levelname == "WARNING" and "invalid_entry_price" in r.message]
+    assert len(inv_warns) == 1
+
+
+def test_r5_4_extract_close_exit_price_terminal_fallback_is_honest_unavailable():
+    # entry=0.0, current=0.0 -> (None, "unavailable"), BUKAN (0.0, "entry_fallback")
+    pos_both_zero = walt_bot.Position(
+        contract_id=10, base_asset="NVDA", side="long", leverage=2, margin=2.5,
+        entry_price=0.0, current_price=0.0, tp=None, sl=None,
+        funding_paid=0.0, liquidation_price=0.0,
+    )
+    price, src = walt_bot._extract_close_exit_price({}, pos_both_zero)
+    assert price is None
+    assert src == "unavailable"
+
+    # entry=0.0, current=None -> tidak boleh raise TypeError
+    pos_none_cur = walt_bot.Position(
+        contract_id=10, base_asset="NVDA", side="long", leverage=2, margin=2.5,
+        entry_price=0.0, current_price=None, tp=None, sl=None,  # type: ignore[arg-type]
+        funding_paid=0.0, liquidation_price=0.0,
+    )
+    price2, src2 = walt_bot._extract_close_exit_price({}, pos_none_cur)
+    assert price2 is None
+    assert src2 == "unavailable"
+
+
+
