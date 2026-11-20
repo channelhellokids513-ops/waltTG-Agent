@@ -833,6 +833,54 @@ belum termasuk carry funding. Pada tahan 2,2 bar dan risiko ~3,3%, carry 0,52%/h
 menambah ~0,35R - cukup untuk membalik net@1,18% menjadi sedikit positif, yang lagi-lagi
 berarti **semua kesimpulan ekonomi bergantung pada pengukuran biaya yang belum dikerjakan**.
 
+## 3n. Walk-forward ber-purge atas aturan fade-rejected-sweep (2026-11-21, permintaan pemilik)
+
+**Alat.** `tools/gravity_walkforward.py`. Yang membedakan dari tabel §3m: bentuk target
+dan lebar stop **dipilih ulang di dalam jendela latih tiap fold** (12 kombinasi: R1/R2/R3/
+magnet x buffer 0,25/0,5/1,0 ATR, kriteria = EV bersih pada BIAYA TERBURUK 1,18%), jendela
+latih di-purge 12 bar di kedua sisi, dan trade fold uji hanya boleh dibuka di dalam fold
+itu. Tanpa ini, angka "per-fold" hanyalah contekan terselubung.
+
+**Hasil (20 koin perps, bar harian x 750 ~ 3 tahun, 5 fold):**
+
+| fold | bar uji | dipilih di latih | EV latih | trade uji | win% | net@1,18% |
+|---|---|---|---|---|---|---|
+| 1 | 0-147 | R1@1.0 ATR | +0,094 | 341 | 76,2 | +0,041 |
+| 2 | 147-294 | R1@1.0 | +0,084 | 385 | 74,3 | +0,071 |
+| 3 | 294-442 | R1@1.0 | +0,077 | 291 | 77,7 | +0,038 |
+| 4 | 442-589 | R1@1.0 | +0,077 | 339 | 80,5 | +0,124 |
+| 5 | 589-736 | R1@1.0 | +0,070 | 371 | 67,1 | +0,094 |
+
+Gabungan out-of-sample: **1.727 trade, win 74,9%, gross +0,207R, net@0,18% +0,187R,
+net@1,18% +0,075R**, tahan 4,6 bar, jarak stop rata-rata 10,87%. Cerminan (arah dibalik,
+jarak sama) pada aturan terpilih: win 24,9%, net@1,18% -0,619R -> **selisih arah +0,694R
+di luar sampel**, konsisten dengan +0,59 s.d. +0,68R yang terlihat in-sample.
+
+**Empat hal yang membuat hasil ini layak dipercaya, dan tiga yang tidak.**
+Layak: (1) kelima fold memilih parameter yang SAMA, jadi risiko pemilihan rendah;
+(2) EV positif di kelima fold, bukan dirata-ratakan dari satu fold besar; (3) interval
+90% cluster-bootstrap PER ASET = [+0,014, +0,146]R - tidak menyentuh nol (bootstrap i.i.d.
+akan memberi interval palsu karena trade dalam satu aset berkorelasi); (4) kontrol
+cerminan dijalankan pada trade yang sama persis, jadi yang dibandingkan hanya arahnya.
+Tidak layak dipercaya sepenuhnya: (a) biaya 1,18% dan 0,18% tetap angka anggapan - **belum
+diukur di bursa**; (b) ini bar dari Hyperliquid/Binance, sedangkan eksekusi kita di Walt,
+jadi kualitas fill belum diuji; (c) carry funding belum masuk sama sekali.
+
+**Konsekuensi operasi yang harus dibaca sebelum siapa pun menaikkan ukuran posisi.**
+Stop yang terpilih (1,0 ATR buffer) berarti jarak stop rata-rata **10,87%**, bukan 1,5%
+seperti hari ini. Pada leverage 2, satu rugi = ~21,7% margin per posisi; pada leverage
+minimum 1 tetap ~10,9% margin. Saat ini satu rugi = ~3% margin. Jadi mempertahankan
+risiko dolar per trade yang sama menuntut margin per posisi DITURUNKAN ~3,6x - dan pada
+basis margin $2,50-3 itu jatuh di bawah `min_size_base` bursa, alias tidak bisa dieksekusi.
+Pilihan jujurnya: terima risiko per trade lebih besar, atau perkecil jumlah slot, atau
+tolak aturan ini. Tidak ada jalan tengah yang gratis.
+
+**Benturan dengan gerbang yang ada.** Aturan ini hidup dari tepi struktural, bukan dari
+funding. `E5` (funding vs biaya) saat ini menuntut ~1,77%/hari dan akan menolak hampir
+semua entry ini. Jadi keputusan sebenarnya bukan "TP/SL berapa" melainkan **apakah
+sebuah entry boleh dibuka karena tepi struktural yang terukur, atau hanya karena carry**.
+Itu keputusan pemilik, dan §10 STRATEGY sudah diperbarui untuk menanyakannya secara eksplisit.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 

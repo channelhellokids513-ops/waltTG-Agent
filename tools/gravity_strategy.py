@@ -88,6 +88,87 @@ def realised_first(snapshots, candles, index, horizon):
     return "none"
 
 
+def run_rule(data, mode: str, side: str, buffer_atr: float, bounds=None) -> list[dict]:
+    """Satu pass aturan fade-rejected-sweep untuk satu bentuk target.
+
+    Kausal: sinyal pada bar i hanya memakai snapshot bar i (yang sendiri sudah
+    dihasilkan dari data <= i), dieksekusi pada close bar i, dan diselesaikan pada
+    bar > i. `bounds=(lo, hi)` MEMBATASI BAR ENTRY - inilah yang membuat walk-forward
+    jujur: trade sebuah fold hanya boleh dibuka di dalam fold itu.
+    `side="null"` memancarkan segalanya lewat harga entry (arah, target, stop dibalik),
+    sehingga satu-satunya yang berbeda adalah arahnya.
+    """
+    multiples = {"R1": 1.0, "R2": 2.0, "R3": 3.0}
+    if mode not in multiples and mode != "magnet":
+        raise ValueError(f"mode tidak dikenal: {mode}")
+    trades: list[dict] = []
+    for asset, candles, snapshots in data:
+        open_until = -1
+        span = range(1, len(snapshots) - 1) if bounds is None else range(max(1, bounds[0]), min(len(snapshots) - 1, bounds[1]))
+        for index in span:
+            if index <= open_until:
+                continue
+            snapshot = snapshots[index]
+            comfort = comfort_points(snapshot)
+            entry = snapshot.close
+            buffer_price = params_atr(snapshot) * buffer_atr
+            if snapshot.rejected_up and comfort["structural"] < entry:
+                direction, stop = -1, max(snapshot.rejected_up) + buffer_price
+            elif snapshot.rejected_down and comfort["structural"] > entry:
+                direction, stop = 1, min(snapshot.rejected_down) - buffer_price
+            else:
+                continue
+            distance = abs(entry - stop)
+            if distance <= 0:
+                continue
+            if mode == "magnet":
+                magnet = None
+                # Target magnet untuk FADE ada di SEARAH posisi: short setelah rejected
+                # upside sweep mengejar magnet bawah, long mengejar magnet atas.
+                if direction == -1 and snapshot.lower:
+                    magnet = snapshot.lower[0].zone_high
+                elif direction == 1 and snapshot.upper:
+                    magnet = snapshot.upper[0].zone_low
+                if magnet is None or (magnet - entry) * direction <= 0:
+                    continue
+                tp_price = magnet
+            else:
+                tp_price = entry + direction * multiples[mode] * distance
+            if side == "null":
+                direction, tp_price, stop = -direction, 2 * entry - tp_price, 2 * entry - stop
+            outcome, held = resolve_abs(candles, index, direction, tp_price, stop)
+            held = held or 1
+            open_until = index + max(1, held)
+            if outcome is None:
+                continue
+            risk = abs(entry - stop)
+            trades.append({
+                "asset": asset, "index": index, "direction": direction, "entry": entry,
+                "outcome_r": outcome, "held": held,
+                "cost_fee_r": COSTS["fee_saja"] * entry / risk,
+                "cost_venue_r": COSTS["fee_slippage_venue"] * entry / risk,
+                "risk_pct": risk / entry * 100.0,
+            })
+    return trades
+
+
+def summarise(trades: list[dict]) -> dict:
+    if not trades:
+        return {"trades": 0, "win_pct": 0.0, "gross_r": 0.0, "net_fee_r": 0.0,
+                "net_venue_r": 0.0, "hold": 0.0, "risk_pct": 0.0}
+    n = len(trades)
+    gross = sum(t["outcome_r"] for t in trades) / n
+    return {
+        "trades": n,
+        "win_pct": sum(1 for t in trades if t["outcome_r"] > 0) / n * 100.0,
+        "gross_r": gross,
+        "net_fee_r": gross - sum(t["cost_fee_r"] for t in trades) / n,
+        "net_venue_r": gross - sum(t["cost_venue_r"] for t in trades) / n,
+        "hold": sum(t["held"] for t in trades) / n,
+        "risk_pct": sum(t["risk_pct"] for t in trades) / n,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Kalibrasi + validasi + uji aturan Market Gravity (read-only).")
     parser.add_argument("--interval", default="1d")
@@ -182,83 +263,22 @@ def main() -> int:
         print("   tidak cukup sampel untuk menilai kalibrasi")
     print()
 
-    # 3) Aturan: fade rejected sweep. ARAH diambil dari struktur, lalu BENTUK TARGET
-    #    diuji beberapa variasi - karena hasil pertama menunjukkan arah benar tapi
-    #    target Comfort Point terlalu dekat untuk membayar biayanya.
+    # 3) Aturan: fade rejected sweep. Arah dari struktur, BENTUK TARGET diuji beberapa
+    #    variasi - hasil pertama menunjukkan arahnya benar, tapi target Comfort Point
+    #    terlalu dekat untuk membayar biayanya.
     modes = ("R1", "R2", "R3", "magnet")
-    stats = {name: {"trades": 0, "wins": 0, "gross": 0.0, "hold": 0.0, "c_fee": 0.0, "c_venue": 0.0}
-             for name in [f"fade_{m}" for m in modes] + [f"null_{m}" for m in modes]}
-
-    def record(rule: str, candles, index: int, direction: int, tp: float, sl: float) -> int | None:
-        outcome, held = resolve_abs(candles, index, direction, tp, sl)
-        if outcome is None:
-            return None
-        entry = candles[index]["c"]
-        risk = abs(entry - sl)
-        if risk <= 0:
-            return None
-        bucket = stats[rule]
-        bucket["trades"] += 1
-        bucket["wins"] += 1 if outcome > 0 else 0
-        bucket["gross"] += outcome
-        bucket["hold"] += held
-        bucket["c_fee"] += COSTS["fee_saja"] * entry / risk
-        bucket["c_venue"] += COSTS["fee_slippage_venue"] * entry / risk
-        return held
-
-    for mode in ("R1", "R2", "R3", "magnet"):
-        for side in ("fade", "null"):
-            open_until = -1
-            for asset, candles, snapshots in data:
-                open_until = -1
-                for index in range(1, len(snapshots) - 1):
-                    if index <= open_until:
-                        continue
-                    snapshot = snapshots[index]
-                    comfort = comfort_points(snapshot)
-                    entry = snapshot.close
-                    buffer_atr = params_atr(snapshot) * args.atr_buffer
-                    if snapshot.rejected_up and comfort["structural"] < entry:
-                        direction, stop = -1, max(snapshot.rejected_up) + buffer_atr
-                    elif snapshot.rejected_down and comfort["structural"] > entry:
-                        direction, stop = 1, min(snapshot.rejected_down) - buffer_atr
-                    else:
-                        continue
-                    distance = abs(entry - stop)
-                    multiples = {"R1": 1.0, "R2": 2.0, "R3": 3.0}
-                    if mode == "magnet":
-                        magnet = None
-                        # Target magnet untuk FADE ada di SEARAH posisi: short setelah
-                        # rejected upside sweep mengejar magnet bawah, long mengejar magnet atas.
-                        if direction == -1 and snapshot.lower:
-                            magnet = snapshot.lower[0].zone_high
-                        elif direction == 1 and snapshot.upper:
-                            magnet = snapshot.upper[0].zone_low
-                        if magnet is None or (magnet - entry) * direction <= 0:
-                            continue
-                        tp_price = magnet
-                    else:
-                        tp_price = entry + direction * multiples[mode] * distance
-                    # null = cerminan sempurna lewat harga entry: jarak TP dan SL identik,
-                    # hanya arahnya yang dibalik.
-                    if side == "null":
-                        direction, tp_price, stop = -direction, 2 * entry - tp_price, 2 * entry - stop
-                    held = record(f"{side}_{mode}", candles, index, direction, tp_price, stop)
-                    open_until = index + max(1, held or 1)
-
+    results = {f"{side}_{mode}": run_rule(data, mode, side, args.atr_buffer)
+               for mode in modes for side in ("fade", "null")}
     print("3) Aturan 'fade rejected sweep', tiap bentuk target dinilai dengan penjaga")
     print(f"   satu-posisi-per-aset-nya SENDIRI (SL = sweep +/- {args.atr_buffer} ATR):")
     print(f"   {'aturan':<14}{'trades':>8}{'win%':>7}{'grossR':>9}{'net@0,18%':>11}{'net@1,18%':>11}{'tahan':>7}")
     for row in [f"fade_{m}" for m in modes] + [f"null_{m}" for m in modes]:
-        bucket = stats[row]
-        trades = bucket["trades"]
-        if not trades:
+        summary = summarise(results[row])
+        if not summary["trades"]:
             print(f"   {row:<14}{0:8}   tidak ada trade yang terselesaikan dalam jendela")
             continue
-        gross = bucket["gross"] / trades
-        print(f"   {row:<14}{trades:8}{bucket['wins'] / trades * 100:7.1f}{gross:+9.3f}"
-              f"{gross - bucket['c_fee'] / trades:+11.3f}{gross - bucket['c_venue'] / trades:+11.3f}"
-              f"{bucket['hold'] / trades:7.1f}")
+        print(f"   {row:<14}{summary['trades']:8}{summary['win_pct']:7.1f}{summary['gross_r']:+9.3f}"
+              f"{summary['net_fee_r']:+11.3f}{summary['net_venue_r']:+11.3f}{summary['hold']:7.1f}")
     print("\n   null_* = arah DIBALIK pada entry/SL/jarak TP yang sama. fade harus melampaui")
     print("   baris null-nya; kalau tidak, yang bekerja bukan strukturnya.")
     print("   net di sini MASIH TANPA carry funding - carry dihitung terpisah di rr_scan.")

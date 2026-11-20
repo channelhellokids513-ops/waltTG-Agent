@@ -362,24 +362,38 @@ ini. Angka-angkanya berasal dari `tools/gravity_strategy.py` (in-sample, 20 koin
 |---|---|---|
 | Sinyal | FSM `market_gravity` mencatat status **`Rejected`** pada sebuah magnet (harga menyapu zona + buffer 0,05 ATR, lalu ditutup kembali ke sisi asal dalam 2 bar) | selisih gross terhadap cerminnya **+0,42R s.d. +0,68R** pada semua bentuk target |
 | Arah | **Fade**: rejected di atas -> short; rejected di bawah -> long | fade_R1 71,3% vs null_R1 27,5% |
-| Stop | ekstrem sweep **+/- 0,5 ATR(14)** di luar sisi yang tersapu | jarak stop terukur ~3,3% |
-| Target | **1x jarak stop** (BUKAN 3R, BUKAN magnet seberang) | grossR +0,129 pada R1 vs -0,230 pada R3 |
-| Durasi | biarkan bekerja ~2 bar; jangan memaksa target jauh | rata-rata tahan 2,2 bar |
+| Stop | ekstrem sweep **+/- 1,0 ATR(14)** di luar sisi yang tersapu | buffer ini yang DIPILIH jendela latih di kelima fold walk-forward; jarak stop rata-rata 10,87% |
+| Target | **1x jarak stop** (BUKAN 3R, BUKAN magnet seberang) | grossR +0,207R out-of-sample; R3 tetap negatif |
+| Durasi | biarkan bekerja ~5 bar; jangan memaksa target jauh | rata-rata tahan 4,6 bar (out-of-sample) |
 | Carry | hanya bila sisi posisi MENANGKAR funding (gerbang E5 tetap berlaku) | +0,35R pada 0,52%/hari x 2,2 hari |
 
-### 10.2 Dua syarat yang harus lolos sebelum ini menyentuh order
+### 10.2 Status dua syarat sebelum ini menyentuh order
 
-1. **Ukur biaya round-trip nyata** (`tools/contract_economics.py`, belum ditulis; butuh
-   satu rotasi OAuth). Keputusan seluruhnya bergantung padanya: pada biaya 0,18% aturan
-   ini **+0,075R**; pada 1,18% ia **-0,224R**. Tidak ada ruang tafsir di antaranya.
-2. **Walk-forward / out-of-sample.** Semua angka di atas in-sample. Yang diterima sebagai
-   bukti adalah EV bersih positif pada data yang tidak dipakai untuk memilih aturannya.
+1. **BELUM SELESAI - ukur biaya round-trip nyata** (`tools/contract_economics.py`, belum
+   ditulis; butuh satu rotasi OAuth). Walk-forward masih positif pada biaya terburuk
+   (+0,075R), jadi keputusannya bukan lagi "hidup atau mati" - tetapi BESARNYA tepi
+   bergantung padanya (+0,187R bila biaya nyata mendekati fee saja).
+2. **SELESAI, dengan catatan** - `tools/gravity_walkforward.py` (5 fold, purge 12 bar,
+   parameter dipilih ulang di jendela latih tiap fold): 1.727 trade out-of-sample,
+   win 74,9%, gross +0,207R, net@1,18% **+0,075R**, positif di kelima fold, pilihan
+   parameter identik di kelima fold, dan interval 90% cluster-bootstrap per aset
+   [+0,014, +0,146]R tidak menyentuh nol. Catatan: bar sumbernya Hyperliquid/Binance,
+   eksekusinya Walt - kualitas fill belum diuji; carry funding belum masuk.
 
 ### 10.3 Konsekuensi risiko yang harus diterima lebih dulu
 
-- Stop ~3,3% pada leverage 2x = ~6,6% margin per posisi. Sizing per trade HARUS turun,
-  bukan TP dinaikkan; `max_slots` 15 pada 20 koin yang saling berkorelasi bukan
-  diversifikasi - saat satu faktor jatuh, sebagian besar posisi kena stop bersamaan.
+- Stop terpilih rata-rata **10,87%** harga. Pada leverage 2 itu = ~21,7% margin per posisi
+  (leverage minimum 1 pun tetap ~10,9%); hari ini satu rugi = ~3% margin. Mempertahankan
+  risiko dolar yang sama menuntut margin per posisi turun ~3,6x, dan pada basis $2,50-3 itu
+  jatuh di bawah `min_size_base` - tidak bisa dieksekusi. Jadi pilihan jujurnya: terima
+  risiko per trade lebih besar, ATAU perkecil jumlah slot, ATAU tolak aturan ini.
+- `max_slots` 15 pada 20 koin yang saling berkorelasi bukan diversifikasi - saat satu faktor
+  jatuh, sebagian besar posisi kena stop bersamaan, dan dengan stop lebar kerugiannya
+  ikut lebar.
+- **Benturan kebijakan yang harus Anda putuskan:** aturan ini hidup dari tepi struktural,
+  bukan dari funding. Gerbang E5 (funding vs biaya) menuntut ~1,77%/hari dan akan menolak
+  hampir semua entry ini. Jadi pertanyaannya bukan "TP/SL berapa", melainkan: bolehkah
+  sebuah posisi dibuka karena tepi struktural yang terukur, atau hanya karena carry?
 - Probabilitas first-passage Monte Carlo **tidak** dipakai sebagai dasar ukuran posisi:
   kalibrasinya R2=0,0002 dan probabilitasnya belum tervalidasi (n ~160 prediksi, satu
   decile terisi, selisih ~13 poin - AUDIT 3m). Boleh dipakai untuk menggambarkan sebaran,
@@ -390,7 +404,9 @@ ini. Angka-angkanya berasal dari `tools/gravity_strategy.py` (in-sample, 20 koin
 
 ### 10.4 Kriteria promosi (biarkan angka yang memutuskan, bukan narasi)
 
-Naikkan ke `DRY_RUN=true` bila dan hanya bila: EV bersih > 0 pada hold-out, >= 200 trade
-out-of-sample, dan biaya nyata terukur. Bila itu terpenuhi, baru dibahas sebagai gerbang
-entry tambahan di samping E1-E5.
+Walk-forward sudah lolos (10.2 butir 2). Yang tersisa sebelum aturan ini boleh menembus
+jalur entry: (a) biaya round-trip nyata terukur di Walt untuk clip kita, (b) kualitas fill
+Walt diuji pada beberapa sinyal pertama dengan `DRY_RUN=true`, dan (c) keputusan pemilik
+tentang hubungan aturan ini dengan E5 - diganti perannya, dijalankan paralel sebagai
+jalur kedua, atau ditolak. Tanpa ketiganya, `strategy_config` tetap tidak disentuh.
 
