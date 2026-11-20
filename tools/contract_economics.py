@@ -271,6 +271,7 @@ def section_c(client: Any) -> dict:
     closed = positions_of(client.list_positions(statuses=["closed"]))
     deviations: list[float] = []
     signed: list[float] = []
+    lags_hours: list[float] = []
     unmatched = 0
     for item in closed:
         asset = str(item.get("contract_base_asset") or "").upper()
@@ -284,27 +285,38 @@ def section_c(client: Any) -> dict:
         if not candidates:
             unmatched += 1
             continue
-        _stamp, decision = max(candidates, key=lambda pair: pair[0])
+        stamp, decision = max(candidates, key=lambda pair: pair[0])
         deviation = (entry - decision) / decision
         deviations.append(abs(deviation) * 100.0)
         signed.append(deviation * 100.0)
+        lags_hours.append((opened - stamp).total_seconds() / 3600.0)
     print(f"   pasangan terukur={len(deviations)} tanpa padanan={unmatched} "
           f"(jendela cocok +/-{MATCH_WINDOW_H:.0f} jam sebelum fill)")
     if not deviations:
         print("   TIDAK TERUKUR: tidak ada posisi tertutup yang bisa dipasangkan ke baris scan.")
         return {"measured": False, "sheet_status": status}
     stats = quantiles(deviations)
+    lag = quantiles(lags_hours)
     print(f"   |deviasi fill vs keputusan| : median={stats['median']:.3f}% p90={stats['p90']:.3f}% "
           f"maks={stats['max']:.3f}%  (berarti signed median={statistics.median(signed):+.3f}%)")
+    print(f"   jeda waktu scan->fill      : median={lag['median']:.2f} jam p90={lag['p90']:.2f} jam "
+          f"maks={lag['max']:.2f} jam")
+    print("   PENTING: deviasi ini adalah SELISIH HARGA antara keputusan dan fill, jadi ia")
+    print("   BATAS ATAS biaya eksekusi - sebagian bisa berupa pergerakan pasar selama jeda")
+    print("   tersebut, bukan spread/impact. Semakin kecil jedanya, semakin angka ini")
+    print("   mendekati slippage murni.")
     venue = 1.00
     print(f"   pembanding: slippage venue yang kita anggap seragam = {venue:.2f}%")
-    if stats["median"] < venue / 3.0:
+    if lag["median"] > 1.0:
+        print("   jeda median > 1 jam -> angka ini TIDAK boleh dipakai sebagai slippage;")
+        print("   ukur slippage murni dengan membandingkan fill vs order book saat eksekusi.")
+    elif stats["median"] < venue / 3.0:
         print("   kesimpulan sementara: asumsi 1,00% TERLALU PESIMIS untuk clip kita.")
     elif stats["median"] > venue:
         print("   kesimpulan sementara: asumsi 1,00% masih LEBIH KECIL dari kenyataan.")
     else:
         print("   kesimpulan sementara: asumsi 1,00% ada dalam orde yang benar.")
-    return {"measured": True, "stats": stats}
+    return {"measured": True, "stats": stats, "lag_hours": lag}
 
 
 def main() -> int:

@@ -225,6 +225,23 @@ def test_bagian_c_menerima_header_terlokalisasi_dari_sheet_sebenarnya(monkeypatc
     result = ce.section_c(ce.guard_client(FakeClient(closed=CLOSED_OK)))
     assert result["measured"] is True
     assert result["stats"]["median"] == pytest.approx(1.0), "harus pakai 100.0, bukan 120.0"
+    # jeda scan->fill ikut dilaporkan: tanpa itu deviasi tidak bisa diinterpretasi
+    assert result["lag_hours"]["median"] == pytest.approx(1.0)
+    out = capsys.readouterr().out
+    assert "jeda waktu scan->fill" in out and "BATAS ATAS biaya eksekusi" in out
+
+
+def test_bagian_c_menolak_memakai_deviasi_berjeda_panjang_sebagai_slippage(monkeypatch, capsys):
+    """Kalau scan terjadi 20 jam sebelum fill, selisih harganya sebagian besar drift.
+    Alat harus bilang begitu sendiri, bukan memujinya sebagai slippage terukur."""
+    header = ["Timestamp (UTC)", "Asset", "Live Price ($)"]
+    rows = [header, ["2026-11-19 16:00:00", "ETH", "100.0"]]  # 20 jam sebelum fill pukul 12:00
+    monkeypatch.setattr(ce.sheet_logger, "fetch_sheet_csv_rows_ex", lambda name: (rows, "ok"))
+    closed = [{"contract_base_asset": "ETH", "avg_entry_price": "101.0",
+               "created_at": "2026-11-20T12:00:00Z"}]
+    result = ce.section_c(ce.guard_client(FakeClient(closed=closed)))
+    assert result["lag_hours"]["median"] == pytest.approx(20.0)
+    assert "TIDAK boleh dipakai sebagai slippage" in capsys.readouterr().out
 
 
 def test_bagian_c_gagal_terbuka_saat_kolom_harga_benar_benar_absen(monkeypatch, capsys):
