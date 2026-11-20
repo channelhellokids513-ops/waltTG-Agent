@@ -133,3 +133,126 @@ def test_mode_read_only_menjalankan_nol_langkah_oauth():
     for mode in sorted(options - tercakup):
         for c in conds:
             assert f"'{mode}'" not in c, f"mode {mode} tidak boleh memicu langkah ber-OAuth"
+
+
+# ------------------------------------------------------------------------------
+# Ronde 7: sumber KEDUA = gviz Daily_Scans (webhook Apps Script tidak bisa dipercaya buta)
+# ------------------------------------------------------------------------------
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+H = sheet_logger.DAILY_SCANS_HEADERS
+
+
+def _ts(offset_hours: float = 0.0) -> str:
+    return (datetime.now(timezone.utc) + timedelta(hours=offset_hours)).isoformat()
+
+
+class _Resp:
+    def __init__(self, status_code=200, payload=None, raise_json=None, headers=None, text=""):
+        self.status_code = status_code
+        self._payload = payload
+        self._raise_json = raise_json
+        self.headers = headers or {"content-type": "text/plain; charset=utf-8"}
+        self.text = text
+
+    def json(self):
+        if self._raise_json:
+            raise self._raise_json
+        return self._payload
+
+
+def _row(asset, ts, **over):
+    d = dict.fromkeys(H, "")
+    d.update({
+        "timestamp_utc": ts, "balance_usdc": "15.26", "asset": asset, "side": "short",
+        "swarm_score": "+0.42", "sentiment": "bullish", "consensus": "STRONG",
+        "vendor_alignment": "both_agree", "p1_polarity": "0.5", "p4_momentum": "0.3",
+        "p5_catalysts": "0.2", "p6_contrarian": "0.1", "verdict": "GO", "narrative": "narisi",
+    })
+    d.update(over)
+    return [str(d[h]) for h in H]
+
+
+def _stub_gviz(monkeypatch, rows, status="ok"):
+    monkeypatch.setattr(
+        sheet_logger, "fetch_sheet_csv_rows_ex",
+        lambda sheet_name, **kw: (rows, status),
+    )
+
+
+def test_gviz_ambil_baris_terbaru_per_aset_dan_tanpa_saldo(monkeypatch):
+    lama, baru = _ts(-5), _ts(-1)
+    rows = [H, _row("NVDA", lama, swarm_score="+0.10"), _row("NVDA", baru), _row("AAPL", baru)]
+    _stub_gviz(monkeypatch, rows)
+    res, status = sheet_logger.fetch_latest_research_from_gviz(max_age_hours=6.0)
+    assert status == "ok" and sorted(res) == ["AAPL", "NVDA"]
+    assert res["NVDA"].fetched_at == baru, "baris terakhir menang (urutan tab = kronologis)"
+    assert res["NVDA"].final_score == 0.42
+    assert res["NVDA"].p1_to_p7_scores["P1_sentiment_polarity"] == 0.5
+    for r in res.values():
+        assert "15.26" not in str(vars(r)), "saldo tidak boleh ikut terbaca ke objek riset"
+
+
+def test_gviz_menyaring_riset_basi(monkeypatch):
+    rows = [H, _row("NVDA", _ts(-40)), _row("AAPL", _ts(-1))]
+    _stub_gviz(monkeypatch, rows)
+    res, status = sheet_logger.fetch_latest_research_from_gviz(max_age_hours=6.0)
+    assert sorted(res) == ["AAPL"] and status == "ok"
+
+
+def test_gviz_status_kegagalan_diteruskan_tanpa_dibungkus_palsu(monkeypatch):
+    _stub_gviz(monkeypatch, [H, _row("NVDA", _ts())], status="http_error")
+    assert sheet_logger.fetch_latest_research_from_gviz() == ({}, "http_error")
+    _stub_gviz(monkeypatch, [H], status="ok")
+    assert sheet_logger.fetch_latest_research_from_gviz() == ({}, "empty")
+
+
+def test_gviz_menjadi_sumber_ketika_webhook_membalas_teks_sambutan(monkeypatch):
+    """Kasus produksi 16:34Z: body 42 karakter 'Walt Perps ... is active!' -> harus jatuh ke gviz."""
+    html = _Resp(200, raise_json=ValueError("Expecting value: line 1 column 1"),
+                 text="Walt Perps Sheet Logger Webhook is active!",
+                 headers={"content-type": "text/plain; charset=utf-8"})
+    monkeypatch.setattr(sheet_logger.httpx, "get", lambda url, **k: html)
+    _stub_gviz(monkeypatch, [H, _row("NVDA", _ts(-1))])
+
+    res = sheet_logger.fetch_latest_research_from_sheet(
+        webhook_url="https://example.invalid/exec", csv_path="logs/_tidak_ada_r7.csv",
+        max_age_hours=6.0,
+    )
+    assert "NVDA" in res
+    assert sheet_logger.get_research_read_status() == "ok"
+    assert sheet_logger.get_research_read_source() == "gviz"
+
+
+def test_webhook_sehat_tetap_menjadi_sumber_utama(monkeypatch):
+    from datetime import datetime as _dt
+    fresh = _dt.now(timezone.utc).isoformat()
+    ok = _Resp(200, {"status": "success", "data": {"AAPL": {"timestamp": fresh, "sentiment": "neutral"}}})
+    monkeypatch.setattr(sheet_logger.httpx, "get", lambda url, **k: ok)
+    dipanggil = []
+    monkeypatch.setattr(
+        sheet_logger, "fetch_latest_research_from_gviz",
+        lambda *a, **k: dipanggil.append(1) or ({}, "empty"),
+    )
+    res = sheet_logger.fetch_latest_research_from_sheet(
+        webhook_url="https://example.invalid/exec", csv_path="logs/_tidak_ada_r7.csv"
+    )
+    assert "AAPL" in res and sheet_logger.get_research_read_source() == "webhook"
+    assert dipanggil == [], "gviz tidak boleh menambah panggilan HTTP bila webhook sudah cukup"
+
+
+def test_csv_lokal_hanya_dipakai_setelah_webhook_dan_gviz_gagal(monkeypatch):
+    html = _Resp(200, raise_json=ValueError("Expecting value"), text="Walt Perps ... is active!")
+    monkeypatch.setattr(sheet_logger.httpx, "get", lambda url, **k: html)
+    _stub_gviz(monkeypatch, [], status="http_error")
+    res = sheet_logger.fetch_latest_research_from_sheet(
+        webhook_url="https://example.invalid/exec", csv_path="logs/_tidak_ada_r7.csv"
+    )
+    assert res == {} and sheet_logger.get_research_read_source() == ""
+
+
+def test_probe_menyebut_sumber_yang_terpakai(monkeypatch, capsys):
+    _stub(monkeypatch, "ok")
+    monkeypatch.setattr(sheet_logger, "get_research_read_source", lambda: "gviz")
+    assert rp.main() == 0
+    assert "sumber_terpakai      = gviz" in capsys.readouterr().out

@@ -3595,6 +3595,7 @@ def market_execute(
     from sheet_logger import (
         fetch_latest_research_from_sheet,
         get_research_read_diagnosis,
+        get_research_read_source,
         get_research_read_status,
     )
     cached_researches = fetch_latest_research_from_sheet()
@@ -3602,6 +3603,7 @@ def market_execute(
     # membuat semua siklus diam-diam memakai CSV lokal tanpa jejak keterlacakan di ringkasan.
     research_read = get_research_read_status()
     set_input_meta("research_read_status", research_read)
+    set_input_meta("research_read_source", get_research_read_source() or "-")
     diagnosis = get_research_read_diagnosis()
     if diagnosis:
         set_input_meta("research_read_diagnosis", diagnosis)

@@ -28,6 +28,7 @@ def main() -> int:
     nama = sorted(researches)
     tampil = ", ".join(nama[:8]) + (" ..." if len(nama) > 8 else "")
     print(f"research_read_status = {status}")
+    print(f"sumber_terpakai      = {sheet_logger.get_research_read_source() or '(tidak ada yang menghasilkan data)'}")
     print(f"aset_segar           = {len(nama)}" + (f" ({tampil})" if nama else ""))
     if diagnosis:
         print(f"diagnosis            = {diagnosis}")

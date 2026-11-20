@@ -458,6 +458,71 @@ dengan dispatch beruntun.
 
 Setelah ini: **257 test**, semuanya lulus.
 
+## 3h. Webhook riset: akar masalah sebenarnya + jalur baca yang tidak bergantung deployment (2026-11-20, 16:30–16:55 UTC)
+
+Pemilik melakukan redeploy Apps Script. Untuk membuktikannya saya tambahkan **mode `read_only`
+di `diagnostics.yml`** dan **`tools/research_probe.py`** — keduanya **NOL langkah OAuth**, supaya
+menguji jalur baca tidak lagi perlu men-dispatch workflow entry (yang 35 menit sebelumnya
+menimbulkan ras token). Hasil run #44774660187 (16:34Z), satu baris yang menyelesaikan semuanya:
+
+```text
+content_type=text/plain; charset=utf-8; panjang_body=42;
+cuplikan='Walt Perps Sheet Logger Webhook is active!'
+```
+
+**Webhook-nya hidup; yang ter-deploy BUKAN `google_apps_script.js` dari repo ini.** String sambutan
+42 karakter itu tidak ada di berkas repo (dicari: `is active` / `action` / `e.parameter` → nol
+kecocokan), dan `doGet` di repo memetakan 19 kolom `Daily_Scans` menjadi JSON. Jadi redeploy
+mempublikasikan source lama/stub. Ini juga menjelaskan kenapa kegagalan sebelumnya tampak
+"non-JSON tanpa struktur": bukan HTML, bukan halaman login — memang teks sambutan.
+
+**Keputusan teknik:** sistem tidak boleh bergantung pada artefak yang tidak bisa kita deploy dari
+repo. Ditambahkan **sumber kedua** untuk baca riset: `fetch_latest_research_from_gviz()` yang
+membaca tab `Daily_Scans` langsung lewat gviz CSV — jalur yang SUDAH terbukti `Sumber ledger: ok`
+di CI. Urutan menjadi `webhook → gviz → CSV lokal`, dengan `research_read_source` (webhook|gviz|
+local_csv) ikut tampil di *Step Summary* sehingga asal data selalu terlihat, bukan diasumsikan.
+
+Detail yang sengaja dijaga:
+- kolom `balance_usdc` (indeks 1 tab) TIDAK dipetakan ke objek `Research` — ada test yang menuntut
+  angka saldo tidak muncul di mana pun dalam objek itu, karena repo dan log CI publik;
+- baris terakhir menimpa yang lama (tab kronologis) → yang terpakai = riset terbaru per aset;
+- filter kesegaran memakai `_is_research_fresh` yang sama (`max_research_age_hours`);
+- gviz TIDAK dipanggil bila webhook sudah menghasilkan data (ditegaskan test, supaya ini bukan
+  penambahan latensi buta);
+- probe exit 1 bila jalur baca sakit → run diagnostik MERAH, bukan hijau dengan sensor mati. Ini
+  keputusan sadar: diagnostik bukan bagian dari gerbang siklus entry, jadi ketegasan lebih berguna
+  daripada hijau kosmetik.
+
+Perbaikan yang masih di tangan pemilik (opsional sekarang): deploy ulang dengan **isi
+`google_apps_script.js` dari repo** (Deploy → Manage deployments → Edit → New version, *Anyone*).
+Setelah itu webhook otomatis menang lagi sebagai sumber utama tanpa perubahan kode.
+
+### Perbaikan sekalian: gerbang sanitasi jadi permanen dan ditegakkan CI
+
+`tools/sanitize_gate.py` menggantikan skrip sementara yang selama ini saya tulis ulang tiap sesi di
+`logs/_gate.py` (dan tidak pernah dijalankan CI). Cakupan = **seluruh berkas terlacak git**
+(53 berkas, 11 kelas pola), dan ia menguji dirinya sendiri lewat canary yang **disusun dari potongan**
+agar berkas gerbang tidak memicu detektornya sendiri. Laporan sengaja tidak pernah memuat nilai yang
+cocok — menyebut isi secret di laporan = menyebarkannya.
+
+Dua temuan nyata yang langsung dikeluarkan gerbang pertama kali:
+1. `tests/test_data_integrity_and_quality.py` memuat literal `AIzaSyFake…` (fixture palsu untuk uji
+   redaksi). Nilainya tidak berbahaya, tapi bentuknya PERSIS kunci asli — artinya gerbang tidak akan
+   bisa membedakan fixture dari kebocoran. Dirangkai ulang dari potongan; test tetap menguji hal yang sama.
+2. **Tiga alamat surel berdomain gmail publik ter-commit di repo publik** (dua di `test_ci_hardening`,
+   satu di `test_telegram_auth` — salah satunya memakai nama depan pemilik, jadi sangat mungkin nyata).
+   Tidak ditulis ulang di dokumen ini. Diganti ke domain RFC 2606 `example.com`; regex redaksi surel
+   di `walt_bot` bersifat umum (sudah dicek) sehingga test redaksi tetap menguji perilaku yang sama,
+   bukan kebetulan domain tertentu.
+
+Pengecualian per kelas dicatat dengan alasan dan **dites**: `account_balance` dilonggarkan untuk
+`PRD.md`/`STRATEGY.md`/`tests/` (memang berisi contoh angka margin/TP-SL) tapi TETAP ketat di
+`AUDIT.md`/`README.md` — dua berkas tempat saldo asli bisa tersalin dari log run. Ada test yang
+gagal bila seseorang mencoba mengecualikan `AUDIT.md`, dan test yang gagal bila kelas identitas data
+(`sheet_id`, kunci API, token sesi) dikecualikan sama sekali.
+
+Suite: **258 → 286 test** (+28), semua lulus; gerbang bersih atas 53 berkas terlacak.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 

@@ -101,6 +101,12 @@ def _warn_ledger_unreadable(sheet_name: str, status: str, detail: str) -> None:
 # Script terbukti membalas 200 + non-JSON pada 2026-11-20 dan itu tidak muncul di mana pun.
 RESEARCH_READ_SHEET = "Research_Read"
 _research_read_diagnosis: str = ""
+_research_read_source: str = ""
+
+
+def _set_research_source(value: str) -> None:
+    global _research_read_source
+    _research_read_source = value
 
 
 def get_research_read_status() -> str:
@@ -818,6 +824,93 @@ def _is_research_fresh(
         return False
 
 
+def get_research_read_source() -> str:
+    """Dari mana hasil baca riset terakhir diambil: webhook | gviz | local_csv | '' (belum ada)."""
+    return _research_read_source
+
+
+def _research_from_row(item: dict[str, str]) -> Any:
+    """Bangun satu objek Research dari baris Daily_Scans (dipakai jalur webhook, gviz, dan CSV).
+
+    Kolom `balance_usdc` sengaja TIDAK dibaca ke objek: repo dan log CI publik, dan tidak ada
+    jalur riset yang membutuhkan saldo.
+    """
+    from llm_research import Research
+
+    score = 0.0
+    raw_score = str(item.get("swarm_score", "0") or "").replace("+", "")
+    try:
+        score = float(raw_score) if raw_score and raw_score != "—" else 0.0
+    except ValueError:
+        score = 0.0
+
+    sent = str(item.get("sentiment") or "unknown").lower()
+    if sent not in ("bullish", "bearish", "neutral", "unknown"):
+        sent = "unknown"
+
+    p1_to_p7: dict[str, float] = {}
+    for col_k, norm_k in (
+        ("p1_polarity", "P1_sentiment_polarity"),
+        ("p4_momentum", "P4_momentum_direction"),
+        ("p5_catalysts", "P5_risk_catalysts"),
+        ("p6_contrarian", "P6_contrarian_check"),
+    ):
+        val = item.get(col_k)
+        if val is not None and str(val) not in ("", "—"):
+            try:
+                p1_to_p7[norm_k] = float(str(val).replace("+", ""))
+            except ValueError:
+                continue
+
+    consensus = str(item.get("consensus") or "SINGLE_MODEL")
+    return Research(
+        ticker=str(item.get("asset") or "").upper(),
+        days_to_earnings=None,
+        news_sentiment=sent,  # type: ignore[arg-type]
+        narrative=str(item.get("narrative") or item.get("reason") or ""),
+        confidence=0.80 if score != 0.0 else 0.50,
+        fetched_at=str(item.get("timestamp_utc") or item.get("timestamp") or ""),
+        consensus=consensus,
+        final_score=score,
+        overall_consensus_level=consensus,
+        vendor_alignment=str(item.get("vendor_alignment") or "both_agree"),
+        p1_to_p7_scores=p1_to_p7,
+    )
+
+
+def fetch_latest_research_from_gviz(
+    max_age_hours: float = 6.0,
+    spreadsheet_id: Optional[str] = None,
+    now_utc: Optional[datetime] = None,
+) -> tuple[dict[str, Any], str]:
+    """Baca riset terbaru per aset LANGSUNG dari tab `Daily_Scans` lewat gviz.
+
+    Ronde 7: jalur webhook Apps Script terbukti membalas teks sambutan ("... is active!") karena
+    deployment yang aktif bukan isi repo. Tab itu sendiri sudah tahan-lama dan terbaca (dipakai
+    ledger), jadi gviz menjadi sumber kedua yang tidak bergantung pada deployment pihak ketiga —
+    sesuai invarian "state yang harus bertahan lintas eviksi wajib punya sumber tahan-lama".
+    """
+    rows, status = fetch_sheet_csv_rows_ex(
+        "Daily_Scans", spreadsheet_id=spreadsheet_id, expected_col_name="asset"
+    )
+    if status != "ok" or len(rows) < 2:
+        return {}, status if status != "ok" else "empty"
+
+    header = [str(c).strip() for c in rows[0]]
+    idx = {name: header.index(name) for name in header if name}
+    researches: dict[str, Any] = {}
+    for row in rows[1:]:
+        item = {name: (row[i] if i < len(row) else "") for name, i in idx.items()}
+        asset = str(item.get("asset") or "").strip().upper()
+        if not asset:
+            continue
+        if not _is_research_fresh(item.get("timestamp_utc"), max_age_hours, now_utc=now_utc):
+            continue
+        # baris berikutnya menimpa: urutan tab = kronologis, jadi yang tersisa = paling baru
+        researches[asset] = _research_from_row(item)
+    return researches, "ok" if researches else "empty"
+
+
 def fetch_latest_research_from_sheet(
     webhook_url: Optional[str] = None,
     csv_path: str = "logs/scan_history.csv",
@@ -831,6 +924,7 @@ def fetch_latest_research_from_sheet(
     Mengabaikan riset yang lebih tua dari max_age_hours (default 6 jam).
     """
     from llm_research import Research
+    _set_research_source("")
     if max_age_hours is None:
         try:
             from strategy_config import load_strategy_config
@@ -900,6 +994,7 @@ def fetch_latest_research_from_sheet(
                     if stale_skipped:
                         log.info(f"⏳ {stale_skipped} data riset dari Webhook diabaikan karena basi (> {max_age_hours:.1f} jam).")
                     if researches:
+                        _set_research_source("webhook")
                         _record_ledger_status(RESEARCH_READ_SHEET, "ok", f"{len(researches)} aset segar dari webhook")
                         log.info(f"✓ Berhasil memuat {len(researches)} data riset segar dari Google Sheets Webhook ({list(researches.keys())})")
                         return researches
@@ -914,6 +1009,24 @@ def fetch_latest_research_from_sheet(
                 _redact_sheet_id(f"{type(e).__name__}: {e}", get_spreadsheet_id())[:120],
             )
             log.warning(f"Gagal mengambil riset dari Google Sheets Webhook: {e}")
+
+    # Ronde 7: SUMBER KEDUA = tab Daily_Scans lewat gviz. Jalur ini tahan-lama (sheet adalah
+    # sumber kebenarannya) dan tidak bergantung pada deployment Apps Script — yang terbukti
+    # membalas teks sambutan "Walt Perps Sheet Logger Webhook is active!" karena versi aktif di
+    # Google bukan isi google_apps_script.js di repo ini.
+    gviz_researches, gviz_status = fetch_latest_research_from_gviz(max_age_hours=max_age_hours)
+    if gviz_researches:
+        _set_research_source("gviz")
+        _record_ledger_status(
+            RESEARCH_READ_SHEET, "ok", f"{len(gviz_researches)} aset segar dari gviz Daily_Scans"
+        )
+        log.info(
+            f"✓ {len(gviz_researches)} data riset segar dibaca dari gviz Daily_Scans "
+            f"({sorted(gviz_researches)[:6]}) — jalur webhook tidak terpakai."
+        )
+        return gviz_researches
+    if gviz_status not in ("ok", "empty", "no_config"):
+        log.warning(f"gviz Daily_Scans tidak menghasilkan riset (status={gviz_status}) — lanjut ke CSV lokal.")
 
     # Fallback ke CSV lokal jika ada
     if os.path.exists(csv_path):
@@ -972,6 +1085,7 @@ def fetch_latest_research_from_sheet(
                     log.info(f"⏳ {stale_skipped} baris riset CSV lokal diabaikan karena basi (> {max_age_hours:.1f} jam).")
                 if researches:
                     prev_status = get_research_read_status()  # status jalur webhook, sebelum ditimpa
+                    _set_research_source("local_csv")
                     _record_ledger_status(RESEARCH_READ_SHEET, "local_csv", f"{len(researches)} aset dari CSV lokal")
                     log.info(
                         f"✓ Berhasil memuat {len(researches)} data riset segar dari file CSV lokal "
