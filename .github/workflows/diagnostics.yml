@@ -35,7 +35,7 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}
           LOG_REDACT: "true"
-          WALT_TOKEN_SYNC: "off"  # R6-4: read-only sejati, jangan konsumsi rotasi token
+          WALT_TOKEN_SYNC: "on"  # R6-fix: refresh OAuth membakar token single-use => wajib menulis balik
         run: |
           set -o pipefail
           mkdir -p logs

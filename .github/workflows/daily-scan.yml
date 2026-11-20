@@ -45,6 +45,14 @@ jobs:
           restore-keys: |
             walt-logs-state-
 
+      - name: Detect restored state (cache-hit hanya true untuk exact key)
+        id: state_probe
+        run: |
+          warm=false
+          if [ -f logs/market_regime.json ]; then warm=true; fi
+          echo "warm=$warm" >> "$GITHUB_OUTPUT"
+          echo "WALT_STATE_WARM akan=$warm (market_regime.json $([ -f logs/market_regime.json ] && echo ADA || echo HILANG))"
+
       - name: Run daily scan and auto-execute
         env:
           WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}
@@ -64,7 +72,7 @@ jobs:
           STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}
           AUTO_EXECUTE_ON_SCAN: ${{ github.event.inputs.auto_execute || vars.AUTO_EXECUTE_ON_SCAN || 'true' }}
           DRY_RUN: ${{ github.event.inputs.dry_run || vars.DRY_RUN || 'false' }}
-          WALT_STATE_WARM: ${{ steps.restore_state.outputs.cache-hit == 'true' }}
+          WALT_STATE_WARM: ${{ steps.state_probe.outputs.warm }}
         run: |
           mkdir -p logs
           set -o pipefail

@@ -104,12 +104,46 @@ def test_versi_terkunci_sama_dengan_yang_terpasang():
 # ---------------------------------------------------------------------------
 # 3) diagnostics read-only: WALT_TOKEN_SYNC off, jalur trading tetap on
 # ---------------------------------------------------------------------------
-def test_diagnostics_yml_menyetel_token_sync_off():
-    wf = _load(".github/workflows/diagnostics.yml")
-    env = _env_of_run_steps(wf)
-    assert env.get("WALT_TOKEN_SYNC") == "off", (
-        "diagnostics.yml harus menyetel WALT_TOKEN_SYNC=off (test ini merah bila env dihapus)"
+def test_diagnostics_wajib_menulis_balik_token_bukan_mematikannya():
+    """
+    R6-fix (dibuktikan run nyata): diagnostics.yml pernah diset WALT_TOKEN_SYNC=off. Itu membakar
+    refresh token single-use tanpa menyimpan token baru -> secret mati -> risk-monitor gagal
+    invalid_grant pada siklus berikutnya. Karena itu diagnostics HARUS on (tulis-balik).
+    """
+    env = _env_of_run_steps(_load(".github/workflows/diagnostics.yml"))
+    assert env.get("WALT_TOKEN_SYNC") == "on", (
+        "diagnostics.yml wajib WALT_TOKEN_SYNC=on; nilai off membuat kredensial CI mati"
     )
+
+
+def test_mode_off_menolak_refresh_sebelum_http(monkeypatch):
+    """Invarian: tidak bisa persist => tidak boleh consume. Nol panggilan OAuth."""
+    calls: list[str] = []
+
+    def forbidden(*a, **k):
+        calls.append("httpx.post dipanggil")
+        raise AssertionError("OAuth refresh tidak boleh terjadi saat WALT_TOKEN_SYNC=off")
+
+    monkeypatch.setenv("WALT_TOKEN_SYNC", "off")
+    monkeypatch.setenv("WALT_CLIENT_ID", "client-test")
+    monkeypatch.setenv("WALT_REFRESH_TOKEN", "refresh-test")
+    monkeypatch.setattr(token_manager.httpx, "post", forbidden)
+
+    tm = token_manager.TokenManager()
+    with pytest.raises(RuntimeError, match="single-use"):
+        tm._refresh()
+    assert calls == []
+
+
+def test_mode_on_mengizinkan_refresh(monkeypatch):
+    monkeypatch.setenv("WALT_TOKEN_SYNC", "on")
+    monkeypatch.setattr(token_manager, "allow_refresh", lambda: None)
+    monkeypatch.setattr(token_manager.httpx, "post", lambda *a, **k: _RotatingResponse())
+    monkeypatch.setattr(token_manager.TokenManager, "_update_local_env", lambda self, tok: None)
+    monkeypatch.setattr(token_manager, "update_github_secret", lambda *a, **k: True)
+    monkeypatch.setenv("WALT_CLIENT_ID", "c")
+    monkeypatch.setenv("WALT_REFRESH_TOKEN", "r")
+    token_manager.TokenManager()._refresh()
 
 
 @pytest.mark.parametrize(
@@ -178,16 +212,20 @@ def test_rotasi_saat_on_masih_menulis_secret(monkeypatch):
     assert alerts == []
 
 
-def test_rotasi_saat_off_tidak_menulis_secret_maupun_env_lokal(monkeypatch, caplog):
+def test_mode_off_tidak_menulis_secret_karena_menolak_refresh(monkeypatch, caplog):
+    """
+    Dulu (R6-4) mode off berarti 'refresh tapi jangan simpan' — justru itulah yang mematikan
+    kredensial. Sekarang off = menolak refresh sama sekali, sehingga tidak ada token yang terbakar.
+    """
     monkeypatch.setenv("WALT_TOKEN_SYNC", "off")
     monkeypatch.setenv("GH_PAT", "pat-test")
     monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
     tm, written, local, alerts = _make_manager(monkeypatch)
 
-    tm._refresh()
+    with pytest.raises(RuntimeError, match="single-use"):
+        tm._refresh()
 
     assert written == [], "mode read-only tidak boleh menulis GitHub Secret"
     assert local == [], "mode read-only tidak menyentuh .env lokal"
-    assert alerts == [], "bukan kegagalan: jangan kirim alert auto-sync"
-    assert tm.refresh_token == "REFRESH_BARU", "rotasi di memory tetap terjadi (sesi ini valid)"
-    assert any("mode read-only" in r.getMessage() for r in caplog.records)
+    assert alerts == [], "penolakan terjadi sebelum apa pun: tidak ada alert"
+    assert tm.refresh_token == "refresh-lama", "token tidak boleh terbuang diam-diam"

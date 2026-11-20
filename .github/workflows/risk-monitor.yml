@@ -45,6 +45,14 @@ jobs:
           restore-keys: |
             walt-snapshot-
 
+      - name: Detect restored state (butuh regime + snapshot, bukan cache-hit exact key)
+        id: state_probe
+        run: |
+          warm=false
+          if [ -f logs/market_regime.json ] && [ -f logs/open_snapshot.json ]; then warm=true; fi
+          echo "warm=$warm" >> "$GITHUB_OUTPUT"
+          echo "WALT_STATE_WARM akan=$warm (regime $([ -f logs/market_regime.json ] && echo ADA || echo HILANG), snapshot $([ -f logs/open_snapshot.json ] && echo ADA || echo HILANG))"
+
       - name: Run risk monitor
         env:
           WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}
@@ -61,7 +69,7 @@ jobs:
           JOB_TIMEOUT_MIN: "20"
           LOG_REDACT: "true"
           STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}
-          WALT_STATE_WARM: ${{ steps.restore_state.outputs.cache-hit == 'true' && steps.restore_snapshot.outputs.cache-hit == 'true' }}
+          WALT_STATE_WARM: ${{ steps.state_probe.outputs.warm }}
         run: |
           mkdir -p logs
           set -o pipefail

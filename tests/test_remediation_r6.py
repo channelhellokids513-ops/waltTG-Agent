@@ -557,24 +557,32 @@ def _step_with_id(steps: list[dict], step_id: str) -> dict:
 
 
 @pytest.mark.parametrize("filename", TRADING_WORKFLOWS)
-def test_workflow_mengekspos_cache_hit_ke_WALT_STATE_WARM(filename):
+def test_workflow_mengekspos_kestabilan_state_lewat_probe_keberadaan(filename):
+    """
+    R6-fix dari run nyata: `actions/cache/restore` hanya memberi cache-hit=true bila key PERSIS
+    sama. Key kita memuat github.run_id (selalu baru), jadi cache-hit praktis SELALU false —
+    menjadikannya sinyal "state dingin" yang salah dan membuat gerbang entry menolak selamanya.
+    Sinyal yang benar: apakah berkas state benar-benar kembali.
+    """
     wf = yaml.safe_load((WORKFLOWS / filename).read_text(encoding="utf-8"))
     steps = _steps(wf)
 
     restore = _step_with_id(steps, "restore_state")
     assert "cache/restore" in restore["uses"], "id harus menempel pada langkah restore, bukan save"
 
+    probe = _step_with_id(steps, "state_probe")
+    assert "market_regime.json" in probe["run"], f"{filename}: probe tidak memeriksa market_regime.json"
+    if filename == "risk-monitor.yml":
+        assert "open_snapshot.json" in probe["run"], "risk-monitor juga butuh snapshot"
+        assert _step_with_id(steps, "restore_snapshot")["uses"].count("cache/restore") == 1
+
+    probe_idx = steps.index(probe)
     run_steps = [s for s in steps if s.get("env") and "WALT_STATE_WARM" in s["env"]]
     assert run_steps, f"{filename}: tidak ada langkah run yang menerima WALT_STATE_WARM"
     expr = run_steps[0]["env"]["WALT_STATE_WARM"]
-    assert "steps.restore_state.outputs.cache-hit" in expr, f"{filename}: WALT_STATE_WARM bukan dari cache-hit: {expr}"
-
-    if filename == "risk-monitor.yml":
-        snap = _step_with_id(steps, "restore_snapshot")
-        assert "cache/restore" in snap["uses"]
-        assert "steps.restore_snapshot.outputs.cache-hit" in expr, (
-            "risk-monitor punya 2 cache: keduanya harus dihitung"
-        )
+    assert expr == "${{ steps.state_probe.outputs.warm }}", f"{filename}: WALT_STATE_WARM bukan dari probe: {expr}"
+    assert probe_idx < steps.index(run_steps[0]), f"{filename}: probe harus sebelum langkah run"
+    assert "cache-hit" not in expr, f"{filename}: cache-hit exact-key bukan sinyal yang valid"
 
 
 @pytest.mark.parametrize("filename", TRADING_WORKFLOWS)
