@@ -342,6 +342,80 @@ status sistem bisa dibaca tanpa menebak. Di GitHub: **Settings → Secrets and v
 | `STRATEGY_CONFIG_JSON` | berkas `strategy_config.json` | Override parameter strategi dari CI tanpa commit. |
 
 
+### 2c. Redeploy Apps Script (Webhook v2) — wajib sebelum kolom `mg_*` berguna
+
+Webhook adalah satu-satunya penulis ledger. Deployment yang aktif saat ini membalas
+HTML (`Webhook is active!`) dan **tidak terbukti menulis apa pun**, sehingga kode v2 di
+repo belum bekerja. Sejak Ronde 8, `_post_webhook` hanya menghitung sukses bila balasan
+membuktikan penulisannya — jadi SELAMA deployment lama masih terpasang, log CI akan
+menampilkan peringatan ini (itu benar, bukan regresi):
+
+```
+_post_webhook(Daily_Scans): balasan webhook ... bukan JSON (status HTTP 200);
+ini gejala deployment Apps Script lama/stub ... Redeploy google_apps_script.js (v2)
+```
+
+Langkah redeploy (±5 menit, tidak perlu menyentuh bot):
+
+1. Buka spreadsheet: `https://docs.google.com/spreadsheets/d/<GOOGLE_SHEET_ID>/edit`
+   (ID diambil dari secret `GOOGLE_SHEET_ID`, jangan ditulis di tempat publik).
+2. Menu **Extensions → Apps Script**.
+3. Di editor: buka `Code.js`, **select-all → hapus**, lalu tempel SELURUH isi
+   `google_apps_script.js` dari repo (jangan sebagian — fungsi helper dipakai `doPost`).
+4. **Ctrl+S** (Simpan). Beri nama proyek mis. `walt-webhook-v2`.
+5. Menu **Deploy → Manage deployments** → klik **✏️ Edit** pada deployment Web app yang
+   sudah ada → **Version: New version** → tulis description `v2 2026-11-21` →
+   **Deploy**. Memilih "New version" pada deployment yang sama **menjaga URL `/exec`
+   tetap sama**, jadi tidak ada secret yang perlu diganti.
+   (Bila tidak ada deployment lama: **Deploy → New deployment → Web app**,
+   *Execute as: Me*, *Who has access: Anyone*, lalu Deploy.)
+6. Bila diminta otorisasi: **Authorize access** → akun Anda → *Advanced* →
+   *Go to project (unsafe)* → **Allow**. Tanpa langkah ini `/exec` balas 401.
+7. **Uji tanpa menulis apa pun** di browser:
+   `<WEBHOOK_URL>?probe=1`
+   Yang harus terlihat: `"version":"2026-11-21.1"` dan daftar tab + header. Jika yang
+   muncul `Webhook is active!` atau HTML, deployment baru belum aktif — ulangi langkah 5.
+8. Uji tulis sekali dari terminal (payload minimal, satu baris ke tab uji, bukan data asli):
+   ```powershell
+   $body = @{ sheet="Daily_Scans"; header=@("timestamp_utc","asset"); records=@(@{ timestamp_utc="PROBE"; asset="PROBE" }) } | ConvertTo-Json -Depth 5
+   Invoke-RestMethod -Method Post -Uri "<WEBHOOK_URL>" -Body $body -ContentType "application/json"
+   ```
+   Balasan wajib memuat `rows_added: 1`, `verified: true`, dan `resolved_header` berisi
+   kolom `mg_*` (kolom baru ditambahkan di ujung kanan). Baris `PROBE` boleh dihapus
+   manual dari sheet setelah yakin.
+9. Rollback: **Deploy → Manage deployments → 🗑️** versi baru, atau tempel kembali kode
+   lama. Tidak ada migrasi data; kolom `mg_*` yang sudah terbentuk hanya akan berisi kosong.
+
+Perubahan perilaku yang perlu diketahui:
+
+- Header sheet tidak pernah ditulis ulang sembarangan. Bila baris 1 punya label, kolom
+  baru hanya menempati sel header kosong yang **kolom datanya juga kosong**, sisanya
+  ditambahkan di kanan. Kolom lama tidak digeser, tidak dibalik, tidak dihapus.
+- Sheet dengan lebar default 26 kolom otomatis diperlebar (header kita 30 kolom).
+- Balasan menyertakan `columns_added`, `dropped_keys`, `rows_skipped`, `mismatch_columns`
+  — kalau suatu saat kolom hilang, penyebabnya terbaca dari respons, bukan dari dugaan.
+- Uji logika ini berjalan di CI lewat `tests/test_apps_script.py` (butuh `node`;
+  di-skip dengan alasan bila node tidak ada).
+
+### 2d. Angka pembanding dari Google Finance (bukan TradingView)
+
+Google Finance **tidak** menampilkan nilai indikator Market Gravity dan (terverifikasi
+pada Ronde 8) tidak menyematkan deret historis di halaman quotenya. Jadi yang bisa
+dibandingkan adalah **jangkar harga** yang dipakai model — bukan skor gravitasinya.
+Untuk satu aset dan satu tanggal, minta angka berikut (mis. lewat Gemini):
+
+| Bidang | Padanan di sistem kita |
+|---|---|
+| `spot` harga terakhir | `price` pada baris scan / candle terakhir |
+| `prev_close` penutupan hari sebelumnya | `previousDayClose` pada `Daily_Scans` |
+| `day_high`, `day_low` hari berjalan | high/low hari yang sama di bar venue |
+| `asof_utc` waktu pengambilan | `timestamp_utc` |
+
+Alat `tools/gravity_parity_check.py` membandingkan angka-angka itu dengan bar yang kita
+pakai dan keluar merah bila selisihnya melebihi toleransi — karena salah sumber harga
+akan membuat seluruh skor gravitasi salah tanpa terlihat. Paritas SKOR terhadap
+TradingView tetap terbuka dan tidak bisa dinyatakan dari Google Finance.
+
 ### 3. Hubungkan Google Cloud Scheduler Bridge (Opsional tapi Direkomendasikan)
 
 Gunakan project GCP gratis Anda untuk menjadwalkan trigger presisi:

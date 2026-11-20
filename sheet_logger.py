@@ -210,7 +210,12 @@ DAILY_SCANS_HEADERS = [
     "timestamp_utc", "balance_usdc", "open_positions", "asset", "side",
     "funding_daily_pct", "price", "swarm_score", "sentiment", "consensus",
     "vendor_alignment", "p1_polarity", "p4_momentum", "p5_catalysts", "p6_contrarian",
-    "verdict", "margin_allocated", "reason", "narrative"
+    "verdict", "margin_allocated", "reason", "narrative",
+    # 11 kolom diagnostik Market Gravity (v2 webhook menambahkannya di ujung kanan
+    # berdasarkan nama, sehingga baris lama tetap pada kolomnya sendiri).
+    "mg_status", "mg_net_gravity", "mg_bull_pressure", "mg_regime", "mg_trend_bias",
+    "mg_upper_1_price", "mg_upper_1_score", "mg_upper_1_state",
+    "mg_lower_1_price", "mg_lower_1_score", "mg_lower_1_state",
 ]
 
 EXECUTIONS_LOG_HEADERS = [
@@ -218,6 +223,89 @@ EXECUTIONS_LOG_HEADERS = [
     "Entry Price ($)", "TP ($)", "SL ($)", "Order ID", "Status", "Keterangan",
     "Strategy Version"
 ]
+
+# --- Diagnostik Market Gravity (lapisan logging SAJA; bukan input keputusan) -----
+# Nilai ini adalah skor tarikan likuiditas RELATIF, bukan probabilitas, dan sengaja
+# tidak pernah dibaca scan_with_research / market_execute / gerbang E5.
+MG_COLUMNS = [
+    "mg_status", "mg_net_gravity", "mg_bull_pressure", "mg_regime", "mg_trend_bias",
+    "mg_upper_1_price", "mg_upper_1_score", "mg_upper_1_state",
+    "mg_lower_1_price", "mg_lower_1_score", "mg_lower_1_state",
+]
+MG_BLANK = dict.fromkeys(MG_COLUMNS, "")
+
+_ledger_write_status: dict[str, tuple[str, str]] = {}
+
+
+def get_ledger_write_status(sheet_name: str) -> str:
+    """ok|unverified_legacy_response|not_success|not_verified|http_error|no_config|unknown."""
+    entry = _ledger_write_status.get(sheet_name)
+    return entry[0] if entry else "unknown"
+
+
+def get_ledger_write_detail(sheet_name: str) -> str:
+    entry = _ledger_write_status.get(sheet_name)
+    return entry[1] if entry else "belum pernah menulis pada proses ini"
+
+
+def _record_ledger_write(sheet_name: str, status: str, detail: str = "") -> None:
+    _ledger_write_status[sheet_name] = (status, detail)
+
+
+_gravity_cache: dict[str, dict[str, str]] = {}
+
+
+def gravity_diagnostics(asset: str) -> dict[str, str]:
+    """Skor struktur Market Gravity untuk satu aset, untuk kolom diagnostik.
+
+    Fail-closed secara eksplisit: bila bar tidak bisa diambil atau jendela terlalu
+    pendek, kolom diisi KOSONG dengan mg_status penyebabnya - tidak pernah 0.0,
+    karena nol akan terbaca sebagai "tidak ada magnet" padahal yang tidak ada adalah data.
+    Sekali dihitung per aset per proses (cache) karena nilai ini deterministik.
+    """
+    key = str(asset or "").upper()
+    if not key:
+        return dict(MG_BLANK)
+    if key in _gravity_cache:
+        return dict(_gravity_cache[key])
+    if os.environ.get("MG_DIAGNOSTICS", "on").strip().lower() in {"off", "0", "false", "no"}:
+        blank = dict(MG_BLANK)
+        blank["mg_status"] = "disabled"
+        _gravity_cache[key] = blank
+        return dict(blank)
+
+    try:
+        limit = int(os.environ.get("MG_DIAG_LIMIT", "600"))
+        interval = os.environ.get("MG_DIAG_INTERVAL", "1h")
+    except ValueError:
+        limit, interval = 600, "1h"
+
+    payload = dict(MG_BLANK)
+    try:
+        from market_chart import fetch_candles
+        from market_gravity import analyze_market_gravity
+
+        candles, _source = fetch_candles(key, interval=interval, limit=limit)
+        result = analyze_market_gravity(candles)
+        fields = result.to_scan_fields()
+        payload.update(MG_BLANK)
+        payload.update({name: fields.get(name, "") for name in MG_COLUMNS})
+        if result.notes:
+            payload["mg_status"] = f"{result.status}:{';'.join(result.notes)[:60]}"
+    except Exception as exc:  # jaringan/venue apa pun: diagnostik tidak boleh menjatuhkan scan
+        payload["mg_status"] = f"error:{type(exc).__name__}"
+    _gravity_cache[key] = payload
+    return dict(payload)
+
+
+def gravity_diagnostics_summary() -> dict[str, int]:
+    """Ringkasan kesehatan diagnostik (dipakai CI): berapa aset terukur vs blank."""
+    tally: dict[str, int] = {}
+    for payload in _gravity_cache.values():
+        status = str(payload.get("mg_status") or "unknown").split(":")[0]
+        tally[status] = tally.get(status, 0) + 1
+    return tally
+
 
 
 def log_scan_to_csv(summary: dict, researches: dict[str, Any], filepath: str = "logs/scan_history.csv"):
@@ -260,10 +348,12 @@ def log_scan_to_csv(summary: dict, researches: dict[str, Any], filepath: str = "
         p6 = f"{p1_7.get('P6_contrarian_check', 0):.2f}" if p1_7 else "—"
         narrative = getattr(res, "narrative", "") if res else ""
 
+        mg = gravity_diagnostics(asset)
         rows.append([
             ts, balance, pos_count, asset, side, f"{funding:+.3f}%",
             f"{price:.4f}", score, sent, cons, align, p1, p4, p5, p6,
-            verdict, f"{margin:.2f}", reason, narrative
+            verdict, f"{margin:.2f}", reason, narrative,
+            *[mg.get(name, "") for name in MG_COLUMNS],
         ])
 
     with open(filepath, "a", newline="", encoding="utf-8") as f:
@@ -304,54 +394,121 @@ def _write_webhook_fallback_csv(payload: dict) -> Optional[str]:
         return None
 
 
+def _interpret_write_response(response, expected_rows: int, sheet_label: str) -> tuple[bool, str, str]:
+    """Putuskan apakah tulis ke sheet benar-benar TERBUKTI, bukan sekadar HTTP 200.
+
+    (ok, status, detail). Webhook v2 membalas JSON berisi verified + rows_added;
+    v1 hanya rows_added; deployment stub lama membalas HTML dan itu BUKAN bukti.
+    """
+    body = getattr(response, "text", "") or ""
+    try:
+        payload = response.json()
+    except Exception:
+        return False, "unverified_legacy_response", (
+            f"balasan webhook {sheet_label} bukan JSON (status HTTP {response.status_code}); "
+            "ini gejala deployment Apps Script lama/stub - kolom dan baris tidak terbukti tertulis. "
+            "Redeploy google_apps_script.js (v2) lalu cek ?probe=1"
+        )
+    if not isinstance(payload, dict):
+        return False, "not_success", f"balasan webhook {sheet_label} bukan objek: {str(payload)[:60]}"
+    if payload.get("status") != "success":
+        return False, "not_success", f"{payload.get('status')}/{payload.get('code')}: {str(payload.get('message'))[:80]}"
+
+    skipped = payload.get("rows_skipped") or []
+    added = int(payload.get("rows_added") or 0)
+    expected_added = max(0, int(expected_rows) - len(skipped))
+    if added != expected_added:
+        return False, "not_verified", (
+            f"{sheet_label}: rows_added={added} != expected={expected_added} "
+            f"(skipped={len(skipped)}, verified={payload.get('verified')})"
+        )
+    mismatches = payload.get("mismatch_columns") or []
+    if mismatches:
+        return False, "not_verified", f"{sheet_label}: read-back beda di {len(mismatches)} kolom: {str(mismatches[0])[:90]}"
+    if payload.get("verified") is True:
+        return True, "ok", f"{added} baris ditulis dan terbaca kembali (versi webhook {payload.get('version', '?')})"
+    if expected_rows == 0:
+        return True, "ok", "header direkonsiliasi (tidak ada baris)"
+    return True, "ok_v1_rows_added", (
+        f"{added} baris dilaporkan tertulis; read-back tidak tersedia di versi webhook ini "
+        f"(versi={payload.get('version', 'v1')})"
+    )
+
+
 def _post_webhook(payload: dict, url: str) -> bool:
     """
     Kirim payload ke Google Sheets Webhook dengan maks 3 percobaan (jeda 1s lalu 2s).
-    Bila semua percobaan gagal, tulis baris ke CSV lokal fallback di FALLBACK_LOG_DIR dan kembalikan False.
+    Sukses HANYA bila balasan membuktikan baris tertulis (lihat _interpret_write_response);
+    bila semua percobaan gagal, tulis baris ke CSV lokal fallback dan kembalikan False.
     """
     norm_url = _normalize_webhook_url(url)
     if not norm_url:
+        sheet_label = str(payload.get("sheet") or payload.get("action") or "unknown")
+        _record_ledger_write(sheet_label, "no_config", "GOOGLE_SHEET_WEBHOOK_URL kosong")
         return False
 
     backoff_delays = (1, 2)
     sheet_label = str(payload.get("sheet") or payload.get("action") or "unknown")
+    expected_rows = len(payload.get("rows") or payload.get("records") or [])
     last_err = "unknown"
 
     for attempt in range(1, 4):
         try:
             r = httpx.post(norm_url, json=payload, follow_redirects=True, timeout=20.0)
-            if r.status_code in (200, 302):
-                log.info(f"Google Sheet Webhook ({sheet_label}) status: {r.status_code}")
-                return True
-            last_err = f"HTTP {r.status_code}"
-            log.warning(
-                f"_post_webhook({sheet_label}) attempt {attempt}/3 gagal ({last_err})"
-            )
         except Exception as e:
             last_err = f"{type(e).__name__}: {e}"
-            log.warning(
-                f"_post_webhook({sheet_label}) attempt {attempt}/3 error ({type(e).__name__}): {e}"
-            )
+            _record_ledger_write(sheet_label, "http_error", last_err)
+            log.warning(f"_post_webhook({sheet_label}) attempt {attempt}/3 error ({last_err})")
+            if attempt < 3:
+                time.sleep(backoff_delays[attempt - 1])
+            continue
+
+        if r.status_code not in (200, 302):
+            last_err = f"HTTP {r.status_code}"
+            _record_ledger_write(sheet_label, "http_error", last_err)
+            log.warning(f"_post_webhook({sheet_label}) attempt {attempt}/3 gagal ({last_err})")
+            if attempt < 3:
+                time.sleep(backoff_delays[attempt - 1])
+            continue
+
+        ok, status, detail = _interpret_write_response(r, expected_rows, sheet_label)
+        _record_ledger_write(sheet_label, status, detail)
+        if ok:
+            log.info(f"Google Sheet Webhook ({sheet_label}) terbukti: {detail}")
+            return True
+        last_err = detail
+        if status == "unverified_legacy_response":
+            # Redeploy tidak akan berhasil dengan sendirinya di dalam proses yang sama.
+            log.warning(f"_post_webhook({sheet_label}): {last_err}")
+            break
+        log.warning(f"_post_webhook({sheet_label}) attempt {attempt}/3 tidak terbukti ({last_err})")
         if attempt < 3:
             time.sleep(backoff_delays[attempt - 1])
 
     log.warning(
-        f"_post_webhook({sheet_label}) gagal setelah 3 percobaan ({last_err}); menulis fallback CSV lokal"
+        f"_post_webhook({sheet_label}) tidak terbukti berhasil ({last_err}); menulis fallback CSV lokal"
     )
     _write_webhook_fallback_csv(payload)
     return False
 
 
 def log_scan_via_webhook(rows: list[list[Any]], webhook_url: str) -> bool:
-    """Kirim data scan ke Google Sheets melalui Google Apps Script Web App."""
+    """Kirim data scan ke Google Sheets melalui Google Apps Script Web App.
+
+    Dikirim sebagai `records` (bernama kolom) supaya urutan kolom di sheet tidak
+    pernah bisa menggeser nilai; `header` ikut dikirim agar webhook v2 dapat
+    merekonsiliasi kolom baru (mg_*) di ujung kanan tanpa menyentuh data lama.
+    """
     url = _normalize_webhook_url(webhook_url)
     if not url:
         return False
+    records = [dict(zip(DAILY_SCANS_HEADERS, row)) for row in rows]
     payload = {
         "action": "log_scan",
         "sheet": "Daily_Scans",
         "header": DAILY_SCANS_HEADERS,
-        "rows": rows,
+        "records": records,
+        "rows": rows,  # kompatibilitas deployment v1 yang belum menerima `records`
     }
     return _post_webhook(payload, url)
 
@@ -410,8 +567,11 @@ def log_scan(summary: dict, researches: dict[str, Any]) -> dict:
         "rows_count": len(rows),
         "csv_logged": True,
         "webhook_logged": webhook_ok,
+        "webhook_write_status": get_ledger_write_status("Daily_Scans"),
+        "webhook_write_detail": get_ledger_write_detail("Daily_Scans"),
         "cli_logged": cli_ok,
         "sheet_id": sheet_id,
+        "gravity_diag": gravity_diagnostics_summary(),
     }
 
 

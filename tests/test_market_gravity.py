@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import sys
 from pathlib import Path
 
 import market_gravity as mg
@@ -242,11 +243,157 @@ def test_missing_timestamps_disable_htf_sources_instead_of_guessing():
 # --- integration invariants ------------------------------------------------
 
 
-def test_decision_path_does_not_import_market_gravity():
-    """Fase 4 guard: diagnostics only. Entry logic must not consume this module yet."""
-    for name in ("walt_bot.py", "llm_research.py", "sheet_logger.py", "strategy_config.py"):
+def test_decision_modules_never_touch_gravity_output():
+    """Fase 4 penjaga: modul keputusan buta terhadap Market Gravity."""
+    for name in ("walt_bot.py", "llm_research.py"):
         text = (ROOT / name).read_text(encoding="utf-8")
-        assert not re.search(r"^\s*(import|from)\s+market_gravity", text, re.MULTILINE), name
+        assert "market_gravity" not in text, f"{name} tidak boleh mengimpor model gravitasi"
+        assert "mg_" not in text, f"{name} tidak boleh membaca kolom diagnostik mg_*"
+
+
+def test_gravity_import_is_confined_to_the_logging_layer():
+    """Satu-satunya tempat boleh mengimpor market_gravity: gravity_diagnostics()."""
+    text = (ROOT / "sheet_logger.py").read_text(encoding="utf-8")
+    occurrences = [match.start() for match in re.finditer(r"market_gravity", text)]
+    assert occurrences, "diagnostik seharusnya memanggil model dari lapisan logging"
+    body_start = text.index("def gravity_diagnostics(")
+    body_end = text.index("def gravity_diagnostics_summary(")
+    stray = [pos for pos in occurrences if not body_start < pos < body_end]
+    assert not stray, f"impor market_gravity di luar fungsi diagnostik: {len(stray)} tempat"
+
+
+def _scan_row(tmp_path, monkeypatch, diagnostics: dict):
+    import sheet_logger
+
+    monkeypatch.setattr(sheet_logger, "gravity_diagnostics", lambda asset: dict(diagnostics))
+    summary = {
+        "ts": "2026-11-21T00:00:00+00:00",
+        "balance": [{"balance_available": "100.0"}],
+        "positions_count": 0,
+        "top_opportunities": [{"asset": "TEST", "side": "long", "funding_daily_pct": 0.5, "price": 100.0}],
+    }
+    stamp = "on" if any(diagnostics.get(name) for name in sheet_logger.MG_COLUMNS) else "off"
+    rows = sheet_logger.log_scan_to_csv(summary, {}, filepath=str(tmp_path / f"scan_{stamp}.csv"))
+    assert rows, "satu peluang harus menghasilkan satu baris"
+    return rows[0]
+
+
+def test_diagnostic_columns_cannot_move_decision_values(tmp_path, monkeypatch):
+    """Kolom mg_* berubah -> kolom keputusan (verdict/margin/reason) harus identik."""
+    import sheet_logger
+
+    blank = _scan_row(tmp_path, monkeypatch, dict(sheet_logger.MG_BLANK))
+    filled = dict(sheet_logger.MG_BLANK)
+    filled.update({"mg_status": "ok", "mg_net_gravity": "42.0", "mg_regime": "Trend",
+                   "mg_upper_1_price": "123.45", "mg_upper_1_score": "77.7"})
+    row = _scan_row(tmp_path, monkeypatch, filled)
+
+    width = len(sheet_logger.DAILY_SCANS_HEADERS)
+    assert len(blank) == width and len(row) == width
+    mg_start = width - len(sheet_logger.MG_COLUMNS)
+    assert blank[:mg_start] == row[:mg_start], "kolom non-diagnostik bergeser saat mg_* berubah"
+    assert row[mg_start:] == [filled[name] for name in sheet_logger.MG_COLUMNS]
+    # Jendela kosong harus tetap kosong, bukan 0.0 yang terbaca sebagai "tidak ada magnet".
+    assert blank[sheet_logger.DAILY_SCANS_HEADERS.index("mg_net_gravity")] == ""
+
+
+class _Resp:
+    def __init__(self, payload, status_code=200):
+        self._payload = payload
+        self.status_code = status_code
+        self.text = json.dumps(payload) if payload is not None else "<html>Webhook is active!</html>"
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("bukan JSON")
+        return self._payload
+
+
+def test_webhook_write_must_be_proven_not_just_accepted():
+    import sheet_logger
+
+    ok, status, _ = sheet_logger._interpret_write_response(
+        _Resp({"status": "success", "version": "2026-11-21.1", "rows_added": 2, "verified": True}), 2, "Daily_Scans")
+    assert ok and status == "ok"
+
+    ok, status, detail = sheet_logger._interpret_write_response(_Resp(None), 2, "Daily_Scans")
+    assert not ok and status == "unverified_legacy_response"
+    assert "Redeploy" in detail
+
+    ok, status, _ = sheet_logger._interpret_write_response(
+        _Resp({"status": "success", "rows_added": 1, "verified": True}), 2, "Daily_Scans")
+    assert not ok and status == "not_verified"          # baris hilang: tidak boleh dilaporkan sukses
+
+    ok, status, _ = sheet_logger._interpret_write_response(
+        _Resp({"status": "success", "rows_added": 2, "verified": True,
+               "mismatch_columns": [{"column": "price"}]}), 2, "Daily_Scans")
+    assert not ok and status == "not_verified"          # read-back beda: tulis tidak terbukti
+
+    ok, status, _ = sheet_logger._interpret_write_response(
+        _Resp({"status": "success", "rows_added": 0, "rows_skipped": ["x", "y"]}), 2, "Daily_Scans")
+    assert ok and status.startswith("ok")                 # dedupe: bukan kegagalan
+
+
+def test_parity_tool_refuses_to_compare_different_moments():
+    """Angka dari dua waktu berbeda tidak boleh menghasilkan kesimpulan harga."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("gravity_parity_check", ROOT / "tools" / "gravity_parity_check.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    ours = 1_764_000_000.0
+    aligned, why = module._within_asof_window(ours, None, 2)
+    assert not aligned and "asof_utc" in why
+
+    aligned, why = module._within_asof_window(ours, ours + 14 * 3600, 2)
+    assert not aligned and "14.0 jam" in why
+
+    aligned, why = module._within_asof_window(ours, ours + 600, 2)
+    assert aligned and "menit" in why
+
+    assert module._parse_time("2026-11-20T13:50:45Z") == 1795182645.0
+    assert module._parse_time(1_764_000_000_000) == 1_764_000_000.0
+    assert module._parse_time("bukan waktu") is None
+
+
+def test_parity_tool_template_is_printable(capsys):
+    import subprocess
+
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "gravity_parity_check.py"), "--template"],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "tolerance_pct" in proc.stdout and "Google Finance" in proc.stdout
+
+
+def test_scan_payload_is_name_keyed_for_header_reconciliation():
+
+    import sheet_logger
+
+    sent = {}
+
+    def fake_post(payload, url):
+        sent.update(payload)
+        return True
+
+    original = sheet_logger._post_webhook
+    sheet_logger._post_webhook = fake_post
+    try:
+        sheet_logger.log_scan_via_webhook(
+            [["ts", "1.0", "0", "BTC", "LONG"] + [""] * (len(sheet_logger.DAILY_SCANS_HEADERS) - 5)],
+            "https://script.google.com/macros/s/x/exec",
+        )
+    finally:
+        sheet_logger._post_webhook = original
+
+    assert sent["header"] == sheet_logger.DAILY_SCANS_HEADERS
+    assert len(sent["records"]) == 1
+    assert sent["records"][0]["asset"] == "BTC"
+    assert "mg_status" in sent["records"][0]
+    assert all(name in sent["header"] for name in sheet_logger.MG_COLUMNS)
+
 
 
 def test_source_notice_and_spec_are_retained():

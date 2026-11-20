@@ -237,8 +237,19 @@ def test_p1_2_sheet_webhook_retries_then_succeeds_and_fallback_csv(monkeypatch, 
     monkeypatch.setattr(sheet_logger, "FALLBACK_LOG_DIR", str(tmp_path))
 
     class _Resp:
+        """Balasan webhook v2: bukti tulis, bukan sekadar HTTP 200."""
+
         def __init__(self, code):
             self.status_code = code
+
+        @property
+        def text(self):
+            return '{"status":"success"}' if self.status_code == 200 else "server error"
+
+        def json(self):
+            if self.status_code != 200:
+                raise ValueError("bukan JSON")
+            return {"status": "success", "version": "2026-11-21.1", "rows_added": 1, "verified": True}
 
     calls_ok = []
     codes = iter([500, 500, 200])
