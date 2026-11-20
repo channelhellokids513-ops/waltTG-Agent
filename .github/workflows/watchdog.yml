@@ -1,5 +1,15 @@
 name: Walt Risk Monitor Watchdog
 
+# R6-3: watchdog kini memeriksa KEEMPAT workflow trading, bukan hanya risk-monitor.
+# daily-scan / market-execute / crypto-execute dipicu Google Cloud Scheduler eksternal, jadi
+# kalau job Scheduler mati entri berhenti tanpa satu pun alert sebelumnya.
+#
+# Ambang usia per workflow diturunkan dari tabel jadwal terdokumentasi
+# (STRATEGY.md §7.1 dan README §113-117) — lihat SPECS di tools/watchdog_check.py:
+#   risk-monitor.yml    cadence 10 m  -> ambang  30 m (nilai warisan, dipertahankan)
+#   market-execute.yml  cadence 120 m -> ambang 300 m (2x cadence + grace 60 m)
+#   crypto-execute.yml  cadence 120 m -> ambang 300 m (2x cadence + grace 60 m)
+#   daily-scan.yml      cadence 720 m -> ambang 840 m (cadence + grace 120 m)
 on:
   schedule:
     - cron: '0 * * * *'
@@ -11,104 +21,20 @@ concurrency:
 
 permissions:
   actions: write
+  contents: read
 
 jobs:
   watchdog:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - name: Check latest Walt Risk Monitor success within 30 minutes
+      - uses: actions/checkout@v4
+
+      - name: Check age of last success for all four trading workflows
         env:
           GH_TOKEN: ${{ github.token }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           MAINTENANCE_MODE: ${{ vars.MAINTENANCE_MODE || 'false' }}
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import subprocess
-          import urllib.parse
-          import urllib.request
-          from datetime import datetime, timezone
-
-          if (os.environ.get("MAINTENANCE_MODE") or "").strip().lower() == "true":
-              print("MAINTENANCE_MODE=true aktif — watchdog melewati alert Telegram dan fallback dispatch.")
-              raise SystemExit(0)
-
-          raw = subprocess.check_output(
-              [
-                  "gh", "run", "list",
-                  "--workflow", "risk-monitor.yml",
-                  "--status", "success",
-                  "--limit", "5",
-                  "--json", "createdAt,updatedAt,databaseId",
-              ],
-              text=True,
-          )
-          runs = json.loads(raw or "[]")
-          now = datetime.now(timezone.utc)
-          recent_ok = False
-          latest_age_min = None
-
-          for r in runs:
-              ts_str = r.get("updatedAt") or r.get("createdAt")
-              if not ts_str:
-                  continue
-              dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-              age_min = (now - dt).total_seconds() / 60.0
-              if latest_age_min is None or age_min < latest_age_min:
-                  latest_age_min = age_min
-              if age_min <= 30.0:
-                  recent_ok = True
-                  break
-
-          if recent_ok:
-              print(f"OK: Walt Risk Monitor sukses {latest_age_min:.1f} menit lalu (<= 30 menit).")
-              raise SystemExit(0)
-
-          age_label = f"{latest_age_min:.1f} menit lalu" if latest_age_min is not None else "belum pernah sukses"
-          print(f"ALERT: Walt Risk Monitor terakhir sukses {age_label}. Mengirim alert Telegram dan memicu fallback run...")
-
-          bot_token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-          chat_id = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
-          if bot_token.startswith("bot"):
-              bot_token = bot_token[3:]
-          if bot_token and chat_id:
-              msg = "⚠️ Risk monitor tidak jalan >30 menit — cek Cloud Scheduler"
-              data = urllib.parse.urlencode({"chat_id": chat_id, "text": msg}).encode("utf-8")
-              req = urllib.request.Request(
-                  f"https://api.telegram.org/bot{bot_token}/sendMessage",
-                  data=data,
-                  method="POST",
-              )
-              try:
-                  with urllib.request.urlopen(req, timeout=15) as resp:
-                      print(f"Telegram alert status: {resp.status}")
-              except Exception as exc:
-                  print(f"Gagal kirim alert Telegram: {exc}")
-
-          # Sebelum memicu fallback dispatch, cek apakah sudah ada run risk-monitor yang
-          # masih queued atau in_progress agar tidak menumpuk antrean pada concurrency group.
-          active_raw = subprocess.check_output(
-              [
-                  "gh", "run", "list",
-                  "--workflow", "risk-monitor.yml",
-                  "--limit", "10",
-                  "--json", "status,databaseId",
-              ],
-              text=True,
-          )
-          active_runs = json.loads(active_raw or "[]")
-          if any(
-              str(r.get("status", "")).lower() in ("queued", "in_progress", "waiting", "pending")
-              for r in active_runs
-          ):
-              print(
-                  "SKIP fallback dispatch: risk-monitor sudah berstatus queued/in_progress — menghindari antrean ganda."
-              )
-              raise SystemExit(0)
-
-          subprocess.check_call(["gh", "workflow", "run", "risk-monitor.yml"])
-          print("Fallback risk-monitor.yml workflow_dispatch dipicu.")
-          PY
+          WALT_WATCHDOG_DISPATCH_ENTRY: ${{ vars.WALT_WATCHDOG_DISPATCH_ENTRY || 'false' }}
+        run: python3 tools/watchdog_check.py

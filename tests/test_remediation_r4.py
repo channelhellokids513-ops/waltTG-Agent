@@ -237,14 +237,27 @@ def test_r4_4_api_touching_workflows_are_maintenance_gated():
     tests_raw = (wf_dir / "tests.yml").read_text(encoding="utf-8")
     assert "MAINTENANCE_MODE" not in tests_raw
 
-    # watchdog.yml wajib berhenti sebelum alert/dispatch saat MAINTENANCE_MODE aktif
+    # watchdog.yml wajib berhenti sebelum alert/dispatch saat MAINTENANCE_MODE aktif.
+    # Ronde 6 [R6-3] memindahkan logika watchdog dari heredoc inline ke tools/watchdog_check.py agar
+    # bisa diuji; invarian yang dijaga test ini TIDAK berubah, hanya lokatornya ikut pindah, dan
+    # diperiksa lebih ketat: urutan DIEKSEKUSI di dalam main(), bukan posisi teks di YAML.
     watchdog_raw = (wf_dir / "watchdog.yml").read_text(encoding="utf-8")
-    assert "MAINTENANCE_MODE" in watchdog_raw
-    maint_pos = watchdog_raw.find("MAINTENANCE_MODE")
-    dispatch_pos = watchdog_raw.find("gh\", \"workflow\", \"run\"")
-    alert_pos = watchdog_raw.find("sendMessage")
+    watchdog_mod = (wf_dir.parent.parent / "tools" / "watchdog_check.py").read_text(encoding="utf-8")
+    assert "MAINTENANCE_MODE" in watchdog_raw, "watchdog.yml harus meneruskan MAINTENANCE_MODE"
+    assert "tools/watchdog_check.py" in watchdog_raw, "watchdog.yml harus memakai modul teruji"
+
+    assert "MAINTENANCE_MODE" in watchdog_mod
+    assert "sendMessage" in watchdog_mod, "jalur alert Telegram harus tetap ada"
+    assert '"workflow", "run"' in watchdog_mod, "jalur fallback dispatch harus tetap ada"
+
+    main_body = watchdog_mod[watchdog_mod.find("def main("):]
+    maint_pos = main_body.find("MAINTENANCE_MODE")
+    alert_pos = main_body.find("send_alert(")
+    dispatch_pos = main_body.find("dispatch_workflow(")
     assert maint_pos != -1 and alert_pos != -1 and dispatch_pos != -1
-    assert maint_pos < alert_pos and maint_pos < dispatch_pos
+    assert maint_pos < alert_pos and maint_pos < dispatch_pos, (
+        "MAINTENANCE_MODE harus diperiksa sebelum alert maupun dispatch"
+    )
 
     # diagnostics.yml ada, read-only (hanya workflow_dispatch), tanpa job-level if MAINTENANCE_MODE
     diag_path = wf_dir / "diagnostics.yml"
