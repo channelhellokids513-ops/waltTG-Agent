@@ -12,7 +12,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys_env = {"SLIPPAGE_PROBE_CONFIRM": "saya-ersetuju-order-nyata", "MAINTENANCE_MODE": "true"}
+sys_env = {"SLIPPAGE_PROBE_CONFIRM": "saya-ersetuju-order-nyata", "MAINTENANCE_MODE": "true",
+           "SLIPPAGE_PROBE_REAL_ORDER": "YA_ORDER_NYATA"}
+GATE_KEYS = ("SLIPPAGE_PROBE_CONFIRM", "MAINTENANCE_MODE", "DRY_RUN", "SLIPPAGE_PROBE_REAL_ORDER")
 
 SPEC = importlib.util.spec_from_file_location("slippage_probe", ROOT / "tools" / "slippage_probe.py")
 sp = importlib.util.module_from_spec(SPEC)
@@ -22,13 +24,13 @@ SPEC.loader.exec_module(sp)
 def set_env(monkeypatch, **overrides):
     env = dict(sys_env)
     env.update(overrides)
-    for key in ("SLIPPAGE_PROBE_CONFIRM", "MAINTENANCE_MODE", "DRY_RUN"):
+    for key in GATE_KEYS:
         monkeypatch.delenv(key, raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
 
 
-def test_tiga_pintu_semuanya_wajib(monkeypatch):
+def test_empat_pintu_semuanya_wajib(monkeypatch):
     set_env(monkeypatch)
     assert sp.check_gates() == []
 
@@ -40,6 +42,10 @@ def test_tiga_pintu_semuanya_wajib(monkeypatch):
 
     set_env(monkeypatch, DRY_RUN="true")
     assert any("DRY_RUN" in r for r in sp.check_gates())
+
+    # pintu kedua: mode oauth saja tidak cukup, harus bilang order nyata
+    set_env(monkeypatch, SLIPPAGE_PROBE_REAL_ORDER="TIDAK_ORDER")
+    assert any("real_order" in r for r in sp.check_gates())
 
 
 def test_frasiskonfirmasi_harus_persis_bukan_seadanya_kata(monkeypatch):

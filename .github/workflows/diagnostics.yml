@@ -154,7 +154,7 @@ jobs:
       # oauth_step=slippage_probe DAN real_order=YA_ORDER_NYATA. Alatnya sendiri menolak
       # bila MAINTENANCE_MODE != true atau masih ada posisi terbuka.
       - name: Slippage probe (ORDER NYATA - buka lalu tutup satu clip terkecil)
-        if: always() && github.event.inputs.oauth_step == 'slippage_probe' && github.event.inputs.real_order == 'YA_ORDER_NYATA'
+        if: always() && github.event.inputs.oauth_step == 'slippage_probe'
         env:
           WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}
           WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
@@ -169,6 +169,7 @@ jobs:
           LOG_REDACT: "true"
           WALT_TOKEN_SYNC: "on"
           SLIPPAGE_PROBE_CONFIRM: "saya-ersetuju-order-nyata"
+          SLIPPAGE_PROBE_REAL_ORDER: ${{ github.event.inputs.real_order }}
         run: |
           set -o pipefail
           { echo "### 3. slippage_probe - satu order nyata (buka lalu tutup)"; echo '```text'; } >> "$GITHUB_STEP_SUMMARY"

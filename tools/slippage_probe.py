@@ -43,6 +43,8 @@ def check_gates() -> list[str]:
     reasons: list[str] = []
     if os.environ.get("SLIPPAGE_PROBE_CONFIRM", "").strip() != CONFIRM_PHRASE:
         reasons.append("SLIPPAGE_PROBE_CONFIRM != 'saya-ersetuju-order-nyata'")
+    if os.environ.get("SLIPPAGE_PROBE_REAL_ORDER", "").strip() != "YA_ORDER_NYATA":
+        reasons.append("input real_order != 'YA_ORDER_NYATA' (pintu kedua untuk order nyata)")
     if os.environ.get("MAINTENANCE_MODE", "").strip().lower() != "true":
         reasons.append("MAINTENANCE_MODE harus 'true' (variabel repo) sebelum order nyata")
     if os.environ.get("DRY_RUN", "").strip().lower() == "true":
