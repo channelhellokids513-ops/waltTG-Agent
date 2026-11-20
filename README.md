@@ -114,7 +114,7 @@ gcloud scheduler jobs list --location=asia-southeast2
 | [`market-execute.yml`](.github/workflows/market-execute.yml) | **Cloud Scheduler (`workflow_dispatch`)** — Tiap 2 jam (menit 43) | `12m` (`JOB_TIMEOUT_MIN=12`, guard `< 6m`) | Eksekusi adaptif Saham US & Komoditas 24/7: **1 jam (Gear 2)** saat peluang funding melimpah ($\ge 3$ aset $\ge 0.5\%$/hari atau $\ge 2$ ekstrem $\ge 0.8\%$/hari), **2 jam (Gear 1)** saat normal/sepi, dan *fast-exit* saat slot penuh (Gear 0). Dilengkapi *3-hour re-entry cooldown*. |
 | [`crypto-execute.yml`](.github/workflows/crypto-execute.yml) | **Cloud Scheduler (`workflow_dispatch`)** — Tiap 2 jam (menit 11) | `12m` (`JOB_TIMEOUT_MIN=12`, guard `< 6m`) | Eksekusi adaptif 10 Crypto Bluechip (`BTC`, `ETH`, `SOL`, dll) dengan sistem **Calmed Adaptive (1h / 2h)** dan *3-hour re-entry cooldown*. |
 | [`risk-monitor.yml`](.github/workflows/risk-monitor.yml) | **Cloud Scheduler (`workflow_dispatch`)** — Tiap 10 menit | `20m` (`JOB_TIMEOUT_MIN=20`, guard sisa `< 6m`) | Pengawas risiko adaptif (5–10 menit + *Smart Fast-Exit Idle*). Guard waktu otomatis melewati *sub-cycle* & *adaptive execute* jika sisa waktu job `< 6 menit` agar order tidak terpotong sebelum TP/SL terpasang. |
-| [`watchdog.yml`](.github/workflows/watchdog.yml) | **GitHub Cron (`0 * * * *`)** + `workflow_dispatch` | `3m` (`walt-watchdog`) | Pengaman pengganti cron (Ronde 6 `[R6-3]`): memeriksa usia run `success` **keempat** workflow trading (`risk-monitor` 30 m, `market-execute`/`crypto-execute` 300 m, `daily-scan` 840 m; ambang diturunkan dari tabel jadwal §7.1 STRATEGY.md), mencetak tabel ke Step Summary, mengirim satu alert teragregasi yang menyebut workflow stale, lalu fallback `workflow_dispatch` — otomatis hanya untuk `risk-monitor`; untuk workflow entry perlu `vars.WALT_WATCHDOG_DISPATCH_ENTRY=true`. Tanpa akses Walt API. |
+| [`watchdog.yml`](.github/workflows/watchdog.yml) | **GitHub Cron (`0 * * * *`) + keepalive dari workflow entry (Ronde 7b)** + `workflow_dispatch` | `3m` (`walt-watchdog`) | Pengaman pengganti cron (Ronde 6 `[R6-3]`): memeriksa usia run `success` **keempat** workflow trading (`risk-monitor` 30 m, `market-execute`/`crypto-execute` 300 m, `daily-scan` 840 m; ambang diturunkan dari tabel jadwal §7.1 STRATEGY.md), mencetak tabel ke Step Summary, mengirim satu alert teragregasi yang menyebut workflow stale, lalu fallback `workflow_dispatch` — otomatis hanya untuk `risk-monitor`; untuk workflow entry perlu `vars.WALT_WATCHDOG_DISPATCH_ENTRY=true`. Tanpa akses Walt API. **Catatan Ronde 7b:** cron GitHub terbukti bisa menguap (~7 jam pada 2026-11-20, §3i) — karena itu `risk-monitor.yml` dan `market-execute.yml` memanggil `keep_watchdog_alive()` di akhir job (`if: always()`, nol OAuth) dan men-dispatch watchdog bila run terakhir > 50 menit. Cloud Scheduler tidak bisa dipakai dari repo ini (0 job pada semua proyek yang terjangkau akun). |
 | [`tests.yml`](.github/workflows/tests.yml) | **Push / PR ke `main`** | `5m` (`walt-tests`) | CI otomatis menjalankan import check modul inti, `pytest -q`, dan validasi sintaks seluruh file `.github/workflows/*.yml` tanpa secrets. |
 | [`diagnostics.yml`](.github/workflows/diagnostics.yml) | **Manual (`workflow_dispatch`, input `oauth_step`: `dump_closed` \| `reconcile_history`)** | `5m` (`walt-diagnostics`) | Diagnostik *read-only* berurutan: probe sheet → `stats` (keduanya **tanpa** OAuth) → **tepat satu** langkah bursa (refresh token single-use hanya cukup untuk satu langkah per *job*). Sengaja **TIDAK** dibungkam oleh `MAINTENANCE_MODE` agar bisa dipakai saat jendela pemeliharaan. |
 
@@ -124,6 +124,7 @@ Keempat workflow trading (`daily-scan.yml`, `market-execute.yml`, `crypto-execut
 - **Anti-antrean ganda:** `watchdog.yml` memeriksa keberadaan run `risk-monitor.yml` berstatus `queued`/`in_progress` sebelum memicu *fallback dispatch* agar tidak memperpanjang antrean.
 
 ### Jendela Pemeliharaan & Pemulihan Kredensial (`MAINTENANCE_MODE`)
+
 GitHub Actions me-rotate `WALT_REFRESH_TOKEN` secara otomatis (± setiap jam) dan menulis ulang GitHub Secret. Karena secret tidak bisa dibaca kembali ke mesin lokal, menjalankan bot secara lokal berbarengan dengan CI dapat memicu tabrakan rotasi (`invalid_grant`).
 
 > **Penting:** Kill-switch `MAINTENANCE_MODE` berfungsi untuk **menghindari tabrakan dua penulis** (CI vs lokal) atas satu refresh token, **bukan** untuk memperbaiki token yang sudah kedaluwarsa.
@@ -167,11 +168,30 @@ Langkah pemeliharaan aman:
    gh variable set MAINTENANCE_MODE --body "false"
    # setelah >=3 siklus risk-monitor hijau dan Step Summary bersih dari kegagalan input:
    gh variable delete DRY_RUN                     # baru di sini order nyata bisa keluar
+   # mundur satu perintah, kapan saja:
+   gh variable set MAINTENANCE_MODE --body "true"
    ```
    Gerbang yang dipakai untuk memutuskan naik ke trading nyata: siklus `risk-monitor` hijau beruntun,
    `state_warm=true` dari `state_probe`, dan **tidak ada** agregat kegagalan input di Step Summary
    (voter LLM / kalender earnings / webhook riset). Selama masih ada input yang mati, hasil apa pun
    bukan bukti performansi strategi.
+
+   **Status 2026-11-20 18:27Z — `DRY_RUN` telah DILEPAS (sistem live).** Ini dilakukan dengan satu
+   penyimpangan sadar dari gerbang di atas, dan itu perlu tertulis, bukan dikubur: pada siklus
+   17:43Z `input_health` masih memuat `input.riset_webhook: html_or_unparsable`. Yang membuatnya
+   aman untuk tetap naik:
+   - kegagalan itu ada di **jalur BACA ulang** riset, bukan jalur pembuatannya — siklus yang sama
+     memanggil Qwen + Gemini (`200 OK`) dan kalender earnings (`crumb 200`), lalu menolak kandidat
+     karena **keputusan strategi** (`P5 >= 0.70`; `E5 req 1.77%/hari`), bukan karena data hilang;
+   - jalur baca sudah punya sumber kedua yang tahan-lama (gviz `Daily_Scans`), dan `reconcile_write`
+     sudah membuktikan `research_read_source` bisa `gviz`;
+   - **0 posisi terbuka** saat dilepas (`Open positions verified: []`), jadi tidak ada eksposur yang
+     langsung diurus dunia nyata;
+   - `WALT_WATCHDOG_DISPATCH_ENTRY` sengaja TIDAK diset: fallback watchdog untuk workflow entry
+     tetap alert-only, karena sejak `DRY_RUN` hilang, men-dispatch entry = meminta order nyata.
+   Yang masih harus diputuskan pemilik sebelum menyebut apa pun "performansi": ambang ekonomi E5
+   (lihat AUDIT §3k) — saat ini ia menolak SEMUA kandidat, jadi sistem live tetapi praktis tidak
+   membuka posisi pada funding 0.5–0.85%/hari.
 
 
 ---

@@ -659,6 +659,47 @@ bukan pilihan biner: langkah setelah probe kini `if: always() && ...`, dikunci t
 
 Suite: **303 → 339 test**.
 
+## 3k. Setelah dilepas ke live: yang menahan entry BUKAN funding, tapi biaya (temuan ekonomi 18:25Z)
+
+Siklus market-execute 17:43Z (post-(a)) adalah siklus paling sehat yang tercatat hari itu: Qwen +
+Gemini menjawab `200 OK`, kalender earnings `crumb` `200 OK`, ledger `ok`, dan keempat kandidat
+ditolak karena **keputusan**, bukan karena data hilang:
+
+```
+SKIP NVDA / NBIS / SPY: High Risk Catalyst (P5=0.73..0.82 >= 0.70)
+SKIP XAG:  gerbang ekonomi funding vs fee gagal (hold=24h, exp_funding=0.576%, cost=1.180%, req=1.770%)
+```
+
+Yang pertama kali saya salah baca: `cost=1.180%` membuat saya menduga gerbangnya salah faktor 100.
+Setelah `check_funding_vs_fee_gate` dibaca, implementasinya BENAR — `cost = 2 × taker(0.09%) +
+price_slippage`, dan `price_slippage` adalah nilai PER ASET dari bursa (~1.00% untuk XAG/ETH/BNB/AAVE),
+bukan konstanta. Yang salah adalah **alat koherensi saya sendiri**: ia memakai slippage tetap 0.03%
+dan karenanya menyatakan konfigurasi "KOHEREN" sementara engine nyata menolak segalanya. Diperbaiki
+dengan memanggil fungsi gerbang engine (bukan menyalin rumusnya), plus test yang membekukan angka
+produksi: `round_trip_cost(1.00%) == 0.0118` dan `e5_ambang(1.00%) == 0.0177`.
+
+Konsekuensi yang harus dibaca pemilik sebelum menyebut apa pun "performansi":
+
+| Slippage aset | Biaya round-trip | Funding/hari yang diminta E5 |
+|---|---|---|
+| 0.05% (optimistik, spread sempit) | 0.23% | ≥ 0.35% |
+| 1.00% (**teramati** di log) | 1.18% | ≥ 1.77% |
+
+Funding teramati pada siklus terakhir: 0.52–0.85%/hari. Artinya **pada biaya slippage 1%, tidak ada
+satu pun kandidat yang bisa lolos E5**, dan `min_funding_daily=0.50%/hari` tidak pernah menjadi
+pembatas — ambangnya selalu lebih longgar daripada E5, sehingga tidak pernah jadi yang menolak.
+Ini bukan bug yang bisa saya "perbaiki diam-diam": menaikkan nafsu
+entry = menurunkan margin keamanan, dan itu keputusan pemilik. Pilihan yang tersedia, dengan efeknya:
+
+1. Turunkan buffer E5 dari 1.5× (mis. 1.1×) → ambang 1.30% pada slip 1%; masih menolak semua kandidat hari ini.
+2. Gunakan slippage per-aset yang lebih jujur untuk aset likuid (BTC/ETH spread nyata jauh di bawah 1%) →
+   E5 jadi lolos untuk aset likuid, tetap menolak aset spread lebar. Ini yang paling mendekati maksud strategi.
+3. Naikkan `min_funding_daily` ≥ 1.8% → floor kembali punya arti, tetapi praktis tidak ada entry.
+4. Perpendek `expected_hold_hours` → menaikkan biaya efektif per unit funding, justru memperketat.
+
+Sampai salah satu diputuskan, sistem yang sudah live akan tetap membuka NOL posisi. Itu fakta yang
+perlu tertulis, bukan disimpulkan dari ketiadaan order.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 
