@@ -1,4 +1,4 @@
-name: Walt Risk Monitor (10-Min Smart Guard)
+﻿name: Walt Risk Monitor (10-Min Smart Guard)
 
 # Trigger resmi berasal dari Google Cloud Scheduler (memanggil workflow_dispatch).
 # Cron GitHub Actions dihapus untuk mencegah eksekusi dobel / terlambat berjam-jam.
@@ -11,6 +11,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: write  # [R7b] khusus keepalive watchdog (dispatch workflow di repo yang sama); tidak ada akses tulis contents
 
 jobs:
   monitor:
@@ -110,3 +111,19 @@ jobs:
           print(f"- **Gear:** market=`{s.get('market_gear', '-')}`, crypto=`{s.get('crypto_gear', '-')}`")
           print(f"- **State Warm (cache hit):** `{s.get('state_warm', 'tidak tercatat')}`")
           PY
+
+      # [R7b] Cron GitHub bukan jangkar yang bisa dipercaya (README §281; terbukti ~7 jam tanpa run
+      # `schedule` pada 2026-11-20). Risk Monitor adalah workflow paling sering jalan, jadi ia ikut
+      # menghidupkan watchdog. Self-throttled: hanya dispatch bila run watchdog > 50 menit.
+      - name: Keep watchdog alive
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAINTENANCE_MODE: ${{ vars.MAINTENANCE_MODE || 'false' }}
+          WATCHDOG_KEEPALIVE: ${{ vars.WATCHDOG_KEEPALIVE || 'true' }}
+        run: |
+          set -o pipefail
+          echo "### Keepalive watchdog" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          python3 -c "import sys; sys.path.insert(0, 'tools'); from watchdog_check import keep_watchdog_alive; raise SystemExit(keep_watchdog_alive())" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

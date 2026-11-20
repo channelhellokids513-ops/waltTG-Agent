@@ -1,4 +1,4 @@
-name: Walt Market Execute (24/7 Saham US & Komoditas)
+﻿name: Walt Market Execute (24/7 Saham US & Komoditas)
 
 # Trigger resmi berasal dari Google Cloud Scheduler (memanggil workflow_dispatch).
 # Cron GitHub Actions dihapus untuk mencegah eksekusi dobel / terlambat berjam-jam.
@@ -16,6 +16,7 @@ concurrency:
 
 permissions:
   contents: read
+  actions: write  # [R7b] khusus keepalive watchdog (dispatch workflow di repo yang sama); tidak ada akses tulis contents
 
 jobs:
   execute:
@@ -100,3 +101,19 @@ jobs:
           print(f"- **Market Gear:** `{s.get('market_gear', '-')}`")
           print(f"- **State Warm (cache hit):** `{s.get('state_warm', 'tidak tercatat')}`")
           PY
+
+      # [R7b] Salinan keepalive dari risk-monitor: kalau risk-monitor yang mati, watchdog tetap
+      # dihidupkan dari sini tiap 2 jam — ambang usia market-execute sendiri 5 jam, jadi jeda 2 jam
+      # masih aman untuk memeriksa yang lain.
+      - name: Keep watchdog alive
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAINTENANCE_MODE: ${{ vars.MAINTENANCE_MODE || 'false' }}
+          WATCHDOG_KEEPALIVE: ${{ vars.WATCHDOG_KEEPALIVE || 'true' }}
+        run: |
+          set -o pipefail
+          echo "### Keepalive watchdog" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          python3 -c "import sys; sys.path.insert(0, 'tools'); from watchdog_check import keep_watchdog_alive; raise SystemExit(keep_watchdog_alive())" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

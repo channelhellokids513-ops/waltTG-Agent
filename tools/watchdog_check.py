@@ -60,6 +60,11 @@ SPECS: list[dict] = [
 
 ACTIVE_STATES = ("queued", "in_progress", "waiting", "pending")
 
+# Keepalive (Ronde 7b): workflow entry menembak watchdog bila run terakhirnya lebih tua dari ini.
+# 50 menit < kadens cron 60 menit yang "dijanjikan", jadi dispatch hanya terjadi saat cron menguap.
+WATCHDOG_WORKFLOW = "watchdog.yml"
+WATCHDOG_KEEPALIVE_MIN = 50.0
+
 # Late binding: fungsi memakai RUNNER saat dipanggil (bukan saat modul di-import), sehingga test
 # bisa menyuntik tanpa menyentuh subprocess global. Default argumen yang mengikat subprocess.run
 # ketika definisi dibuat akan membuat stub test tidak efektif (dan sempat benar-benar memanggil gh).
@@ -217,6 +222,66 @@ def dispatch_workflow(workflow: str, run=None) -> str:
         return "dispatched"
     print(f"[warn] dispatch `{workflow}` gagal: {(getattr(proc, 'stderr', '') or '').strip()[:160]}")
     return "failed"
+
+
+def latest_run_age_minutes(workflow: str, now: datetime, run=None) -> float | None:
+    """Usia run TERBARU apa pun statusnya (bukan hanya `success`).
+
+    Dipakai untuk menentukan apakah watchdog masih HIDUP (sudah berjalan belum), bukan apakah
+    ia hijau. Run yang gagal tapi baru saja jalan tetap bukti Kehidupan; run sukses berumur 7 jam
+    bukan.
+    """
+    runs = _gh_json(
+        ["run", "list", "--workflow", workflow, "--limit", "5", "--json", "createdAt,updatedAt,status"],
+        run=run,
+    )
+    ages: list[float] = []
+    for r in runs:
+        ts_str = r.get("updatedAt") or r.get("createdAt")
+        if not ts_str:
+            continue
+        try:
+            dt = datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        ages.append(max(0.0, (now - dt).total_seconds() / 60.0))
+    return min(ages) if ages else None
+
+
+def keep_watchdog_alive(now: datetime | None = None, run=None) -> int:
+    """Dipanggil dari workflow entry untuk menjaga watchdog tetap berjalan.
+
+    Kenapa perlu (terukur, bukan asumsi): README §281 sudah mencatat cron GitHub bisa telat 7-8 jam
+    dan karena itu ENTRY ditembak Cloud Scheduler — tapi `watchdog.yml` sendiri masih bergantung pada
+    cron itu. Pada 2026-11-20 run `schedule` terakhir tercatat 09:55Z: ~7 jam tanpa satu pun
+    pemeriksaan. Cloud Scheduler pemilik berada di proyek GCP yang tidak bisa dijangkau dari repo
+    ini (0 job di semua proyek yang bisa diakses), jadi pemicu cadangan yang benar-benar kita kendali
+    = siklus workflow trading itu sendiri.
+
+    Throttle memakai USIA run watchdog terakhir (bukan menit pada jam dinding), sehingga tetap benar
+    bila kadens workflow berubah. Tidak pernah mengembalikan kode keluar != 0: kegagalan keepalive
+    tidak boleh menjatuhkan siklus trading yang sedang berjalan.
+    """
+    now = now or datetime.now(timezone.utc)
+    if (os.environ.get("MAINTENANCE_MODE") or "").strip().lower() == "true":
+        print("MAINTENANCE_MODE=true — keepalive watchdog dilewati.")
+        return 0
+    if (os.environ.get("WATCHDOG_KEEPALIVE") or "true").strip().lower() in ("0", "false", "no", "off"):
+        print("WATCHDOG_KEEPALIVE=false — keepalive watchdog dimatikan manual.")
+        return 0
+
+    usia = latest_run_age_minutes(WATCHDOG_WORKFLOW, now, run=run)
+    if usia is not None and usia < WATCHDOG_KEEPALIVE_MIN:
+        print(f"Watchdog terakhir berjalan {usia:.0f}m lalu (< {WATCHDOG_KEEPALIVE_MIN}m) — tidak perlu dispatch.")
+        return 0
+
+    alasan = "belum pernah ada run" if usia is None else f"terakhir {usia:.0f}m lalu"
+    print(f"Watchdog {alasan} — dispatch agar jaring pengaman tetap hidup.")
+    status = dispatch_workflow(WATCHDOG_WORKFLOW, run=run)
+    if status != "dispatched":
+        # Bukan kegagalan entry: dicatat agar terlihat di Step Summary / log.
+        print(f"[warn] keepalive watchdog status={status} — periksa `actions: write` pada job ini.")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

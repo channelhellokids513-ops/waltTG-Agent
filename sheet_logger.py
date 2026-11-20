@@ -1098,17 +1098,19 @@ def fetch_latest_research_from_sheet(
     Mengambil ringkasan riset terbaru per aset dari:
     1. Google Sheets Webhook via GET request (online/terpusat)
     2. File CSV audit lokal (offline fallback)
-    Mengabaikan riset yang lebih tua dari max_age_hours (default 6 jam).
+    Mengabaikan riset yang lebih tua dari `max_research_age_hours` (sumber default:
+    strategy_config.DEFAULT_RESEARCH_AGE_HOURS, terikat kadens daily-scan).
     """
     from llm_research import Research
+    from strategy_config import DEFAULT_RESEARCH_AGE_HOURS
     _set_research_source("")
     if max_age_hours is None:
         try:
             from strategy_config import load_strategy_config
-            max_age_hours = float(load_strategy_config().get("max_research_age_hours", 6.0))
+            max_age_hours = float(load_strategy_config().get("max_research_age_hours", DEFAULT_RESEARCH_AGE_HOURS))
         except Exception as e:
             log.warning(f"fetch_latest_research_from_sheet gagal baca max_research_age_hours ({type(e).__name__}): {e}")
-            max_age_hours = 6.0
+            max_age_hours = DEFAULT_RESEARCH_AGE_HOURS
 
     url = _normalize_webhook_url(webhook_url or os.environ.get("GOOGLE_SHEET_WEBHOOK_URL", DEFAULT_WEBHOOK_URL))
     if not url:

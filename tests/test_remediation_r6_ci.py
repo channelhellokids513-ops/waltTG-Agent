@@ -41,18 +41,52 @@ def _env_of_run_steps(wf: dict) -> dict:
 # ---------------------------------------------------------------------------
 # 1) permissions eksplisit di 7 workflow + tidak ada uses bertag
 # ---------------------------------------------------------------------------
+# Workflow yang DIIZINKAN memegang scope lebih dari `contents: read`, dengan alasan dan ruang
+# lingkup. Daftar putih (bukan pelonggaran global) supaya workflow baru yang meminta scope aneh
+# tetap merah, dan scope yang sudah ada tidak bisa diam-diam melebar.
+PERMISSIONS_ALLOWLIST = {
+    # watchdog dispatch workflow lain sebagai fallback -> butuh actions: write
+    "watchdog.yml": {"actions": "write", "contents": "read"},
+    # [R7b] keepalive: risk-monitor & market-execute menembak watchdog.yml karena cron GitHub
+    # terbukti bisa menguap ~7 jam (2026-11-20) dan Cloud Scheduler pemilik tak terjangkau repo.
+    "risk-monitor.yml": {"actions": "write", "contents": "read"},
+    "market-execute.yml": {"actions": "write", "contents": "read"},
+}
+
+
 def test_semua_workflow_punya_blok_permissions_eksplisit():
     files = sorted(glob.glob(WORKFLOW_GLOB))
     assert len(files) == 7, f"diharapkan 7 workflow, dapat {len(files)}"
     for f in files:
         wf = _load(f)
         assert "permissions" in wf, f"{f}: blok permissions tidak ada (token mewarisi default)"
-        if f.endswith("watchdog.yml"):
-            assert wf["permissions"] == {"actions": "write", "contents": "read"}
-        else:
-            assert wf["permissions"] == {"contents": "read"}, (
-                f"{f}: scope lain selain contents: read tidak diizinkan ronde ini"
-            )
+        nama = f.split("\\")[-1].split("/")[-1]
+        diharapkan = PERMISSIONS_ALLOWLIST.get(nama, {"contents": "read"})
+        assert wf["permissions"] == diharapkan, (
+            f"{nama}: permissions {wf['permissions']} != {diharapkan} "
+            f"(tambah ke PERMISSIONS_ALLOWLIST hanya dengan alasan, jangan perlebar global)"
+        )
+
+
+def test_hanya_workflow_yang_punya_langkah_dispatch_yang_memegang_actions_write():
+    """Kunci arah sebaliknya: scope `actions: write` harus benar-benar dipakai, bukan sisa izin.
+
+    Dispatch bisa terjadi langsung (`gh workflow run ...`) atau lewat tool yang dipanggil langkah itu
+    (watchdog dispatch di dalam `tools/watchdog_check.py`), jadi sumber tool ikut dibaca.
+    """
+    root = Path(__file__).resolve().parent.parent
+    for nama, scope in PERMISSIONS_ALLOWLIST.items():
+        if scope.get("actions") != "write":
+            continue
+        wf = yaml.safe_load((root / ".github" / "workflows" / nama).read_text(encoding="utf-8"))
+        steps = next(iter(wf["jobs"].values()))["steps"]
+        teks = "\n".join((s.get("run") or "") for s in steps)
+        alat = re.findall(r"tools/([a-z_]+\.py)", teks)
+        isi = "".join((root / "tools" / a).read_text(encoding="utf-8") for a in alat)
+        terbukti = any(p in (teks + isi) for p in ("workflow run", "dispatch_workflow", "keep_watchdog_alive"))
+        assert terbukti, (
+            f"{nama}: memegang actions: write tanpa langkah dispatch yang terbukti — cabut scope-nya"
+        )
 
 
 def test_semua_uses_sudah_di_pin_sha_dengan_komentar_versi():

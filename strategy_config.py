@@ -20,6 +20,16 @@ log = logging.getLogger("strategy_config")
 STRATEGY_CONFIG_FILE = Path("logs") / "strategy_config.json"
 SHARED_STRATEGY_VAR_NAME = "STRATEGY_CONFIG_JSON"
 
+# Kadens daily-scan di Cloud Scheduler (0 0,12 * * *) = 12 jam. Dituliskan di sini karena JENDELA
+# KEGUNAAN RISET wajib mengikutinya: dengan jendela lebih kecil dari kadens, riset hasil scan
+# sendiri dianggap basi sebelum siklus berikutnya tiba — market/crypto-execute SKIP "riset basi"
+# selama sisa hari. Dibuktikan CI 16:57Z: riset terbaru 16,7 jam, jendela 6 jam -> 0 aset terpakai.
+DAILY_SCAN_CADENCE_HOURS = 12.0
+
+# Satu sumber untuk jendela riset: dipakai default config, fallback pembacaan sheet, dan test
+# koherensi. Kalau suatu hari kadens scan diubah, nilai ini ikut dihitung ulang — bukan disalin.
+DEFAULT_RESEARCH_AGE_HOURS = DAILY_SCAN_CADENCE_HOURS + 1.0
+
 DEFAULT_STRATEGY_CONFIG: dict[str, Any] = {
     "default_sl_pct": 0.015,        # 1.5%
     "tp_calm_pct": 0.020,           # 2.0% (ETF & Crypto)
@@ -28,7 +38,8 @@ DEFAULT_STRATEGY_CONFIG: dict[str, Any] = {
     "reentry_cooldown_hours": 3.0,  # 3 jam
     "max_slots_cap": 15,            # batas atas slot elastis
     "max_p5_risk": 0.70,            # E2: P5_risk_catalysts >= 0.70 -> SKIP
-    "max_research_age_hours": 6.0,  # E3: abaikan riset lebih lama dari 6 jam
+    # E3: jendela riset = kadens scan + margin 1 jam (lihat DAILY_SCAN_CADENCE_HOURS di atas).
+    "max_research_age_hours": DEFAULT_RESEARCH_AGE_HOURS,
     "max_entries_per_asset_24h": 2, # E4: maks 2 entry per aset per 24 jam
     "max_entries_per_day": 8,       # E4: maks 8 entry total per 24 jam
     "daily_loss_limit_pct": 0.05,   # E4: circuit breaker turun >= 5% dari ekuitas awal hari UTC
