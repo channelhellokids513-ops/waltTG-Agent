@@ -342,11 +342,17 @@ def main() -> int:
         measured = [name for name, item in (("A", summary_a), ("B", summary_b), ("C", summary_c))
                     if item.get("stats") or item.get("measured")]
         print(f"Terukur: {', '.join(measured) if measured else 'TIDAK ADA - jangan ganti asumsi apa pun.'}")
-        if "C" in measured:
-            print("Langkah berikutnya: substitusikan slippage TERUKUR ke simulasi "
+        if "C" in measured and summary_c.get("lag_hours", {}).get("median", 99) <= 1.0:
+            print("Langkah berikutnya: substitusikan slippage TERUKUR (jeda <= 1 jam) ke simulasi "
                   "(tools/gravity_strategy.py dan rr_scan) sebelum menyentuh parameter live.")
         else:
-            print("Langkah berikutnya: belum ada hak mengubah angka biaya di simulasi.")
+            print("Langkah berikutnya: slippage MURNI masih BELUM terukur - bagian C mencampur")
+            print("  harga fill dengan harga keputusan yang bisa berjarak berjam-jam, jadi itu")
+            print("  batas atas, bukan slippage. Untuk mengukurnya: catat latest_rate tepat sebelum")
+            print("  execute dan bandingkan dengan avg_fill_price respons order (butuh 1 order nyata).")
+            print("  Belum ada hak mengubah angka biaya di simulasi berdasarkan bagian C.")
+        print("Yang SUDAH terukur dan boleh dipakai: fee round-trip = 2 x TAKER_FEE_PER_SIDE, dan")
+        print("carry nyata account (bagian B). Keduanya angka akun, bukan asumsi.")
         print("Tidak ada yang ditulis: tidak ledger, tidak sheet, tidak order.")
         return 0
     except ReadOnlyViolation as exc:

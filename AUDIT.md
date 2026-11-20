@@ -881,6 +881,47 @@ semua entry ini. Jadi keputusan sebenarnya bukan "TP/SL berapa" melainkan **apak
 sebuah entry boleh dibuka karena tepi struktural yang terukur, atau hanya karena carry**.
 Itu keputusan pemilik, dan §10 STRATEGY sudah diperbarui untuk menanyakannya secara eksplisit.
 
+## 3o. Biaya diukur dari akun sendiri — contract_economics (2026-11-21, permintaan pemilik)
+
+**Alat & jalur.** `tools/contract_economics.py` + mode CI `diagnostics.yml oauth_step=
+contract_economics`. Read-only ditegakkan di kode (`perps_execute_operation` DAN kedua
+`perps_prepare_*` ada di daftar hitam; tool tak terdaftar juga ditolak) dan dites.
+Rotasi OAuth + auto-sync terbukti pada dua run nyata: `PUT .../WALT_REFRESH_TOKEN -> 204`
+lalu `Walt Risk Monitor` 23:10:02 tetap **success** — tidak ada balapan yang merusak
+kredensial. (Job diagnostics sendiri berstatus failure karena langkah *Research read probe*
+yang sudah lama merah akibat stub Apps Script, bukan karena alat ini.)
+
+**A. Slippage yang bursa nyatakan = 139 kontrak, median/p10/p90/min = 1,000%, maks 2,000%.**
+`p10 == p90` berarti nilainya seragam persis — tanda **konstanta DEFAULT**, bukan pengukuran
+per aset. Jadi angka 1,18% yang dipakai semua simulasi kita selama ini = mengadopsi asumsi
+bursa apa adanya. Kecocokan dengan konstanta orang lain bukan bukti, dan alatnya sekarang
+mencetak peringatan itu sendiri.
+
+**B. CARRY NYATA — temuan yang paling consequential.** Dari 51 posisi tertutup dengan
+funding + margin + durasi terbaca (1 tidak lengkap, bukan dibuang diam-diam):
+**median 0,0665%/hari dari notional** (p10 0,0000%, p90 0,1851%, maks 0,6261%);
+0,1331%/hari dari margin. Asumsi yang saya pakai di §3l dan di seluruh simulasi gravity
+adalah **0,52%/hari** → rasio **0,13×**, terlalu besar **~8×**.
+*Koreksi atas klaim saya sendiri di §3l:* "carry menurunkan win rate yang dibutuhkan secara
+signifikan" memakai funding harian pasar, bukan carry akun kita. Pada tahan 4,6 hari relief
+carry nyata hanya ~0,31% notional ≈ **0,03R** pada stop 10,87% — bukan 0,35R seperti yang
+saya tulis tadi pagi. Kabar baiknya: angka walk-forward **+0,075R net@1,18% tidak berubah**,
+karena simulasi itu memang tidak memasukkan carry. Yang batal adalah argumen bahwa carry
+bisa menyelamatkan strategi ber-EV tipis.
+
+**C. Deviasi fill vs harga keputusan: median 0,793%, p90 3,430%, maks 8,008% (signed median
+−0,292%), n=34 pasangan — dan angka ini TIDAK BOLEH dipakai sebagai slippage.** Jeda
+scan→fill yang ikut terukur: **median 1,52 jam, p90 21,5 jam, maks 35,95 jam**. Selisih
+sebesar itu didominasi drift pasar selama jeda, bukan biaya eksekusi. Bagian C sekarang
+mencetak penolakannya sendiri. **Slippage murni masih belum terukur**; satu-satunya jalan
+mengukurnya adalah mencatat `latest_rate` tepat sebelum `execute` dan membandingkannya
+dengan `avg_fill_price` dari satu order nyata — itu menuntut satu order sungguhan dan karena
+itu bukan pekerjaan read-only.
+
+**Yang boleh dipakai mulai sekarang:** fee round-trip (dari `TAKER_FEE_PER_SIDE`, presisi)
+dan carry akun yang nyata (0,0665%/hari). **Yang belum:** slippage — tetap 1,00% sebagai
+pernyataan bursa, diberi label "asumsi venue", bukan "terukur".
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 

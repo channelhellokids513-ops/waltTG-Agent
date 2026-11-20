@@ -365,14 +365,18 @@ ini. Angka-angkanya berasal dari `tools/gravity_strategy.py` (in-sample, 20 koin
 | Stop | ekstrem sweep **+/- 1,0 ATR(14)** di luar sisi yang tersapu | buffer ini yang DIPILIH jendela latih di kelima fold walk-forward; jarak stop rata-rata 10,87% |
 | Target | **1x jarak stop** (BUKAN 3R, BUKAN magnet seberang) | grossR +0,207R out-of-sample; R3 tetap negatif |
 | Durasi | biarkan bekerja ~5 bar; jangan memaksa target jauh | rata-rata tahan 4,6 bar (out-of-sample) |
-| Carry | hanya bila sisi posisi MENANGKAR funding (gerbang E5 tetap berlaku) | +0,35R pada 0,52%/hari x 2,2 hari |
+| Carry | hanya bila sisi posisi MENANGKAR funding (gerbang E5 tetap berlaku) | terukur 0,0665%/hari dari notional (bukan 0,52% yang semula diasumsikan) -> relief ~0,03R, praktis kecil |
 
 ### 10.2 Status dua syarat sebelum ini menyentuh order
 
-1. **BELUM SELESAI - ukur biaya round-trip nyata** (`tools/contract_economics.py`, belum
-   ditulis; butuh satu rotasi OAuth). Walk-forward masih positif pada biaya terburuk
-   (+0,075R), jadi keputusannya bukan lagi "hidup atau mati" - tetapi BESARNYA tepi
-   bergantung padanya (+0,187R bila biaya nyata mendekati fee saja).
+1. **SEBAGIAN SELESAI - `tools/contract_economics.py` sudah jalan dari CI (read-only,
+   read-only ditegakkan + dites).** Terukur dari akun sendiri: carry nyata **0,0665%/hari**
+   (bukan 0,52% yang saya pakai di simulasi sebelumnya - terlalu besar ~8x), dan slippage
+   yang bursa nyatakan = 1,00% **seragam di 139 kontrak** (p10==p90 => konstanta default,
+   bukan pengukuran). Deviasi fill-vs-keputusan (median 0,793%) TIDAK dipakai: jeda
+   scan->fill median 1,52 jam / p90 21,5 jam, jadi itu drift, bukan slippage. **Slippage
+   murni masih belum terukur** dan satu-satunya cara mengukurnya butuh satu order nyata.
+   Rinciannya di AUDIT 3o.
 2. **SELESAI, dengan catatan** - `tools/gravity_walkforward.py` (5 fold, purge 12 bar,
    parameter dipilih ulang di jendela latih tiap fold): 1.727 trade out-of-sample,
    win 74,9%, gross +0,207R, net@1,18% **+0,075R**, positif di kelima fold, pilihan
