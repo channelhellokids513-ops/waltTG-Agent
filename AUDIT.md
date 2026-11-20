@@ -40,6 +40,12 @@ sama dan juga sudah mati). Penyebabnya adalah keputusan saya di Item 4 ronde ini
 suara. Posisi terbuka nol (`positions_checked: 0` pada run success terakhir), jadi tidak ada proteksi
 trailing yang sedang tertunda karena kill-switch ini.
 
+**Per 12:10 UTC:** operasi bursa MASIH mati (butuh `setup_walt_oauth.py` oleh pemilik — lihat §3d),
+tapi jalur baca ledger SUDAH HIDUP di kedua dunia: pemilik memberi akses *Viewer* dan secret
+`GOOGLE_SHEET_ID` di CI ternyata menunjuk sheet yang salah (sudah dikoreksi). `diagnostics.yml` kini
+mencetak probe sheet + `stats` **sebelum** langkah bursa, jadi laporan performansi tetap keluar
+walaupun token mati (#44733612689: dua langkah pertama success, langkah bursa failure).
+
 Pemulihan (butuh interaksi pemilik, tidak bisa saya kerjakan):
 
 ```powershell
@@ -229,8 +235,27 @@ Total Trade Valid: 2 (Win: 2 | Loss: 0) | UNKNOWN: 6
 `test_census_breakeven_riil_bukan_baris_diragukan` dan
 `test_stats_tetap_menghitung_impas_dari_fill` mengunci sisi itu; 211 test hijau.
 
-**Kesimpulan yang harus dibaca orang lain dengan jujur:** dengan 2 trade terukur, 6 UNKNOWN, dan
-35 penutupan yang tidak ada di ledger sama sekali, **performa strategi saat ini BELUM TERUKUR**.
+**Terverifikasi di CI setelah secret dikoreksi** (#44733612689, 2026-11-20T12:10:47Z — langkah
+`Sheet read probe` dan `Ledger stats` **success**, hanya langkah bursa yang gagal karena token mati):
+
+```
+Sheet fingerprint: sha8=06bded7f length=44 (ID tidak pernah dicetak)
+Sumber ledger: ok | PnL terukur: 2 | belum terukur (backfill bursa): 0 | diragukan (PnL=0 tanpa sumber harga): 9
+Total Trade Valid: 2 (Win: 2 | Loss: 0) | UNKNOWN: 6
+```
+
+Ini membalikkan keadaan brief ronde 6: kalimat "LEDGER TIDAK TERTBACA" masih ada di kode (dan akan
+kembali muncul kalau sheet/secret bermasalah), tapi hari ini `stats` di CI **membaca sumber asli**
+tanpa menyentuh OAuth. Konsekuensi yang harus dibaca dingin: perubahan ekuitas yang tercatat
+`PnL_Tracker` pada periode ini ≈ **-2,05%** dari saldo awal (4 baris harian), sedangkan `Net PnL`
+hasil kalkulasi hanya **+$0,0356** karena ia cuma menutupi 2 trade terukur — selisihnya adalah 35
+penutupan yang tidak ada di ledger + 9 baris nol-tanpa-sumber. **Itu bukan bug kalkulasi, itu
+lubang data.** Ronde 7 tidak boleh menyimpulkan apa pun tentang kualitas strategi sebelum lubang ini
+ditutup (`reconcile_history --write` setelah kredensial pulih), dan baris-warisan `diragukan`
+dipertahankan apa adanya — tidak diedit senyap.
+
+
+**Ringkasan akhir:** dengan 2 trade terukur, 6 UNKNOWN, dan 35 penutupan yang tidak ada di ledger sama sekali, **performa strategi saat ini BELUM TERUKUR**.
 Perubahan ekuitas periode berjalan (± -2% dari saldo awal) juga tidak bisa dijajarkan dengan
 `Net PnL` laporan, karena estimasi fee kini hanya menutupi trade terukur. Ronde 7 (strategi market)
 **wajib** dimulai dari kelengkapan riwayat, bukan dari tuning SL/TP: jalankan
