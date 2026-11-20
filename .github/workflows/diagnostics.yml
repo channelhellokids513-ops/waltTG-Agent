@@ -15,6 +15,7 @@ on:
           - dump_closed
           - reconcile_history
           - reconcile_write
+          - contract_economics
           - read_only
 
 concurrency:
@@ -119,6 +120,27 @@ jobs:
           { echo "### 2. \`dump_closed\` Schema + pengukuran riwayat bursa"; echo '```json'; python walt_bot.py dump_closed | tee -a "$GITHUB_STEP_SUMMARY" | tee /dev/stderr; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       # R6-1 lanjutan: baseline riwayat closed bursa vs ledger, TANPA menulis apa pun (--write tetap manual).
+      # Ronde 8: ukur BIAYA ROUND-TRIP NYATA. Read-only: hanya list_contracts /
+      # list_positions; execute DAN prepare diblok oleh alatnya sendiri (dites di
+      # tests/test_contract_economics.py), jadi tidak ada jalur dari UI ini ke order.
+      - name: Contract economics measurement (butuh OAuth; read-only, tidak menulis apa pun)
+        if: always() && github.event.inputs.oauth_step == 'contract_economics'
+        env:
+          WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}
+          WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
+          GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SHEET_WEBHOOK_URL: ${{ secrets.GOOGLE_SHEET_WEBHOOK_URL }}
+          GH_PAT: ${{ secrets.GH_PAT || secrets.GH_PATH || secrets.GITHUB_PAT || secrets.PAT }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}
+          LOG_REDACT: "true"
+          WALT_TOKEN_SYNC: "on"  # refresh OAuth membakar token single-use => wajib menulis balik
+        run: |
+          set -o pipefail
+          { echo "### 2. contract_economics - biaya round-trip terukur (read-only)"; echo '```text'; } >> "$GITHUB_STEP_SUMMARY"
+          python tools/contract_economics.py | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Ledger reconciliation dry-run (butuh OAuth; tidak menulis berkas)
         if: always() && github.event.inputs.oauth_step == 'reconcile_history'
         env:

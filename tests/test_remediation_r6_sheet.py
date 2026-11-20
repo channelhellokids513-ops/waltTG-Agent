@@ -348,20 +348,29 @@ def test_diagnostics_hanya_satu_langkah_yang_menyentuh_oauth():
     wf = yaml.safe_load(raw)
     steps = next(iter(wf["jobs"].values()))["steps"]
     token_steps = [s for s in steps if "WALT_REFRESH_TOKEN" in (s.get("env") or {})]
-    assert len(token_steps) == 3, (
-        "diagnostics punya dump_closed + reconcile_history (dry-run) + reconcile_write (mirror) "
-        "— ketiganya saling eksklusif lewat input `oauth_step`"
+    assert len(token_steps) >= 3, (
+        "diagnostics paling tidak punya dump_closed + reconcile_history (dry-run) + "
+        "reconcile_write (mirror); setiap mode OAuth baru harus menambah satu langkah"
     )
 
     conds = [s.get("if") for s in token_steps]
     assert all(conds), "setiap langkah ber-OAuth wajib dipagar `if:` (satu token per job)"
-    assert len(set(conds)) == len(conds), "kondisi `if:` harus berbeda -> tidak mungkin jalan bersamaan"
+
+    # Yang ditegakkan bukan jumlah langkah (itu akan busuk tiap mode baru), melainkan
+    # SIFAT-nya: tiap langkah OAuth digerbang oleh SATU nilai oauth_step, dan nilainya
+    # berbeda antar langkah -> tidak mungkin dua langkah membakar token dalam satu job.
+    gates = set()
+    for step in token_steps:
+        condition = step["if"]
+        assert condition.count("oauth_step ==") == 1, (step["name"], condition)
+        gates.add(condition.split("oauth_step == '")[1].split("'")[0])
+    assert len(gates) == len(token_steps), "dua langkah OAuth berbagi pagar yang sama"
+    assert {"dump_closed", "reconcile_history", "reconcile_write", "contract_economics"} <= gates
 
     inputs = wf[True]["workflow_dispatch"]["inputs"]["oauth_step"]
     assert inputs["default"] == "dump_closed", "default harus langkah yang sudah terbukti aman"
-    assert set(inputs["options"]) == {
-        "dump_closed", "reconcile_history", "reconcile_write", "read_only"
-    }
+    assert set(inputs["options"]) >= gates, "setiap pagar OAuth harus ada di daftar pilihan"
+    assert "read_only" in inputs["options"]
 
     # R7: pagar diubah dari `!= 'reconcile_history'` menjadi `== 'dump_closed'`. Bentuk negasi itu
     # diam-diam menjalankan LANGKAH BER-OAUTH untuk mode ketiga (`read_only`), yang akan membakar
