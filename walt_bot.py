@@ -4479,34 +4479,48 @@ def build_backfill_rows(closed_positions: list[dict]) -> list[dict]:
     return rows
 
 
-def _recorded_closed_ids_from_sheet() -> tuple[set[str], str]:
-    """Position ID yang SUDAH ada di sheet `Closed_Positions` (sumber ledger tahan-lama).
+def _recorded_closed_ids_from_sheet() -> tuple[set[str], set[str], str]:
+    """(position_id, kunci_identitas_cadangan, status) dari sheet `Closed_Positions`.
 
     Kenapa perlu: `reconcile_history` dulu hanya dedupe terhadap CSV lokal + closed_ids.json.
     Di CI, CSV itu berasal dari Actions cache yang bisa ter-eviksi, sedangkan mirror backfill
-    justru MENULIS ke sheet. Dedupe tanpa membaca sheet = risiko baris duplikat permanen di
-    ledger performansi. Status baca dikembalikan supaya kegagalan gviz TIDAK dianggap "sheet
-    kosong" (prinsip: tidak ada data = None/status, bukan nol).
+    justru MENULIS ke sheet. Tersensus 17:54Z: sheet berisi 17 baris tapi cuma 6 yang punya
+    Position ID -> dedupe berbasis id buta terhadap 11 sisanya.
+    Status ikut dikembalikan supaya kegagalan baca TIDAK dianggap "sheet kosong"
+    (prinsip: tidak ada data = None/status, bukan nol).
     """
     try:
         from sheet_logger import (
+            close_identity_keys,
             fetch_sheet_csv_rows_ex,
             resolve_closed_positions_columns,
         )
     except Exception as e:  # pragma: no cover - jalur impor
-        return set(), f"import_failed:{type(e).__name__}"
+        return set(), set(), f"import_failed:{type(e).__name__}"
     rows, status = fetch_sheet_csv_rows_ex("Closed_Positions", expected_col_name="Asset")
     if status not in ("ok", "local_csv") or not rows:
-        return set(), status
+        return set(), set(), status
     try:
         col_map, data_rows, _fallback = resolve_closed_positions_columns(rows)
     except Exception as e:  # pragma: no cover
-        return set(), f"parse_failed:{type(e).__name__}"
-    idx = col_map.get("position id")
-    if idx is None:
-        return set(), "no_position_id_col"
-    ids = {str(r[idx]).strip() for r in data_rows if len(r) > idx and str(r[idx]).strip()}
-    return ids, status
+        return set(), set(), f"parse_failed:{type(e).__name__}"
+
+    def sel(r, kunci):
+        i = col_map.get(kunci)
+        return r[i] if i is not None and len(r) > i else ""
+
+    id_idx = col_map.get("position id")
+    ids: set[str] = set()
+    keys: set[str] = set()
+    for r in data_rows:
+        pid = str(r[id_idx]).strip() if id_idx is not None and len(r) > id_idx else ""
+        if pid:
+            ids.add(pid)
+        else:
+            keys.update(close_identity_keys(
+                sel(r, "asset"), sel(r, "side"), sel(r, "entry price ($)"),
+            ))
+    return ids, keys, status
 
 
 def reconcile_history(
@@ -4537,7 +4551,7 @@ def reconcile_history(
     if limit is not None:
         rows = rows[: max(0, int(limit))]
 
-    sheet_ids, sheet_status = _recorded_closed_ids_from_sheet()
+    sheet_ids, sheet_keys, sheet_status = _recorded_closed_ids_from_sheet()
     if mirror_sheet and sheet_status != "ok":
         # Mirror = menulis ke sheet. Kalau isi sheet tidak bisa dibaca, dedupe tidak mungkin
         # dilakukan dan menulis = berjudi dengan baris duplikat permanen di ledger performansi.
@@ -4553,14 +4567,27 @@ def reconcile_history(
             "written": 0,
             "mirrored_ke_sheet": 0,
             "backup": None,
-            "sheet_dedupe": {"status": sheet_status, "sudah_ada_di_sheet": 0, "sumber": "gviz Closed_Positions"},
+            "sheet_dedupe": {"status": sheet_status, "punya_position_id": 0, "kunci_cadangan": 0,
+                             "sumber": "gviz Closed_Positions"},
             "completeness_verdict": measurement["completeness_verdict"],
         }
         log.warning(summary_abort["aborted"])
         return summary_abort
 
-    existing = _fetch_recorded_closed_ids(csv_path) | set(_load_closed_ids(ids_path)) | sheet_ids
-    candidates = [r for r in rows if r["position_id"] not in existing]
+    from sheet_logger import close_identity_keys
+
+    def _sudah_tercatat(row: dict[str, Any]) -> bool:
+        if row["position_id"] in sheet_ids:
+            return True
+        return bool(set(close_identity_keys(row.get("asset"), row.get("side"), row.get("entry_price")))
+                    & sheet_keys)
+
+    existing = _fetch_recorded_closed_ids(csv_path) | set(_load_closed_ids(ids_path))
+    candidates = [r for r in rows if r["position_id"] not in existing and not _sudah_tercatat(r)]
+    kena_kunci = sum(
+        1 for r in rows
+        if r["position_id"] not in existing and _sudah_tercatat(r)
+    )
 
     summary: dict[str, Any] = {
         "mode": "write" if write else "dry_run",
@@ -4569,7 +4596,9 @@ def reconcile_history(
         "already_recorded": len(rows) - len(candidates),
         "sheet_dedupe": {
             "status": sheet_status,
-            "sudah_ada_di_sheet": len(sheet_ids),
+            "punya_position_id": len(sheet_ids),
+            "kunci_cadangan": len(sheet_keys),
+            "dicocokkan_kunci_cadangan": kena_kunci,
             "sumber": "gviz Closed_Positions",
         },
         "candidates_to_add": len(candidates),

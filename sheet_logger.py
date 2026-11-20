@@ -1088,6 +1088,31 @@ def fetch_latest_research_from_gviz(
     return researches, "ok" if researches else "empty"
 
 
+def close_identity_keys(asset: Any, side: Any, entry: Any) -> list[str]:
+    """Kunci identitas cadangan untuk baris `Closed_Positions` tanpa Position ID.
+
+    Mengembalikan [aset|sisi|harga, aset|harga] — varian TANPA sisi dibutuhkan karena 11 baris
+    warisan (tersensus 2026-11-20 17:58Z) tidak punya Position ID, tidak punya `Side`, dan tidak
+    punya `Opened At (exchange)`; kunci berbasis waktu/sisi tidak akan pernah cocok untuk mereka.
+
+    Arah galat dipilih sengaja: kalau ragu, anggap SUDAH tercatat. Menulis baris ledger ganda
+    merusak pengukuran performansi secara senyap, sedangkan melewatkan satu baris hanya membuat
+    angka tetap tidak lengkap — dan ketidaklengkapan itu dilaporkan, bukan disembunyikan.
+    """
+    a = str(asset or "").strip().upper()
+    s = str(side or "").strip().upper()
+    try:
+        e = round(float(str(entry).replace(",", "")), 4)
+    except (TypeError, ValueError):
+        return []
+    if not a:
+        return []
+    keys = [f"{a}|{e:.4f}"]
+    if s:
+        keys.insert(0, f"{a}|{s}|{e:.4f}")
+    return keys
+
+
 def fetch_latest_research_from_sheet(
     webhook_url: Optional[str] = None,
     csv_path: str = "logs/scan_history.csv",

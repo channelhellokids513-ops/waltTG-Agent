@@ -38,14 +38,25 @@ class FakeClient:
 
 
 def _payload(n: int, prefix: str = "POS"):
+    """Bentuk payload memakai NAMA KUNCI bursa sebenarnya (dibaca dari build_backfill_rows),
+    bukan nama internal — supaya test menguji jalur nyata."""
     out = []
     for i in range(n):
         out.append({
-            "position_id": f"{prefix}{i}", "contract_id": 100 + i, "base_asset": f"AS{i}",
-            "side": "SHORT" if i % 2 else "LONG", "entry_price": "100.0", "margin": "2.50",
-            "leverage": 2, "opened_at": f"2026-11-1{i}T07:00:00Z",
-            "closed_at": f"2026-11-1{i}T09:00:00Z", "funding_quote": f"{0.5 + i:.6f}",
-            "status": "closed", "realized_pnl": None, "exit_price": None,
+            "position_id": f"{prefix}{i}",
+            "contract_id": 100 + i,
+            "contract_name": f"AS{i}-USDT-PERPETUAL",
+            "contract_base_asset": f"AS{i}",
+            "side": "SHORT" if i % 2 else "LONG",
+            "avg_entry_price": f"{100 + i}.5",
+            "margin_quote": "2.50",
+            "leverage": 2,
+            "created_at": f"2026-11-1{i}T07:00:00Z",
+            "updated_at": f"2026-11-1{i}T09:00:00Z",
+            "funding_paid_quote": f"{0.5 + i:.6f}",
+            "status": "closed",
+            "realized_pnl": None,
+            "exit_price": None,
         })
     return out
 
@@ -89,7 +100,7 @@ def test_id_sheet_dipakai_menimbang_kandidat(tmp_path, monkeypatch):
     kunci = [r["position_id"] for r in walt_bot.build_backfill_rows(payload)]
     sudah_di_sheet = {kunci[1]}
     monkeypatch.setattr(
-        walt_bot, "_recorded_closed_ids_from_sheet", lambda: (sudah_di_sheet, "ok")
+        walt_bot, "_recorded_closed_ids_from_sheet", lambda: (sudah_di_sheet, set(), "ok")
     )
     csv_path, ids_path = tmp_path / "c.csv", tmp_path / "i.json"
     out = walt_bot.reconcile_history(
@@ -97,14 +108,14 @@ def test_id_sheet_dipakai_menimbang_kandidat(tmp_path, monkeypatch):
         csv_path=str(csv_path), closed_ids_path=str(ids_path),
     )
     assert out["candidates_to_add"] == 2 and out["written"] == 2
-    assert out["sheet_dedupe"] == {"status": "ok", "sudah_ada_di_sheet": 1, "sumber": "gviz Closed_Positions"}
+    assert out["sheet_dedupe"] == {"status": "ok", "punya_position_id": 1, "kunci_cadangan": 0, "dicocokkan_kunci_cadangan": 1, "sumber": "gviz Closed_Positions"}
     ids_di_csv = [r[10] for r in _csv_rows(csv_path)[1:]]
     assert kunci[1] not in ids_di_csv and kunci[0] in ids_di_csv
 
 
 def test_webhook_hanya_untuk_mirror(tmp_path, monkeypatch):
     """write biasa = ledger lokal; hanya --mirror-sheet yang boleh mengirim webhook."""
-    monkeypatch.setattr(walt_bot, "_recorded_closed_ids_from_sheet", lambda: (set(), "ok"))
+    monkeypatch.setattr(walt_bot, "_recorded_closed_ids_from_sheet", lambda: (set(), set(), "ok"))
     dipanggil: list[bool] = []
 
     def fake_log_close(**kw):
@@ -130,19 +141,19 @@ def test_dedupe_sheet_membaca_posisi_kolom_position_id(monkeypatch):
     monkeypatch.setattr(sheet_logger, "fetch_sheet_csv_rows_ex",
                         lambda name, **kw: ([header] + baris, "ok"))
     monkeypatch.setenv("GOOGLE_SHEET_ID", "id-uji-bukan-nyata")
-    ids, status = walt_bot._recorded_closed_ids_from_sheet()
+    ids, keys, status = walt_bot._recorded_closed_ids_from_sheet()
     assert status == "ok" and ids == {"LAMA-1", "LAMA-2"}
 
 
 def test_gagal_baca_sheet_dikembalikan_sebagai_status_bukan_himpunan_kosong_saja(monkeypatch):
     monkeypatch.setattr(sheet_logger, "fetch_sheet_csv_rows_ex", lambda name, **kw: ([], "http_error"))
-    ids, status = walt_bot._recorded_closed_ids_from_sheet()
-    assert ids == set() and status == "http_error", "panggilan harus bisa BEDAKAN kosong vs gagal"
+    ids, keys, status = walt_bot._recorded_closed_ids_from_sheet()
+    assert ids == set() and keys == set() and status == "http_error", "panggilan harus bisa BEDAKAN kosong vs gagal"
 
 
 def test_idempoten_saat_sheet_terbaca(tmp_path, monkeypatch):
     """Jalankan kedua setelah mirror harus nol delta — bukti guard dedupe benar-benar bekerja."""
-    monkeypatch.setattr(walt_bot, "_recorded_closed_ids_from_sheet", lambda: (set(), "ok"))
+    monkeypatch.setattr(walt_bot, "_recorded_closed_ids_from_sheet", lambda: (set(), set(), "ok"))
     csv_path, ids_path = tmp_path / "c.csv", tmp_path / "i.json"
     client = FakeClient(_payload(3))
     pertama = walt_bot.reconcile_history(client, write=True, mirror_sheet=True,
@@ -172,9 +183,42 @@ def test_mode_ci_write_terpisah_rapat_dari_dry_run():
     assert options["default"] != "reconcile_write", "operasi tak terbatal tidak boleh bisa salah pilih default"
 
 
+def test_baris_warisan_tanpa_id_tanpa_sisi_ditahan_kunci_identitas(tmp_path, monkeypatch):
+    """Kasus nyata 17:58Z: 11 baris warisan tanpa Position ID, tanpa Side, tanpa waktu bursa.
+
+    Dedupe by id buta terhadap mereka. Kunci (aset|harga) adalah satu-satunya penahan yang masih
+    tersedia, dan ARAH galatnya harus "tidak menulis" — baris ledger ganda merusak pengukuran
+    performansi secara senyap, sedangkan baris yang terlewat membuat angka tetap tak lengkap
+    dan itu dilaporkan.
+    """
+    payload = _payload(2)
+    baris = walt_bot.build_backfill_rows(payload)
+    legacy = f"{str(baris[0]['asset']).upper()}|{float(baris[0]['entry_price']):.4f}"
+    monkeypatch.setattr(
+        walt_bot, "_recorded_closed_ids_from_sheet", lambda: (set(), {legacy}, "ok")
+    )
+    out = walt_bot.reconcile_history(
+        FakeClient(payload), write=True,
+        csv_path=str(tmp_path / "c.csv"), closed_ids_path=str(tmp_path / "i.json"),
+    )
+    assert out["candidates_to_add"] == 1, "baris yang sama di sheet (tanpa id) tidak boleh ditulis ulang"
+    assert out["written"] == 1
+    assert out["sheet_dedupe"]["dicocokkan_kunci_cadangan"] == 1
+    assert out["sheet_dedupe"]["kunci_cadangan"] == 1
+
+
+def test_kunci_identitas_toleran_terhadap_format_harga():
+    """Sheet menyimpan '812.97' sementara bursa mengirim '812.970000' -> harus tetap cocok."""
+    dari_sheet = sheet_logger.close_identity_keys("SNDK", "", "812.97")
+    dari_bursa = sheet_logger.close_identity_keys("SNDK", "SHORT", "812.970000")
+    assert set(dari_sheet) & set(dari_bursa), f"{dari_sheet} vs {dari_bursa}"
+    assert sheet_logger.close_identity_keys("", "SHORT", "1.0") == []
+    assert sheet_logger.close_identity_keys("NVDA", "SHORT", "bukan angka") == []
+
+
 def test_closed_ids_json_tersimpan_untuk_dedupe_lintas_proses(tmp_path, monkeypatch):
 
-    monkeypatch.setattr(walt_bot, "_recorded_closed_ids_from_sheet", lambda: (set(), "ok"))
+    monkeypatch.setattr(walt_bot, "_recorded_closed_ids_from_sheet", lambda: (set(), set(), "ok"))
     ids_path = tmp_path / "i.json"
     payload = _payload(2)
     kunci = {r["position_id"] for r in walt_bot.build_backfill_rows(payload)}
