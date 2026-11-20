@@ -273,7 +273,54 @@ inilah perilaku yang sekarang diuji `test_diagnostics_stats_langkah_tanpa_token_
 `watchdog` (cacat historis W1b yang justru ditemukan karena kegagalan ini). Kriteria ronde "0 failure
 sejak baseline" **tidak terpenuhi**, dan penyebab dominannya adalah keputusan saya sendiri di Item 4.
 
+## 3f. Sistem HIDUP kembali — dan tiga siklus pertama berbicara keras (2026-11-20, 13:35–14:10 UTC)
+
+Pemilik menyelesaikan OAuth (secret `WALT_CLIENT_ID` 13:34:54Z, `WALT_REFRESH_TOKEN` 13:35:30Z).
+Verifikasi berurutan, semuanya dari run nyata:
+
+| Bukti | Hasil |
+|---|---|
+| Rantai rotasi token single-use (S3/R6-4) di produksi | `POST oauth/token 200` → `WARNING refresh_token di-rotate` → `PUT actions/secrets/WALT_REFRESH_TOKEN 204` ✅ write-back bekerja |
+| `diagnostics.yml` pertama yang **seluruhnya hijau** | #44748280440 (`success`): probe sheet ✅, stats ✅, dump_closed ✅, reconcile `skipped` oleh gerbang mode ✅ |
+| Baseline riwayat dari API bursa | #44748514800 mode `reconcile_history`: `rows_seen=52`, `already_recorded=6`, `candidates_to_add=46`, `written=0`, `backup=null` — dry-run dihormati |
+| Guard risiko hidup kembali | 3 siklus `success` beruntun: 13:58 (5m21s), 14:00 terjadwal (3m49s, **mengantre** bukan membatalkan — `cancel-in-progress: false` terbukti), 14:07 (29s) |
+| Pelepasan kill-switch | `MAINTENANCE_MODE=false` 13:57:51Z **bersama** `DRY_RUN=true` 13:57:48Z — monitoring nyata, entry masih simulasi |
+
+**Tiga cacat yang baru terlihat begitu sistem hidup** (ini gunanya menjalankan, bukan hanya membaca kode):
+
+1. **Voter 1 swarm mati 100%.** `Voter 1 (Qwen-Turbo) error: 404 Not Found` untuk SETIAP aset
+   (NBIS, NVDA, SPY, VVV), sementara V2 (`qwen-plus`) memakai endpoint yang sama dan **tidak** error
+   → punca = model `qwen-turbo` tidak lagi dilayani di `dashscope-intl`, bukan URL/kunci. Swarm 4 voter
+   kini berjalan 3 voter; ini juga menjelaskan kolom `Sentimen/Konsensus/Vendor Alignment` berisi `—`
+   pada baris `Daily_Scans` tanggal 20-11. Yang paling mengganggu: kegagalan ini **tidak masuk
+   `_log_failure_summary`** sehingga siklusnya tetap `success` — kelas "diduga hidup padahal mati".
+2. **`fetch_earnings_days` 401 untuk semua ticker** (`query1.finance.yahoo.com/v10/finance/quoteSummary`)
+   → proteksi "High Risk Catalyst (earnings)" buta data. Perlu sumber kalender earnings yang sah.
+3. **Webhook riset Apps Script mengembalikan non-JSON** (`Expecting value: line 1 column 1`) → jalur
+   baca riset jatuh ke fallback senyap.
+
+**Akar masalah durability yang akhirnya terjelaskan (temuan terpenting ronde ini).** Percobaan membuktikan
+start dingin dengan menghapus SELURUH cache `walt-snapshot-*` justru menghasilkan `snapshot ADA`: cache
+`logs/` (`path: logs/`, baris 34 risk-monitor) sudah memuat `open_snapshot.json`, sehingga cache snapshot
+khusus itu **redundan**. Kesimpulan yang lebih penting: **ledger, `closed_ids`, dan snapshot semuanya
+hidup di Actions cache** — dan cache di-eviksi (7 hari tak terpakai / kuota 10 GB; daftar cache hari ini
+hanya berisi entri 09:30→14:03, yang lebih tua sudah lenyap). Setiap eviksi = amnesia total = close tidak
+bisa di-diff = **tidak pernah tercatat**. Itulah penjelasan kuantitatif 52 (bursa) vs 17 (sheet):
+bukan teori, melainkan cara kerja sistem. Perbaikannya bukan menambah deteksi, tapi **rehidrasi memori
+dari sumber tahan-lama saat cold start** (ID tertutup dari kolom `Position ID` sheet yang kini terbaca,
+dan/atau backfill sadar dari riwayat bursa) — diusulkan sebagai Item 1 Ronde 7, dengan label jujur
+`exchange_history_no_exit`, tanpa PnL karangan.
+
+**Koreksi diri atas rencana verifikasi:** bukti cache-miss yang tertunda sejak Ronde 6 TIDAK bisa
+diperoleh dengan menghapus cache snapshot saja (karena redundansi di atas), dan menghapus cache `logs/`
+berarti memusnahkan satu-satunya salinan ledger di CI (6 close nyata) — jadi sengaja TIDAK saya
+lakukan. Path dingin tetap terbukti di level unit (`test_gerbang_entry_dingin_konservatif_dan_override`,
+marker fail-closed baru); bukti end-to-end ditunda sampai ada jalur rehidrasi, yang justru membuat
+keadaan dingin tidak lagi berbahaya.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
+
+
 
 
 - Status CI dibaca lewat GitHub API, bukan lewat klaim laporan: daftar run `main` (status/kesimpulan),
@@ -420,6 +467,19 @@ mempertahankan semuanya:
     sensus tiga sumber wajib dibaca bersama: hitungan bursa (`history_measurement`), census
     `Closed_Positions` (`tools/sheet_probe.py`), dan ledger lokal — ketiganya boleh berbeda, dan
     perbedaan itu adalah temuannya, bukan angka yang harus dirapikan.
+
+11. **(Ronde 6, pasca-hidup-kembali) Ketiadaan bukti = kondisi berbahaya, bukan kondisi aman.** Penanda
+    kesehatan (`WALT_STATE_WARM`) hanya boleh bernilai benar bila ada bukti eksplisit dari probe yang
+    memeriksa berkas state; default "hangat" membuat gerbang start-dingin mati tanpa suara bila probe
+    rusak atau langkah lupa meneruskan output. Semua kegagalan input (voter LLM, kalender earnings,
+    webhook riset) wajib lewat agregator kegagalan yang muncul di Step Summary — siklus `success` dengan
+    1 dari 4 voter mati adalah laporan yang MENIPU.
+12. **(Ronde 6) Cache Actions bukan tempat menyimpan kebenaran.** Ledger, `closed_ids`, dan snapshot yang
+    hidup hanya di cache akan hilang saat eviksi, dan setiap kehilangan itu berarti ada penutupan yang
+    tidak pernah tercatat (bukti: 52 di bursa vs 17 di sheet). State yang harus bertahan lintas eviksi
+    wajib punya sumber tahan-lama (API bursa sebagai kebenaran, sheet sebagai mirror) dan jalur rehidrasi
+    sadar saat cold start — bukan didiamkan menjadi amnesia, dan bukan pula diisi dengan PnL karangan.
+
 
 ## 7. ID spreadsheet: status terbaru (yang disanitasi hanya nilainya, bukan keberadaannya)
 

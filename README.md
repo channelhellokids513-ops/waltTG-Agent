@@ -116,7 +116,7 @@ gcloud scheduler jobs list --location=asia-southeast2
 | [`risk-monitor.yml`](.github/workflows/risk-monitor.yml) | **Cloud Scheduler (`workflow_dispatch`)** — Tiap 10 menit | `20m` (`JOB_TIMEOUT_MIN=20`, guard sisa `< 6m`) | Pengawas risiko adaptif (5–10 menit + *Smart Fast-Exit Idle*). Guard waktu otomatis melewati *sub-cycle* & *adaptive execute* jika sisa waktu job `< 6 menit` agar order tidak terpotong sebelum TP/SL terpasang. |
 | [`watchdog.yml`](.github/workflows/watchdog.yml) | **GitHub Cron (`0 * * * *`)** + `workflow_dispatch` | `3m` (`walt-watchdog`) | Pengaman pengganti cron (Ronde 6 `[R6-3]`): memeriksa usia run `success` **keempat** workflow trading (`risk-monitor` 30 m, `market-execute`/`crypto-execute` 300 m, `daily-scan` 840 m; ambang diturunkan dari tabel jadwal §7.1 STRATEGY.md), mencetak tabel ke Step Summary, mengirim satu alert teragregasi yang menyebut workflow stale, lalu fallback `workflow_dispatch` — otomatis hanya untuk `risk-monitor`; untuk workflow entry perlu `vars.WALT_WATCHDOG_DISPATCH_ENTRY=true`. Tanpa akses Walt API. |
 | [`tests.yml`](.github/workflows/tests.yml) | **Push / PR ke `main`** | `5m` (`walt-tests`) | CI otomatis menjalankan import check modul inti, `pytest -q`, dan validasi sintaks seluruh file `.github/workflows/*.yml` tanpa secrets. |
-| [`diagnostics.yml`](.github/workflows/diagnostics.yml) | **Manual (`workflow_dispatch`)** | `5m` (`walt-diagnostics`) | Diagnostik *read-only* (`dump_closed` + `stats`, `LOG_REDACT=true`) ke *Step Summary*. Sengaja **TIDAK** dibungkam oleh `MAINTENANCE_MODE` agar bisa dipakai saat jendela pemeliharaan. |
+| [`diagnostics.yml`](.github/workflows/diagnostics.yml) | **Manual (`workflow_dispatch`, input `oauth_step`: `dump_closed` \| `reconcile_history`)** | `5m` (`walt-diagnostics`) | Diagnostik *read-only* berurutan: probe sheet → `stats` (keduanya **tanpa** OAuth) → **tepat satu** langkah bursa (refresh token single-use hanya cukup untuk satu langkah per *job*). Sengaja **TIDAK** dibungkam oleh `MAINTENANCE_MODE` agar bisa dipakai saat jendela pemeliharaan. |
 
 ### Trade-Off Concurrency & Anti-Kelaparan Risk Monitor
 Keempat workflow trading (`daily-scan.yml`, `market-execute.yml`, `crypto-execute.yml`, dan `risk-monitor.yml`) sengaja berbagi satu concurrency group `walt-trading-account` dengan `cancel-in-progress: false` untuk mencegah *race condition* pembukaan order ganda dan konflik state akun:
@@ -148,6 +148,22 @@ Langkah pemeliharaan aman:
    ```bash
    gh secret set WALT_REFRESH_TOKEN
    ```
+6. **Lepas bertahap, jangan sekaligus** (praktik yang terbukti perlu pada 2026-11-20 — sistem yang
+   "sudah dibunyikan" langsung membuka jalur order nyata tanpa satu pun siklus pengamatan): set
+   `DRY_RUN=true` **sebelum** `MAINTENANCE_MODE=false`, sehingga guard risiko bekerja nyata tetapi
+   entry masih disimulasikan. Ketiga workflow entry (`daily-scan`, `market-execute`, `crypto-execute`)
+   menghormati variable ini; input `dry_run` saat dispatch manual tetap menang atas variable.
+   ```bash
+   gh variable set DRY_RUN --body "true"          # tahap pantau-dulu (entry disimulasikan)
+   gh variable set MAINTENANCE_MODE --body "false"
+   # setelah >=3 siklus risk-monitor hijau dan Step Summary bersih dari kegagalan input:
+   gh variable delete DRY_RUN                     # baru di sini order nyata bisa keluar
+   ```
+   Gerbang yang dipakai untuk memutuskan naik ke trading nyata: siklus `risk-monitor` hijau beruntun,
+   `state_warm=true` dari `state_probe`, dan **tidak ada** agregat kegagalan input di Step Summary
+   (voter LLM / kalender earnings / webhook riset). Selama masih ada input yang mati, hasil apa pun
+   bukan bukti performansi strategi.
+
 
 ---
 
