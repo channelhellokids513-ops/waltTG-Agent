@@ -265,7 +265,16 @@ terisi sebelum menilai efek perubahan parameter.
 
 
 
+**Rekap run sejak baseline `e68e0eb` (diukur 12:13 UTC, 63 run):** 14 `failure`, semuanya terjelaskan
+dan tidak ada yang misterius — 7× `risk-monitor` + 1× `crypto-execute` (outage kredensial S3,
+10:20–11:20Z), 4× `diagnostics` (gagal **hanya** di langkah bursa; langkah probe & stats success —
+inilah perilaku yang sekarang diuji `test_diagnostics_stats_langkah_tanpa_token_dan_terbaca_di_log`),
+1× `CI Unit Tests` (bug harness decode cp1252, sudah diperbaiki pada commit berikutnya), 1×
+`watchdog` (cacat historis W1b yang justru ditemukan karena kegagalan ini). Kriteria ronde "0 failure
+sejak baseline" **tidak terpenuhi**, dan penyebab dominannya adalah keputusan saya sendiri di Item 4.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
+
 
 - Status CI dibaca lewat GitHub API, bukan lewat klaim laporan: daftar run `main` (status/kesimpulan),
   dan metadata secret (hanya `updated_at`, nilai tidak pernah bisa maupun perlu dibaca).
