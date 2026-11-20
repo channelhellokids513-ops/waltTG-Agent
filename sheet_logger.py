@@ -10,6 +10,7 @@ import os
 import io
 import csv
 import json
+import re
 import time
 import logging
 import subprocess
@@ -892,6 +893,64 @@ def _research_from_row(item: dict[str, str]) -> Any:
     )
 
 
+# Header tab Daily_Scans yang tertulis oleh Apps Script memakai nama cantik berbahasa Indonesia
+# ("Sisi", "Saldo (USDC)", "P1 (Polaritas)"), sementara konstanta kita memakai nama kolom internal.
+# Kecocokan dilakukan pada TOKEN hasil normalisasi, bukan string penuh, supaya perubahan label kecil
+# di sheet tidak kembali membuat jalur baca mati tanpa suara (dibuktikan CI 16:45Z: header_mismatch).
+GVIS_SCAN_ALIASES: dict[str, tuple[str, ...]] = {
+    "timestamp_utc": ("timestamp", "waktu"),
+    "balance_usdc": ("saldo", "balance"),
+    "open_positions": ("posisi terbuka", "open positions"),
+    "asset": ("asset", "simbol", "ticker"),
+    "side": ("sisi", "side"),
+    "funding_daily_pct": ("funding",),
+    "price": ("price", "harga"),
+    "swarm_score": ("swarm",),
+    "sentiment": ("sentimen", "sentiment"),
+    "consensus": ("konsensus", "consensus"),
+    "vendor_alignment": ("vendor",),
+    "p1_polarity": ("p1",),
+    "p4_momentum": ("p4",),
+    "p5_catalysts": ("p5",),
+    "p6_contrarian": ("p6",),
+    "verdict": ("verdict", "keputusan"),
+    "margin_allocated": ("margin",),
+    "reason": ("reason", "alasan"),
+    "narrative": ("narrative", "narasi"),
+}
+
+# Kolom yang TIDAK pernah diteruskan ke objek riset (repo & log CI publik).
+GVIS_SCAN_WITHHELD = frozenset({"balance_usdc", "open_positions"})
+
+# Keberadaan ketiga kunci ini yang menandai "ini benar-benar tab Daily_Scans" — tab Closed_Positions
+# juga memuat "Asset", jadi satu kolom saja tidak cukup sebagai penanda.
+GVIS_SCAN_REQUIRED = ("timestamp_utc", "asset", "swarm_score")
+
+
+def _normalize_header(value: str) -> str:
+    """'Saldo (USDC)' -> 'saldo'; 'P1 (Polaritas)' -> 'p1'; 'Funding/Hari ()' -> 'funding hari'."""
+    text = re.sub(r"\([^)]*\)", " ", str(value or "")).lower()
+    text = re.sub(r"[^a-z0-9]+", " ", text).strip()
+    return text
+
+
+def map_gviz_scan_header(header: list[str]) -> dict[str, int]:
+    """Petakan nama kolom internal -> indeks pada baris header sheet (cocok presisi atau token)."""
+    dinorm = [_normalize_header(h) for h in header]
+    out: dict[str, int] = {}
+    for canon, aliases in GVIS_SCAN_ALIASES.items():
+        for i, name in enumerate(dinorm):
+            if not name or i in out.values():
+                continue
+            if name == canon or any(
+                alias == name or name.startswith(alias + " ") or (" " + alias + " ") in f" {name} "
+                for alias in aliases
+            ):
+                out[canon] = i
+                break
+    return out
+
+
 def fetch_latest_research_from_gviz(
     max_age_hours: float = 6.0,
     spreadsheet_id: Optional[str] = None,
@@ -903,18 +962,36 @@ def fetch_latest_research_from_gviz(
     deployment yang aktif bukan isi repo. Tab itu sendiri sudah tahan-lama dan terbaca (dipakai
     ledger), jadi gviz menjadi sumber kedua yang tidak bergantung pada deployment pihak ketiga —
     sesuai invarian "state yang harus bertahan lintas eviksi wajib punya sumber tahan-lama".
+
+    Header sheet dibandingkan lewat `map_gviz_scan_header` (token ternormalisasi), bukan string
+    persis: tab ini ditulis Apps Script dengan label cantik ("Sisi", "Swarm Score"), dan pencocokan
+    kaku membuat jalur baca mati tanpa suara meski datanya ada.
     """
-    rows, status = fetch_sheet_csv_rows_ex(
-        "Daily_Scans", spreadsheet_id=spreadsheet_id, expected_col_name="asset"
-    )
+    rows, status = fetch_sheet_csv_rows_ex("Daily_Scans", spreadsheet_id=spreadsheet_id)
     if status != "ok" or len(rows) < 2:
         return {}, status if status != "ok" else "empty"
 
-    header = [str(c).strip() for c in rows[0]]
-    idx = {name: header.index(name) for name in header if name}
+    header = [str(c) for c in rows[0]]
+    idx = map_gviz_scan_header(header)
+    hilang = [k for k in GVIS_SCAN_REQUIRED if k not in idx]
+    if hilang:
+        # Guard anti-fallback tetap utuh: tab yang bukan Daily_Scans (mis. Closed_Positions, yang
+        # juga punya kolom "Asset") tetap ditolak, hanya saja penolakannya kini berdasarkan
+        # penanda tiga kolom, bukan satu nama string.
+        _last_header_mismatch["Daily_Scans"] = [c.strip() for c in header if c.strip()][:24]
+        _warn_ledger_unreadable(
+            "Daily_Scans", "header_mismatch",
+            f"kolom penanda {hilang} tidak dikenali dari header {header[:6]}",
+        )
+        return {}, "header_mismatch"
+
     researches: dict[str, Any] = {}
     for row in rows[1:]:
-        item = {name: (row[i] if i < len(row) else "") for name, i in idx.items()}
+        item = {
+            name: (row[i] if i < len(row) else "")
+            for name, i in idx.items()
+            if name not in GVIS_SCAN_WITHHELD
+        }
         asset = str(item.get("asset") or "").strip().upper()
         if not asset:
             continue

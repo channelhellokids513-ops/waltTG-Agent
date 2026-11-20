@@ -270,7 +270,69 @@ def test_header_mismatch_melaporkan_kolom_yang_sebenarnya_terlihat(monkeypatch, 
     assert "kolom_terlihat       = Timestamp, Balance, Asset, Side" in out
 
 
+# Header TERLIHAT di sheet produksi (direkam CI #44776590327, 16:45:56Z) — 12 nama pertama
+# persis dari log; sisanya mengikuti posisi DAILY_SCANS_HEADERS karena probe memotong tampilan.
+HEADER_CANTIK = [
+    "Timestamp (UTC)", "Saldo (USDC)", "Posisi Terbuka", "Asset", "Sisi", "Funding/Hari ()",
+    "Live Price ($)", "Swarm Score", "Sentimen", "Konsensus", "Vendor Alignment", "P1 (Polaritas)",
+    "P4 (Momentum)", "P5 (Katalis)", "P6 (Kontrarian)", "Verdict", "Margin ($)", "Alasan", "Narasi",
+]
+
+
+def test_normalisasi_header_mengupas_label_cantik():
+    assert sheet_logger._normalize_header("Saldo (USDC)") == "saldo"
+    assert sheet_logger._normalize_header("P1 (Polaritas)") == "p1"
+    assert sheet_logger._normalize_header("Funding/Hari ()") == "funding hari"
+    assert sheet_logger._normalize_header("Live Price ($)") == "live price"
+    assert sheet_logger._normalize_header(None) == ""
+
+
+def test_header_cantik_sheet_terpetakan_ke_kolom_internal():
+    idx = sheet_logger.map_gviz_scan_header(HEADER_CANTIK)
+    for wajib in sheet_logger.GVIS_SCAN_REQUIRED:
+        assert wajib in idx, f"penanda tab tidak terbaca dari header nyata: {wajib}"
+    assert idx["asset"] == 3 and idx["swarm_score"] == 7
+    assert idx["side"] == 4 and idx["sentiment"] == 8 and idx["consensus"] == 9
+    assert idx["p1_polarity"] == 11 and idx["p6_contrarian"] == 14
+    assert idx["reason"] == 17 and idx["narrative"] == 18
+    assert len(set(idx.values())) == len(idx), "satu kolom tidak boleh dipetakan dua kali"
+
+
+def test_gviz_membaca_tab_berheader_cantik_end_to_end(monkeypatch):
+    baris = ["", "", "", "NVDA", "short", "0.84%", "", "+0.42", "bullish", "STRONG", "both_agree",
+             "0.5", "0.3", "0.2", "0.1", "GO", "2.50", "alasan", "narasi"]
+    baris[0] = _ts(-1)
+    baris[1] = "15.26"  # saldo: tidak boleh pernah sampai ke objek riset
+    rows = [HEADER_CANTIK, baris]
+    monkeypatch.setattr(sheet_logger, "fetch_sheet_csv_rows_ex", lambda name, **kw: (rows, "ok"))
+
+    res, status = sheet_logger.fetch_latest_research_from_gviz(max_age_hours=6.0)
+    assert status == "ok" and list(res) == ["NVDA"]
+    r = res["NVDA"]
+    assert r.final_score == 0.42 and r.news_sentiment == "bullish" and r.consensus == "STRONG"
+    assert r.vendor_alignment == "both_agree" and r.narrative == "narasi"
+    assert r.p1_to_p7_scores == {
+        "P1_sentiment_polarity": 0.5, "P4_momentum_direction": 0.3,
+        "P5_risk_catalysts": 0.2, "P6_contrarian_check": 0.1,
+    }
+    assert "15.26" not in str(vars(r)), "kolom saldo ditahan, tidak ikut terbaca"
+
+
+def test_tab_lain_tetap_ditolak_oleh_penanda_tiga_kolom(monkeypatch):
+    """Closed_Positions juga punya kolom 'Asset' — penanda tunggal tidak cukup."""
+    header_cp = sheet_logger.CLOSED_POSITIONS_HEADERS
+    rows = [header_cp, [""] * len(header_cp)]
+    monkeypatch.setattr(sheet_logger, "fetch_sheet_csv_rows_ex", lambda name, **kw: (rows, "ok"))
+    sheet_logger._last_header_mismatch.pop("Daily_Scans", None)
+
+    res, status = sheet_logger.fetch_latest_research_from_gviz()
+    assert res == {} and status == "header_mismatch"
+    assert sheet_logger.get_last_header_mismatch("Daily_Scans"), "sebab penolakan harus bisa dibaca"
+
+
 def test_perekaman_kolom_datari_pembacaan_gviz_sebenarnya(monkeypatch):
+
+
     """Bukan hanya getter: jalur gviz nyata harus mengisi daftar kolom saat header tidak cocok."""
     class _R:
         status_code = 200
