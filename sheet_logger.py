@@ -309,8 +309,50 @@ def log_execution(executions: list[dict], filepath: str = "logs/executions_histo
 CLOSED_POSITIONS_HEADERS = [
     "Timestamp (UTC)", "Asset", "Sisi", "Contract ID", "Entry Price ($)",
     "Exit Price ($)", "Margin ($)", "PnL ($)", "Funding ($)", "Alasan Close",
-    "Position ID", "Closed At (exchange)", "Strategy Version", "Opened At (exchange)"
+    "Position ID", "Closed At (exchange)", "Strategy Version", "Opened At (exchange)",
+    "Exit Price Source"
 ]
+
+_CLOSED_POSITIONS_CANONICAL_IDX: dict[str, int] = {
+    h.strip().lower(): i for i, h in enumerate(CLOSED_POSITIONS_HEADERS)
+}
+_CLOSED_POSITIONS_REQUIRED_COLS = (
+    "asset",
+    "exit price ($)",
+    "margin ($)",
+    "pnl ($)",
+    "alasan close",
+)
+
+
+def resolve_closed_positions_columns(
+    rows: list[list[str]],
+) -> tuple[dict[str, int], list[list[str]], bool]:
+    """
+    Petakan nama kolom header Closed_Positions (case-insensitive) ke indeks kolom.
+    Mengembalikan (col_map, data_rows, used_fallback_indices).
+    Jika baris pertama tidak mengandung kolom inti yang diharapkan (header rusak/hilang),
+    fallback ke indeks CLOSED_POSITIONS_HEADERS baku dengan used_fallback_indices=True.
+    """
+    if not rows:
+        return dict(_CLOSED_POSITIONS_CANONICAL_IDX), [], False
+
+    raw_header = [str(c).strip().lower() for c in rows[0]]
+    header_idx = {name: i for i, name in enumerate(raw_header) if name}
+    has_required = all(col in header_idx for col in _CLOSED_POSITIONS_REQUIRED_COLS)
+
+    if has_required:
+        # Mulai dari indeks baku untuk kolom tambahan (10..14) agar file campuran header 10-kolom
+        # + baris 14-kolom tetap terbaca konsisten sebelum & sesudah migrasi, lalu timpa dengan
+        # posisi aktual yang tertulis pada header.
+        col_map = dict(_CLOSED_POSITIONS_CANONICAL_IDX)
+        col_map.update(header_idx)
+        return col_map, rows[1:], False
+
+    # Header rusak / hilang -> fallback indeks lama; lewati baris pertama jika jelas bukan data trade
+    first_is_non_data_header = len(rows[0]) < 10 or ("timestamp" in (raw_header[0] if raw_header else ""))
+    data_rows = rows[1:] if first_is_non_data_header else rows
+    return dict(_CLOSED_POSITIONS_CANONICAL_IDX), data_rows, True
 
 
 def fetch_sheet_csv_rows(
@@ -395,6 +437,7 @@ def log_close(
         str(closed_at or ""),
         strat_ver,
         str(opened_at or ""),
+        str(exit_source or ""),
     ]
 
     with open(filepath, "a", newline="", encoding="utf-8") as f:
@@ -444,17 +487,13 @@ def get_closed_funding_current_month(
     if not rows:
         return 0.0
 
-    # Cari indeks kolom Timestamp dan Funding
-    header = [c.strip().lower() for c in rows[0]]
-    ts_idx = 0
-    funding_idx = 8
-    for i, col in enumerate(header):
-        if "timestamp" in col:
-            ts_idx = i
-        elif "funding" in col:
-            funding_idx = i
-
-    data_rows = rows[1:] if any("timestamp" in c for c in header) else rows
+    col_map, data_rows, used_fallback = resolve_closed_positions_columns(rows)
+    if used_fallback:
+        log.warning(
+            "get_closed_funding_current_month: header Closed_Positions rusak/kolom hilang, memakai fallback indeks baku"
+        )
+    ts_idx = col_map.get("timestamp (utc)", 0)
+    funding_idx = col_map.get("funding ($)", 8)
     total = 0.0
     for r in data_rows:
         if len(r) <= max(ts_idx, funding_idx):

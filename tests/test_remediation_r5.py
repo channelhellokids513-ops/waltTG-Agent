@@ -269,3 +269,91 @@ def test_r5_2_exchange_close_pnl_uses_value_base_not_margin_leverage_move(
     assert pnl_by_size_base != pytest.approx(pnl_by_margin_move)
     assert c["pnl_quote"] == pytest.approx(pnl_by_size_base, abs=1e-6)
 
+
+def test_r5_3_migration_unifies_10_and_14_col_rows_to_15_and_is_idempotent(tmp_path):
+    import csv
+    from tools.migrate_closed_ledger import migrate_closed_ledger
+
+    csv_file = tmp_path / "closed_history.csv"
+    header_10 = sheet_logger.CLOSED_POSITIONS_HEADERS[:10]
+    row_10 = ["2026-11-18T01:00:00+00:00", "NVDA", "LONG", "10", "100.0", "102.0", "2.5", "0.10", "0.01", "TP breached"]
+    row_14 = [
+        "2026-11-19T02:00:00+00:00", "BTC", "SHORT", "20", "90000.0", "88000.0", "2.5", "0.11", "0.02",
+        "Exchange Auto-Close TP", "pos_btc_1", "2026-11-19T02:00:00+00:00", "abcd1234", "2026-11-19T00:00:00+00:00",
+    ]
+    with csv_file.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(header_10)
+        w.writerow(row_10)
+        w.writerow(row_14)
+
+    # Dry-run default tidak boleh mengubah file
+    before_raw = csv_file.read_text(encoding="utf-8")
+    res_dry = migrate_closed_ledger(str(csv_file), apply=False)
+    assert res_dry["applied"] is False
+    assert csv_file.read_text(encoding="utf-8") == before_raw
+
+    # Apply pertama -> semua baris 15 kolom, backup terbentuk, semua nilai lama utuh
+    res_apply1 = migrate_closed_ledger(str(csv_file), apply=True)
+    assert res_apply1["applied"] is True
+    assert res_apply1["backup_path"] and Path(res_apply1["backup_path"]).exists()
+
+    rows_after = list(csv.reader(csv_file.open("r", encoding="utf-8")))
+    assert len(sheet_logger.CLOSED_POSITIONS_HEADERS) == 15
+    assert sheet_logger.CLOSED_POSITIONS_HEADERS[-1] == "Exit Price Source"
+    assert rows_after[0] == sheet_logger.CLOSED_POSITIONS_HEADERS
+    assert all(len(r) == 15 for r in rows_after)
+    assert rows_after[1][:10] == row_10 and rows_after[1][10:] == ["", "", "", "", ""]
+    assert rows_after[2][:14] == row_14 and rows_after[2][14:] == [""]
+
+    # Apply kedua -> idempoten (tidak mengubah isi)
+    snap_after_1 = csv_file.read_text(encoding="utf-8")
+    res_apply2 = migrate_closed_ledger(str(csv_file), apply=True)
+    assert res_apply2["changed"] is False
+    assert csv_file.read_text(encoding="utf-8") == snap_after_1
+
+
+def test_r5_3_reader_by_column_name_matches_10_col_and_15_col_equivalently(tmp_path, monkeypatch):
+    import csv
+
+    monkeypatch.setenv("GOOGLE_SHEET_ID", "")
+    f10 = tmp_path / "c10.csv"
+    f15 = tmp_path / "c15.csv"
+
+    with f10.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(sheet_logger.CLOSED_POSITIONS_HEADERS[:10])
+        w.writerow(["2026-11-19T01:00:00+00:00", "NVDA", "LONG", "10", "100.0", "102.0", "2.5", "0.10", "0.01", "TP breached"])
+
+    with f15.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(sheet_logger.CLOSED_POSITIONS_HEADERS)
+        w.writerow([
+            "2026-11-19T01:00:00+00:00", "NVDA", "LONG", "10", "100.0", "102.0", "2.5", "0.10", "0.01", "TP breached",
+            "", "", "", "", "exchange_fill",
+        ])
+
+    s10 = walt_bot.compute_closed_stats(csv_path=str(f10), pnl_tracker_path=str(tmp_path / "none.csv"), send_tg=False)
+    s15 = walt_bot.compute_closed_stats(csv_path=str(f15), pnl_tracker_path=str(tmp_path / "none.csv"), send_tg=False)
+    assert s10 == s15
+
+
+def test_r5_3_reader_corrupt_header_logs_single_warning_and_falls_back(tmp_path, monkeypatch, caplog):
+    import csv
+
+    monkeypatch.setenv("GOOGLE_SHEET_ID", "")
+    fbad = tmp_path / "corrupt_hdr.csv"
+    with fbad.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["COL_A", "COL_B", "COL_C"])  # header rusak/kolom inti hilang
+        w.writerow(["2026-11-19T01:00:00+00:00", "NVDA", "LONG", "10", "100.0", "102.0", "2.5", "0.10", "0.01", "TP breached"])
+        w.writerow(["2026-11-19T02:00:00+00:00", "BTC", "SHORT", "20", "90000.0", "89000.0", "2.5", "0.05", "0.01", "TP breached"])
+
+    with caplog.at_level("WARNING", logger="walt-bot"):
+        stats = walt_bot.compute_closed_stats(csv_path=str(fbad), pnl_tracker_path=str(tmp_path / "none.csv"), send_tg=False)
+
+    assert stats["total_trades"] == 2
+    hdr_warns = [r for r in caplog.records if r.levelname == "WARNING" and "header" in r.message.lower()]
+    assert len(hdr_warns) == 1
+
+

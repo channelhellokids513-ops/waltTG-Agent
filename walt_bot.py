@@ -1962,7 +1962,7 @@ def _fetch_recorded_closed_ids(csv_path: str = "logs/closed_history.csv") -> set
     """Ambil set Position ID (dan kunci fallback) yang sudah tercatat di Closed_Positions."""
     recorded: set[str] = set()
     try:
-        from sheet_logger import fetch_sheet_csv_rows
+        from sheet_logger import fetch_sheet_csv_rows, resolve_closed_positions_columns
         rows = fetch_sheet_csv_rows(
             "Closed_Positions",
             expected_col_name="Exit Price ($)",
@@ -1970,9 +1970,12 @@ def _fetch_recorded_closed_ids(csv_path: str = "logs/closed_history.csv") -> set
         )
         if not rows:
             return recorded
-        header = [str(c).strip().lower() for c in rows[0]]
-        pid_idx = header.index("position id") if "position id" in header else (10 if len(header) > 10 else -1)
-        data_rows = rows[1:] if ("timestamp" in header[0] or "asset" in str(header)) else rows
+        col_map, data_rows, used_fallback = resolve_closed_positions_columns(rows)
+        if used_fallback:
+            log.warning(
+                "_fetch_recorded_closed_ids: header Closed_Positions rusak/tidak lengkap, memakai fallback indeks baku"
+            )
+        pid_idx = col_map.get("position id", 10)
         for r in data_rows:
             if pid_idx >= 0 and len(r) > pid_idx and str(r[pid_idx]).strip():
                 recorded.add(str(r[pid_idx]).strip())
@@ -3487,17 +3490,36 @@ def compute_closed_stats(
     - pembanding perubahan ekuitas riil dari PnL_Tracker;
     - estimasi fee (0.09%/sisi dari TAKER_FEE_PER_SIDE × 2 × notional), total funding, net PnL, breakdown alasan close.
     """
-    from sheet_logger import fetch_sheet_csv_rows
+    from sheet_logger import fetch_sheet_csv_rows, resolve_closed_positions_columns
 
     rows = fetch_sheet_csv_rows(
         "Closed_Positions",
         expected_col_name="Exit Price ($)",
         local_csv_fallback=csv_path,
     )
-    data_rows = []
-    if rows:
-        first_cell = str(rows[0][0]).strip().lower() if rows[0] else ""
-        data_rows = rows[1:] if ("timestamp" in first_cell or "asset" in str(rows[0]).lower()) else rows
+    col_map, data_rows, used_fallback = resolve_closed_positions_columns(rows)
+    if rows and used_fallback:
+        log.warning(
+            "compute_closed_stats: header Closed_Positions rusak/kolom inti hilang, memakai fallback indeks baku"
+        )
+
+    idx_ts = col_map.get("timestamp (utc)", 0)
+    idx_asset = col_map.get("asset", 1)
+    idx_side = col_map.get("sisi", 2)
+    idx_cid = col_map.get("contract id", 3)
+    idx_entry = col_map.get("entry price ($)", 4)
+    idx_exit = col_map.get("exit price ($)", 5)
+    idx_margin = col_map.get("margin ($)", 6)
+    idx_pnl = col_map.get("pnl ($)", 7)
+    idx_funding = col_map.get("funding ($)", 8)
+    idx_reason = col_map.get("alasan close", 9)
+    idx_pid = col_map.get("position id", 10)
+    idx_closed_at = col_map.get("closed at (exchange)", 11)
+    idx_opened_at = col_map.get("opened at (exchange)", 13)
+    idx_exit_src = col_map.get("exit price source", 14)
+
+    def _cell(row: list[str], idx: int) -> str:
+        return str(row[idx]).strip() if 0 <= idx < len(row) else ""
 
     trades = []
     unknown_count = 0
@@ -3515,19 +3537,21 @@ def compute_closed_stats(
     for r in data_rows:
         if len(r) < 10:
             continue
-        if str(r[0]).strip().lower() == "timestamp (utc)" or str(r[1]).strip().upper() == "ASSET":
+        ts_cell = _cell(r, idx_ts)
+        asset_cell = _cell(r, idx_asset)
+        if ts_cell.lower() == "timestamp (utc)" or asset_cell.upper() == "ASSET":
             continue
 
-        pos_id = str(r[10]).strip() if len(r) > 10 else ""
-        dedupe_key = pos_id if pos_id else f"{str(r[1]).strip().upper()}|{str(r[3]).strip()}|{str(r[4]).strip()}"
+        pos_id = _cell(r, idx_pid)
+        dedupe_key = pos_id if pos_id else f"{asset_cell.upper()}|{_cell(r, idx_cid)}|{_cell(r, idx_entry)}"
         if dedupe_key in seen_keys:
             continue
         seen_keys.add(dedupe_key)
 
-        reason_raw = str(r[9] or "").strip()
+        reason_raw = _cell(r, idx_reason)
         reason_low = reason_raw.lower()
-        raw_exit = str(r[5]).strip()
-        raw_pnl = str(r[7]).strip()
+        raw_exit = _cell(r, idx_exit)
+        raw_pnl = _cell(r, idx_pnl)
 
         is_unknown = ("unknown" in reason_low) or (raw_exit == "" and raw_pnl == "")
         if is_unknown:
@@ -3536,11 +3560,11 @@ def compute_closed_stats(
             continue
 
         try:
-            margin = float(r[6] or 0.0)
+            margin = float(_cell(r, idx_margin) or 0.0)
             pnl_usd = float(raw_pnl or 0.0)
-            funding_usd = float(r[8] or 0.0)
+            funding_usd = float(_cell(r, idx_funding) or 0.0)
         except Exception as exc:
-            asset_lbl = r[1] if len(r) > 1 else "?"
+            asset_lbl = asset_cell or "?"
             log.debug(
                 f"Gagal parse angka trade {asset_lbl} pada Closed_Positions ({type(exc).__name__}): {exc}"
             )
@@ -3569,8 +3593,8 @@ def compute_closed_stats(
         fee_usd = 2.0 * TAKER_FEE_PER_SIDE * notional  # round-trip: open + close
 
         trades.append({
-            "asset": r[1],
-            "side": r[2],
+            "asset": asset_cell,
+            "side": _cell(r, idx_side),
             "margin": margin,
             "pnl_usd": pnl_usd,
             "pnl_pct": pnl_pct,
@@ -3579,9 +3603,10 @@ def compute_closed_stats(
             "reason": reason_raw,
             "category": cat,
             "position_id": pos_id,
-            "closed_at": str(r[11]).strip() if len(r) > 11 else "",
-            "opened_at": str(r[13]).strip() if len(r) > 13 else "",
-            "timestamp_utc": str(r[0]).strip(),
+            "closed_at": _cell(r, idx_closed_at),
+            "opened_at": _cell(r, idx_opened_at),
+            "timestamp_utc": ts_cell,
+            "exit_source": _cell(r, idx_exit_src),
         })
 
     _log_failure_summary("compute_closed_stats.trade_parse", trade_parse_failures, total=len(data_rows))

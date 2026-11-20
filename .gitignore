@@ -8,6 +8,7 @@ venv/
 .pytest_cache/
 *.log
 logs/*.csv
+logs/*.csv.bak-*
 logs/*.json
 logs/*.py
 !logs/.gitkeep
