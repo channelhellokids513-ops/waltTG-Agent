@@ -201,7 +201,16 @@ keempat tab (sebelumnya 401). Ini menjawab tiga pertanyaan yang selama ini berst
 | Apakah tab `Closed_Positions` ada di target Apps Script? | **ADA** | `probe`: `Closed_Positions ok rows=17 header=14kol (10 bernama)` — header hanya menamai 10 kolom pertama, tapi baris data punya 14 field (kolom 11-14: Position ID, Closed At, Strategy Version, Opened At). |
 | Apakah webhook Apps Script pernah menulis `Closed_Positions`? | **PERNAH, tapi tidak lengkap** | 17 baris nyata, stempel terakhir 2026-11-19T23:40Z, hash strategi `d11f2da8` terisi di baris baru. |
 | Berapa riwayat riil yang tercatat? | **Bursa 52 closed vs sheet 17 baris → selisih 35 penutupan tidak pernah masuk ledger.** | Angka 52 dari `history_measurement` diagnostics; 17 dari census sheet. Inilah bukti operasional bahwa ketergantungan pada cache Actions (S2) benar-benar memakan rekam jejak, bukan hanya risiko teoretis. |
-| Apakah sheet yang dipakai pemilik sama dengan yang dipakai CI? | **Pemilik: sha8 `06bded7f`, length 44.** Sisi CI akan dicetak oleh langkah baru `sheet probe` di `diagnostics.yml` (jalur ini tidak butuh token Walt, jadi hasilnya keluar walaupun kredensial mati). | `python tools/sheet_probe.py` + `Sheet fingerprint: sha8=06bded7f length=44`. |
+| Apakah sheet yang dipakai pemilik sama dengan yang dipakai CI? | **TIDAK.** Inilah punca sebenarnya dari beda perilaku 401-vs-404 di brief ronde 6: secret CI memegang ID yang berbeda (sha8 `c8899991`, panjang **45**), sedangkan sheet yang konek punya pemilik adalah sha8 `06bded7f`, panjang **44**. Dari ID CI itu keempat tab menjawab `http_error` (bukan 401) — sheet-nya memang tidak ada. | `diagnostics.yml` #44731850062 mencetak `Sheet fingerprint: sha8=c8899991 length=45` + `http_error` keempat tab, sementara probe lokal dengan ID pemilik mencetak `sha8=06bded7f length=44` + `ok rows=17`. Secret kini dikoreksi (`gh secret set GOOGLE_SHEET_ID`) — nilai lama tidak bisa dicadang karena secret GitHub write-only, tapi sidik jarinya tercatat di baris ini. |
+
+**Perbaikan ikutan yang ditemukan oleh test saya sendiri:** `tools/sheet_probe.py` sempat membaca `.env`
+pengembang di dalam `main()`, sehingga satu test mengirim **HTTP sungguhan** ke sheet asli (read-only,
+tanpa efek, tapi itu bahaya bocornya kredensial ke proses test). Sekarang: `.env` hanya dibaca pada blok
+`__main__` (CLI), `main()` murni argumen+environment, dan guard `test_main_tidak_pernah_membaca_env_file_pengembang`
+mengunci bentuk itu. Bersamaan itu `walt_bot.py` akhirnya punya pemuat `.env` yang jujur
+(`load_local_env()`, **khusus CLI `__main__`**, tidak pernah menimpa env yang sudah disuntik CI dan tidak
+pernah mencetak nilai) — tanpa ini, perintah lokal yang saya minta Anda jalankan (`reconcile_history`,
+`stats`) akan gagal karena tidak ada konfigurasi sama sekali. Suite: **215 lulus**.
 
 **Temuan akuntansi baru (`S5`, P1): angka nol yang menyamar sebagai data.** Dari 17 baris
 `Closed_Positions`, **9 baris** memiliki `Exit Price ($) == Entry Price ($)`, `PnL ($) = 0`, dan
@@ -400,6 +409,10 @@ komentar di `google_apps_script.js`), `GOOGLE_SHEET_ID` wajib dari env/secret, k
 `log.warning` teragregasi yang menyebut status HTTP, README §172 dikoreksi, dan `fetch_sheet_csv_rows_ex`
 membedakan `no_config` / `http_error` / `html_or_unparsable` / `header_mismatch` / `empty` / `local_csv` / `ok`.
 Perhatian yang masih berlaku: **riwayat git masih memuat ID itu** (ia pernah di-commit sebagai default).
+**Terjawab (2026-11-20, §3e):** pemilik mengonfirmasi satu spreadsheet yang benar-benar terhubung
+(sidik jari `sha8=06bded7f`, panjang 44) dan memberinya akses *Viewer*, sehingga gviz kini terbaca;
+secret CI ternyata memegang ID lain (`sha8=c8899991`, panjang 45) yang tidak ada → itulah sumber
+`http_error`/404 di CI waktu lokal mendapat 401. Secret sudah disamakan ke ID yang benar.
 Keputusan yang masih harus diambil pemilik: mana yang jadi sumber kebenaran — spreadsheet, CSV lokal,
 atau API bursa. Arah yang dipilih ronde 6: **API bursa** sebagai otoritas riwayat, sheet sebagai
 cermin baca-manusia; `reconcile_history --write` sengaja **tidak** menulis ke sheet.

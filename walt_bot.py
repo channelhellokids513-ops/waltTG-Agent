@@ -4389,6 +4389,37 @@ def reconcile_history(
     return summary
 
 
+def load_local_env(path: str = ".env") -> dict[str, bool]:
+    """
+    Muat .env untuk pemakaian CLI lokal. Aturan keras:
+      - nilai yang SUDAH ada di environment tidak pernah ditimpa (CI menyuntik env dari secrets);
+      - tidak pernah mencetak nilai, hanya nama kunci yang diterapkan;
+      - tidak dipakai saat import modul (khusus `__main__`), supaya proses test tidak pernah
+        menyerap kredensial nyata.
+    Return: {kunci_applied: True} — nama saja, tanpa nilai.
+    """
+    applied: dict[str, bool] = {}
+    if not os.path.exists(path):
+        log.info(f"load_local_env: {path} tidak ditemukan — memakai environment apa adanya")
+        return applied
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw in f:
+                if raw.lstrip().startswith("#") or "=" not in raw:
+                    continue
+                key, _, val = raw.partition("=")
+                key, val = key.strip(), val.strip().strip('"').strip("'")
+                if not key or key in os.environ:
+                    continue
+                os.environ[key] = val
+                applied[key] = True
+    except Exception as exc:
+        log.warning(f"load_local_env gagal ({type(exc).__name__}): {str(exc)[:120]}")
+    if applied:
+        log.info(f"load_local_env: {len(applied)} kunci dimuat dari .env ({', '.join(sorted(applied))})")
+    return applied
+
+
 def main(command: str = "scan"):
     """
     CLI entry point.
@@ -4499,5 +4530,6 @@ def main(command: str = "scan"):
 
 if __name__ == "__main__":
     import sys
+    load_local_env()  # hanya untuk CLI lokal; impor modul (dan pytest) tidak pernah menyerap .env
     cmd = sys.argv[1] if len(sys.argv) > 1 else "scan"
     main(cmd)

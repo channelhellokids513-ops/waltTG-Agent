@@ -24,6 +24,10 @@ import httpx
 
 TABS = ("Daily_Scans", "Executions_Log", "Closed_Positions", "PnL_Tracker")
 
+# Status HTTP terakhir per panggilan fetch (untuk membedakan "ID salah" (404) dari
+# "sheet privat" (401) tanpa pernah mencetak ID-nya).
+LAST_HTTP_STATUS: dict[str, str] = {}
+
 # Indeks baku Closed_Positions (sama dengan sheet_logger._CLOSED_POSITIONS_CANONICAL_IDX)
 IDX_ENTRY, IDX_EXIT, IDX_PNL, IDX_REASON, IDX_PID, IDX_CLOSED_AT, IDX_STRATEGY, IDX_OPENED_AT, IDX_SRC = (
     4, 5, 7, 9, 10, 11, 12, 13, 14,
@@ -47,10 +51,13 @@ def fetch_gviz_rows(sheet_id: str, tab: str, timeout: float = 20.0) -> tuple[lis
     if not sid:
         return [], "no_config"
     url = f"https://docs.google.com/spreadsheets/d/{sid}/gviz/tq?tqx=out:csv&sheet={tab}"
+    LAST_HTTP_STATUS.clear()
     try:
         r = httpx.get(url, follow_redirects=True, timeout=timeout)
     except Exception as exc:  # jaringan/DNS — status jujur, bukan kosong
-        return [], f"http_error"
+        LAST_HTTP_STATUS["detail"] = f"exception {type(exc).__name__}"
+        return [], "http_error"
+    LAST_HTTP_STATUS["detail"] = f"HTTP {getattr(r, 'status_code', '?')}"
     if int(getattr(r, "status_code", 0)) != 200:
         return [], "http_error"
     text = getattr(r, "text", "") or ""
@@ -131,6 +138,7 @@ def probe(sheet_id: str, tabs: tuple[str, ...] = TABS) -> dict[str, Any]:
         header = [c.strip() for c in rows[0]] if rows else []
         info: dict[str, Any] = {
             "status": status,
+            "http": LAST_HTTP_STATUS.get("detail", "") if status != "no_config" else "tanpa HTTP",
             "data_rows": max(0, len(rows) - 1) if status == "ok" else 0,
             "header_cols": len(header),
             "named_header_cols": sum(1 for c in header if c),
@@ -144,25 +152,48 @@ def probe(sheet_id: str, tabs: tuple[str, ...] = TABS) -> dict[str, Any]:
     return result
 
 
+def load_env_fallback(path: str = ".env") -> str:
+    """Ambil GOOGLE_SHEET_ID dari .env bila environment tidak menyediakannya (paritas dengan walt_bot)."""
+    sid = (os.environ.get("GOOGLE_SHEET_ID") or "").strip()
+    if sid or not os.path.exists(path):
+        return sid
+    try:
+        with open(path, encoding="utf-8") as f:
+            for raw in f:
+                if raw.lstrip().startswith("#") or "=" not in raw:
+                    continue
+                key, _, val = raw.partition("=")
+                if key.strip() == "GOOGLE_SHEET_ID":
+                    return val.strip().strip('"').strip("'")
+    except Exception:
+        return ""
+    return ""
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Probe baca gviz Google Sheet (read-only, tanpa Walt).")
-    parser.add_argument("--sheet-id", default=os.environ.get("GOOGLE_SHEET_ID", ""))
+    parser.add_argument("--sheet-id", default=None)
     parser.add_argument("--json", action="store_true", help="Cetak JSON lengkap (tetap tersanitasi).")
     args = parser.parse_args(argv)
+    # Sumber ID: argumen > environment. Berkas .env pengembang TIDAK dibaca di sini — itu khusus
+    # blok __main__ (lihat bawah), supaya proses test tidak pernah menyerap kredensial nyata dan
+    # tidak pernah mengirim HTTP sungguhan.
+    sheet_id = (args.sheet_id or os.environ.get("GOOGLE_SHEET_ID") or "").strip()
 
-    fp = sheet_fingerprint(args.sheet_id)
+    fp = sheet_fingerprint(sheet_id)
     if not fp["configured"]:
         print("LEDGER SHEET TIDAK DIKONFIGURASI (GOOGLE_SHEET_ID kosong) — nol percobaan HTTP")
         return 2
     print(f"Sheet fingerprint: sha8={fp['sha8']} length={fp['length']} (ID tidak pernah dicetak)")
 
-    result = probe(args.sheet_id)
+    result = probe(sheet_id)
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0
 
     for tab, info in result["tabs"].items():
-        line = f"  {tab:<17} {info['status']:<10} rows={info['data_rows']:<4} header={info['header_cols']}kol"
+        http_note = "" if info["status"] == "ok" else f" ({info.get('http', '?')})"
+        line = f"  {tab:<17} {info['status']:<10}{http_note} rows={info['data_rows']:<4} header={info['header_cols']}kol"
         if info.get("named_header_cols") is not None:
             line += f" ({info['named_header_cols']} bernama)"
         if "census" in info:
@@ -178,4 +209,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # Hanya di jalur CLI: kembalikan kenyamanan membaca .env tanpa menyeretnya ke dalam proses test.
+    if not (os.environ.get("GOOGLE_SHEET_ID") or "").strip():
+        _fb = load_env_fallback()
+        if _fb:
+            os.environ["GOOGLE_SHEET_ID"] = _fb
     sys.exit(main(sys.argv[1:]))

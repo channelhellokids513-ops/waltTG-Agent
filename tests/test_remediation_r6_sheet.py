@@ -10,6 +10,7 @@ import csv
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -107,6 +108,15 @@ def test_fetch_gviz_no_config_nol_percobaan_http(monkeypatch):
 def test_fetch_gviz_membedakan_http_error_dan_html(monkeypatch):
     monkeypatch.setattr(sp.httpx, "get", lambda *a, **k: type("R", (), {"status_code": 404, "text": "not found"})())
     assert sp.fetch_gviz_rows("abc", "Closed_Positions")[1] == "http_error"
+    assert sp.LAST_HTTP_STATUS["detail"] == "HTTP 404", "probe harus bisa bedakan ID salah vs sheet privat"
+
+    monkeypatch.setattr(sp.httpx, "get", lambda *a, **k: type("R", (), {"status_code": 401, "text": "<html>x</html>"})())
+    assert sp.fetch_gviz_rows("abc", "Closed_Positions")[1] == "http_error"
+    assert sp.LAST_HTTP_STATUS["detail"] == "HTTP 401", "401 = sheet privat, 404 = ID salah; keduanya http_error + detail bedain"
+
+    monkeypatch.setattr(sp.httpx, "get", lambda *a, **k: type("R", (), {"status_code": 200, "text": "<html>login</html>"})())
+    assert sp.fetch_gviz_rows("abc", "Closed_Positions")[1] == "html_or_unparsable"
+    assert sp.LAST_HTTP_STATUS["detail"] == "HTTP 200"
 
     monkeypatch.setattr(sp.httpx, "get", lambda *a, **k: type("R", (), {"status_code": 200, "text": "<html>login</html>"})())
     assert sp.fetch_gviz_rows("abc", "Closed_Positions")[1] == "html_or_unparsable"
@@ -125,6 +135,18 @@ def test_probe_keluaran_tersanitasi_tanpa_id_penuh(monkeypatch):
     assert sid not in out
     assert '"sha8"' in out and '"census"' in out
     assert sp.sheet_fingerprint(sid)["sha8"] == "f8daaee3"
+
+
+def test_main_tidak_pernah_membaca_env_file_pengembang():
+    """
+    Non-vakuum untuk perbaikan bahaya nyata: ketika main() membaca .env pengembang, test sempat
+    mengirim HTTP sungguhan ke sheet asli. Sekarang .env hanya dibaca di blok __main__.
+    """
+    src = io.open(REPO_ROOT / "tools" / "sheet_probe.py", encoding="utf-8").read()
+    body = src[src.find("def main("):src.find('if __name__ ==')]
+    assert "load_env_fallback()" not in body, "main() tidak boleh membaca .env pengembang"
+    guard = src[src.find('if __name__ =='):]
+    assert "load_env_fallback()" in guard, "kenyamanan CLI hilang dari __main__"
 
 
 def test_main_prove_exit_code_jujur(monkeypatch, capsys):
@@ -204,3 +226,53 @@ def test_diagnostics_menjalankan_sheet_probe_sebelum_langkah_walt():
     assert wf["permissions"] == {"contents": "read"}
     src = (REPO_ROOT / "tools" / "sheet_probe.py").read_text(encoding="utf-8")
     assert "WaltClient" not in src and "walletbot.me" not in src
+
+
+# ---------------------------------------------------------------------------
+# 5) pemuatan .env untuk CLI lokal (walt_bot tidak boleh menyerap kredensial saat import)
+# ---------------------------------------------------------------------------
+def test_load_local_env_mengisi_kunci_yang_hilang_tanpa_menimpa(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "# komentar\n"
+        "GOOGLE_SHEET_ID=id-dari-file\n"
+        "TELEGRAM_BOT_TOKEN=token-dari-file\n"
+        "SUDAH_DISET=\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token-dari-ci")
+    monkeypatch.delenv("GOOGLE_SHEET_ID", raising=False)
+
+    applied = walt_bot.load_local_env(str(env_file))
+
+    assert "GOOGLE_SHEET_ID" in applied
+    assert os.environ["GOOGLE_SHEET_ID"] == "id-dari-file"
+    assert os.environ["TELEGRAM_BOT_TOKEN"] == "token-dari-ci", "env yang sudah ada tidak boleh ditimpa"
+    assert "TELEGRAM_BOT_TOKEN" not in applied
+    assert "token-dari-file" not in str(applied), "return hanya nama kunci, bukan nilai"
+    assert "GOOGLE_SHEET_ID" in applied and "SUDAH_DISET" in applied
+
+
+def test_load_local_env_hilang_saat_modul_diimpor():
+    """
+    Guard struktural: pemuat .env hanya berjalan di CLI (`__main__`). Kalau seseorang memindahkannya
+    ke level modul, proses pytest akan menyerap kredensial nyata dan test bisa mengirim HTTP sungguhan.
+    """
+    src = io.open(REPO_ROOT / "walt_bot.py", encoding="utf-8").read()
+    guard_at = src.find('if __name__ == "__main__"')
+    call_at = src.find("load_local_env()", guard_at)
+    assert guard_at != -1 and call_at != -1, "walt_bot.py kehilangan pemuat .env CLI"
+    assert src.find("load_local_env(") != call_at, "definisi harus mendahului pemanggilan"
+    assert call_at > guard_at, "load_local_env() hanya boleh dipanggil dari blok __main__"
+    before_guard = src[:guard_at]
+    assert "load_local_env()" not in before_guard, "tidak boleh ada pemuatan .env saat import modul"
+
+
+def test_sheet_probe_fallback_env_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("GOOGLE_SHEET_ID", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("GOOGLE_SHEET_ID=\"id-dari-dotenv\"\n", encoding="utf-8")
+    assert sp.load_env_fallback() == "id-dari-dotenv"
+
+    monkeypatch.setenv("GOOGLE_SHEET_ID", "id-dari-environment")
+    assert sp.load_env_fallback() == "id-dari-environment", "environment selalu menang atas file"
