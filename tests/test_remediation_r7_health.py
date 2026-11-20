@@ -179,7 +179,14 @@ def test_safe_summary_memuat_input_health_dan_meta():
     out = walt_bot.build_safe_stdout_summary("monitor", {"status": "ok"})
     assert out["input_health"]["input.voter_swarm"]["failed"] == 1
     assert out["input_meta"] == {"research_read_status": "local_csv"}
+    # `{}` pada input_health HARUS bisa dibedakan dari 'tidak ada yang diukur'
+    assert out["inputs_probed"] == {"research_assets": 1}
     assert "NVDA" not in str(out.get("executions_count"))
+
+
+def test_siklus_tanpa_riset_melaporkan_probed_kosong():
+    out = walt_bot.build_safe_stdout_summary("monitor", {"status": "ok"})
+    assert out["input_health"] == {} and out["inputs_probed"] == {}
 
 
 # ------------------------------------------------------------------------------

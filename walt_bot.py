@@ -515,6 +515,15 @@ def input_meta_snapshot() -> dict[str, Any]:
     return dict(sorted(_INPUT_META.items()))
 
 
+def inputs_probed_snapshot() -> dict[str, int]:
+    """Berapa kali tiap input benar-benar DIPERIKSA siklus ini.
+
+    Penting untuk menafsirkan `input_health`: `{}` berarti 'tidak ada kegagalan TERUKUR', yang
+    berbeda maknanya dengan 'tidak ada yang diukur' (mis. siklus SMART IDLE tanpa riset).
+    """
+    return dict(sorted(_INPUT_PROBED.items()))
+
+
 def flush_input_health() -> dict[str, Any]:
     """Rangkum register menjadi peringatan teragregasi (plus alert Telegram bila lewat ambang)."""
     if not _INPUT_FAILURES:
@@ -4266,6 +4275,7 @@ def build_safe_stdout_summary(command: str, result: Any) -> dict[str, Any]:
         # dan itu harus terbaca di Step Summary, bukan tenggelam di baris log.
         "input_health": input_health_snapshot(),
         "input_meta": input_meta_snapshot(),
+        "inputs_probed": inputs_probed_snapshot(),
     }
     return {k: v for k, v in summary.items() if v is not None}
 
