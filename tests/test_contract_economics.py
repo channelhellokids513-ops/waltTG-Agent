@@ -112,6 +112,15 @@ def test_bagian_a_melaporkan_slippage_seragam_dan_sebarannya(capsys):
     assert "sebaran slippage 2 aset" in out
 
 
+def test_bagian_a_menandai_nilai_seragam_sebagai_konstanta_bukan_pengukuran(capsys):
+    contracts = [{"base_asset": asset, "price_slippage": "0.01", "funding_rate_hourly": "0.0002"}
+                 for asset in ("ETH", "BTC", "SOL", "LINK", "DOGE")]
+    result = ce.section_a(ce.guard_client(FakeClient(contracts=contracts)), hold_h=24.0)
+    assert result["stats"].get("uniform") is True
+    out = capsys.readouterr().out
+    assert "PERINGATAN" in out and "BUKAN bukti" in out
+
+
 def test_bagian_a_menilai_lolos_dengan_ambang_engine_sendiri(capsys):
     # funding ETH 0.00022/jam -> 0.528%/hari; slip 1% -> cost 1.18% -> req 1.77%/hari -> SKIP
     contracts = [{"base_asset": "ETH", "price_slippage": "0.01", "funding_rate_hourly": "0.00022"}]
@@ -204,12 +213,27 @@ def test_bagian_c_gagal_terbuka_saat_sheet_tidak_terbaca(monkeypatch, capsys):
     assert "TIDAK TERUKUR" in capsys.readouterr().out
 
 
-def test_bagian_c_menolak_header_yang_kehilangan_kolom(monkeypatch, capsys):
-    rows = [["timestamp_utc", "asset"], ["2026-11-20 11:00:00", "ETH"]]
+def test_bagian_c_menerima_header_terlokalisasi_dari_sheet_sebenarnya(monkeypatch, capsys):
+    """Header Daily_Scans yang NYATA memakai nama Indonesia - jangan sampai ini
+    dilaporkan sebagai 'kolom tidak ada' padahal datanya ada."""
+    header = ["Timestamp (UTC)", "Saldo (USDC)", "Posisi Terbuka", "Asset", "Sisi",
+              "Funding/Hari (%)", "Live Price ($)", "Swarm Score"]
+    rows = [header,
+            ["2026-11-20 11:00:00", "100", "0", "ETH", "SHORT", "0.53", "100.0", "0.4"],
+            ["2026-11-20 12:30:00", "100", "0", "ETH", "SHORT", "0.53", "120.0", "0.4"]]
+    monkeypatch.setattr(ce.sheet_logger, "fetch_sheet_csv_rows_ex", lambda name: (rows, "ok"))
+    result = ce.section_c(ce.guard_client(FakeClient(closed=CLOSED_OK)))
+    assert result["measured"] is True
+    assert result["stats"]["median"] == pytest.approx(1.0), "harus pakai 100.0, bukan 120.0"
+
+
+def test_bagian_c_gagal_terbuka_saat_kolom_harga_benar_benar_absen(monkeypatch, capsys):
+    rows = [["timestamp_utc", "asset", "sisi"], ["2026-11-20 11:00:00", "ETH", "SHORT"]]
     monkeypatch.setattr(ce.sheet_logger, "fetch_sheet_csv_rows_ex", lambda name: (rows, "ok"))
     result = ce.section_c(ce.guard_client(FakeClient(closed=CLOSED_OK)))
     assert result["measured"] is False
-    assert "kolom wajib tidak ada" in capsys.readouterr().out.lower()
+    out = capsys.readouterr().out.lower()
+    assert "tidak terukur" in out and "harga" in out
 
 
 def test_alat_tidak_pernah_memanggil_tool_tulis_saati_semua_bagian_dijalankan():

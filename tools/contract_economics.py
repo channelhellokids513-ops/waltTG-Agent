@@ -175,6 +175,11 @@ def section_a(client: Any, hold_h: float) -> dict:
         print(f"   sebaran slippage {len(slips)} aset: median={stats['median'] * 100:.3f}% "
               f"p10={stats['p10'] * 100:.3f}% p90={stats['p90'] * 100:.3f}% "
               f"min={stats['min'] * 100:.3f}% max={stats['max'] * 100:.3f}%")
+        if stats["p10"] == stats["p90"]:
+            print("   PERINGATAN: p10 == p90 - nilai ini SERAGAM di hampir semua aset, yang adalah")
+            print("   tanda konstanta DEFAULT bursa, bukan pengukuran per aset. Angka 1,18% kita")
+            print("   cocok dengan itu, tetapi kecocokan dengan konstanta orang lain BUKAN bukti.")
+            stats["uniform"] = True
     print("   arti: angka 1,18% yang dipakai semua simulasi adalah slippage TERBESAR yang")
     print("   pernah terlihat di log, diterapkan seragam. Bila median sebenarnya jauh lebih")
     print("   kecil, simulasi kita terlalu pesimis; bila lebih besar, terlalu optimis.")
@@ -234,12 +239,27 @@ def section_c(client: Any) -> dict:
         print("   TIDAK TERUKUR: sheet keputusan tidak terbaca - tidak ada angka yang dibuat-buat.")
         return {"measured": False, "sheet_status": status}
     header = [str(cell).strip().lower() for cell in rows[0]]
-    try:
-        idx_time, idx_asset, idx_price = (header.index("timestamp_utc"), header.index("asset"),
-                                          header.index("price"))
-    except ValueError:
-        print(f"   TIDAK TERUKUR: kolom wajib tidak ada di header: {header[:10]}")
-        return {"measured": False, "sheet_status": status}
+
+    def find_column(candidates: tuple[str, ...], contains: tuple[str, ...]) -> Optional[int]:
+        """Cocokkan kolom dengan nama persis ATAU kata kunci - sheet ini punya header
+        terlokalisasi ('timestamp (utc)', 'live price ($)'), jadi nama kanonis dari
+        payload tidak selalu ada. Tidak ketemu -> None, bukan kolom 0."""
+        for name in candidates:
+            if name in header:
+                return header.index(name)
+        for index, cell in enumerate(header):
+            if any(token in cell for token in contains):
+                return index
+        return None
+
+    idx_time = find_column(("timestamp_utc", "timestamp (utc)", "waktu (utc)"), ("timestamp", "waktu"))
+    idx_asset = find_column(("asset", "aset"), ("asset", "aset"))
+    idx_price = find_column(("price", "live price ($)", "harga"), ("price", "harga"))
+    missing = [label for label, index in (("waktu", idx_time), ("aset", idx_asset), ("harga", idx_price))
+               if index is None]
+    if missing:
+        print(f"   TIDAK TERUKUR: kolom {', '.join(missing)} tidak ada di header: {header[:12]}")
+        return {"measured": False, "sheet_status": status, "header": header[:12]}
     scans: dict[str, list[tuple[datetime, float]]] = {}
     for row in rows[1:]:
         if len(row) <= max(idx_time, idx_asset, idx_price):
