@@ -28,6 +28,9 @@ _STATE_FILES = (
     "strategy_config.json",
     "telegram_auth.json",
     "user_strategies.json",
+    # R6-5 [V1]: dua jalur tulis produksi yang sebelumnya di luar pengawasan guard ronde 5.
+    "security_audit.jsonl",
+    "_tmp_sheet_batch.json",
 )
 _SESSION_STATE_SNAPSHOT: dict[str, tuple[int, str]] = {}
 

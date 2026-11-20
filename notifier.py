@@ -7,7 +7,34 @@ Butuh env:
 """
 
 import os
+import sys
 import httpx
+
+
+def _safe_print(text: str) -> None:
+    """
+    Cetak teks yang boleh berisi emoji/Unicode tanpa mematikan pemanggilnya.
+
+    Konsol Windows warisan (code page cp1252) melempar UnicodeEncodeError untuk emoji — dan
+    karena pemanggil umumnya tidak menangkapnya, notifikasi yang seharusnya informatif justru
+    menghentikan siklus trading (ditemukan Ronde 5, V2). Fallback: encode dengan
+    errors="backslashreplace" sehingga pesan tetap tampil (emoji jadi \\uXXXX), rc tetap 0.
+    """
+    try:
+        print(text)
+        return
+    except UnicodeEncodeError:
+        pass
+    encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        try:
+            buffer.write((text + "\n").encode(encoding, errors="backslashreplace"))
+            buffer.flush()
+            return
+        except Exception:
+            pass
+    print(text.encode("ascii", errors="backslashreplace").decode("ascii"))
 
 
 def send_telegram(text: str, parse_mode: str = "Markdown") -> bool:
@@ -16,7 +43,7 @@ def send_telegram(text: str, parse_mode: str = "Markdown") -> bool:
     chat_id = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
     if not token or not chat_id or token.lower() == "dummy" or chat_id.lower() == "dummy":
         print("[INFO] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID masih 'dummy' atau belum di-set, skip notif Telegram.")
-        print(f"--- PREVIEW PESAN ---\n{text}\n---------------------")
+        _safe_print(f"--- PREVIEW PESAN ---\n{text}\n---------------------")
         return False
 
     # Bersihkan prefix 'bot' jika pengguna tidak sengaja menyertakannya
@@ -57,16 +84,16 @@ def send_telegram(text: str, parse_mode: str = "Markdown") -> bool:
                     )
                     if r_plain.status_code == 200:
                         return True
-                    print(f"[ERROR] Telegram plain fallback gagal (HTTP {r_plain.status_code}): {r_plain.text}")
+                    _safe_print(f"[ERROR] Telegram plain fallback gagal (HTTP {r_plain.status_code}): {r_plain.text}")
                 else:
-                    print(f"[ERROR] Telegram HTTP 400: {r.text}")
+                    _safe_print(f"[ERROR] Telegram HTTP 400: {r.text}")
                 return False
 
             r.raise_for_status()
             return True
         except Exception as e:
             if attempt == 3:
-                print(f"[ERROR] Telegram send failed (attempt {attempt}/3): {e}")
+                _safe_print(f"[ERROR] Telegram send failed (attempt {attempt}/3): {e}")
                 return False
             time.sleep(1.5 * attempt)
     return False

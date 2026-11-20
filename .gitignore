@@ -9,8 +9,10 @@ venv/
 *.log
 logs/*.csv
 logs/*.csv.bak-*
+logs/*.json.bak-*
 logs/*.json
 logs/*.py
+logs/*.txt
 !logs/.gitkeep
 .DS_Store
 .vscode/

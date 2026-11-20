@@ -209,6 +209,56 @@ def purge_synthetic_rows(
     }
 
 
+def purge_fixture_ids(
+    ids_path: str = "logs/closed_ids.json",
+    apply: bool = False,
+) -> dict:
+    """
+    R6-5: buang kunci dedupe ber-pola fixture dari logs/closed_ids.json.
+
+    Hanya pola yang TERDAFTAR secara eksplisit yang dibuang (bukan heuristik luas):
+      - `1:100.0[...]`      contract_id=1 + entry=100.0, pola test pra-Ronde 5
+      - `ASSET|1|100.0`     kunci lama gaya sheet dengan pola fixture yang sama
+    dry-run default; dengan apply=True backup .bak-<UTC> dibuat sebelum menulis.
+    """
+    import json
+    import re
+
+    patterns = (
+        re.compile(r"^1:100\.0:?$"),  # cid=1 + entry=100.0 tanpa opened_at (pola test pra-Ronde 5)
+        re.compile(r"^[A-Z]{2,6}\|1\|100\.0$"),  # kunci lama gaya sheet dengan pola fixture sama
+    )
+
+    ids: list[str] = []
+    if os.path.exists(ids_path):
+        with open(ids_path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, list):
+            ids = [str(x) for x in loaded if x]
+
+    matched = [k for k in ids if any(p.match(k) for p in patterns)]
+    kept = [k for k in ids if k not in set(matched)]
+
+    backup_path: str | None = None
+    applied = False
+    if apply and matched:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup_path = f"{ids_path}.bak-{stamp}"
+        shutil.copy2(ids_path, backup_path)
+        with open(ids_path, "w", encoding="utf-8") as f:
+            json.dump(kept, f, indent=2)
+        applied = True
+
+    return {
+        "total_ids": len(ids),
+        "matched_count": len(matched),
+        "kept_count": len(kept),
+        "applied": applied,
+        "backup_path": backup_path,
+        "candidates_sample": matched[:10],
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Migrasi & pembersihan artefak fixture pada ledger lokal logs/closed_history.csv (dry-run default)."
@@ -217,8 +267,13 @@ def main(argv: list[str] | None = None) -> int:
         "command",
         nargs="?",
         default="migrate",
-        choices=("migrate", "purge-synthetic"),
-        help="Subcommand: 'migrate' (default) atau 'purge-synthetic'.",
+        choices=("migrate", "purge-synthetic", "purge-fixture-ids"),
+        help="Subcommand: 'migrate' (default), 'purge-synthetic', atau 'purge-fixture-ids' (R6-5).",
+    )
+    parser.add_argument(
+        "--ids-path",
+        default="logs/closed_ids.json",
+        help="Path logs/closed_ids.json untuk subcommand purge-fixture-ids.",
     )
     parser.add_argument(
         "--path",
@@ -241,6 +296,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         if res["candidates_sample"]:
             print("Contoh kandidat (maks 5):")
+            for item in res["candidates_sample"]:
+                print(f"  - {item}")
+        return 0
+
+    if args.command == "purge-fixture-ids":
+        res = purge_fixture_ids(ids_path=args.ids_path, apply=args.apply)
+        print(
+            f"[{mode} purge-fixture-ids] path={args.ids_path} | total={res['total_ids']} | "
+            f"matched={res['matched_count']} | kept={res['kept_count']} | applied={res['applied']} | "
+            f"backup={res['backup_path']}"
+        )
+        if res["candidates_sample"]:
+            print("Kandidat yang akan dibuang (maks 10):")
             for item in res["candidates_sample"]:
                 print(f"  - {item}")
         return 0
