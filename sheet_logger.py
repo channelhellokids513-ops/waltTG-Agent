@@ -40,6 +40,22 @@ def get_spreadsheet_id(explicit: Optional[str] = None) -> str:
     return (explicit or os.environ.get("GOOGLE_SHEET_ID") or "").strip()
 
 
+def sheet_fingerprint() -> dict[str, Any]:
+    """
+    Identifikasi sheet yang SEDANG dipakai lingkungan ini tanpa membocorkan ID-nya (repo publik).
+    sha8 = 8 hex pertama SHA-256 dari ID; cukup untuk mencocokkan dengan ID yang disebut pemilik
+    (yang juga dihitung dengan cara yang sama) tanpa menyalin nilainya ke log/Step Summary.
+    """
+    import hashlib
+
+    sid = get_spreadsheet_id()
+    return {
+        "configured": bool(sid),
+        "length": len(sid),
+        "sha8": hashlib.sha256(sid.encode("utf-8")).hexdigest()[:8] if sid else "",
+    }
+
+
 def get_ledger_read_status(sheet_name: str) -> str:
     """Status pembacaan terakhir sheet_name: ok|local_csv|http_error|html_or_unparsable|
     header_mismatch|empty|no_config|unknown (belum pernah membaca pada proses ini)."""

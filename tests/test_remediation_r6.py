@@ -636,3 +636,156 @@ def test_kedua_jalur_entry_memanggil_gerbang_dingin_sebelum_order(monkeypatch):
         assert "opps = []" in src[:order_at] or "raw_opps = []" in src[:order_at], (
             f"{fn_name}: gerbang dingin harus benar-benar menghapus kandidat entry"
         )
+
+
+# ==============================================================================
+# BLOK TAMBAHAN PASCA-RONDE 6 (menutup pertanyaan terbuka #1 dan #5)
+#   - apakah respons `execute` close memuat harga fill?  -> direkam otomatis
+#   - sheet mana yang sebenarnya dipakai CI?             -> sidik jari, bukan nilai ID
+# ==============================================================================
+def _pos(entry=100.0, current=0.0):
+    return walt_bot.Position(
+        contract_id=501,
+        base_asset="NVDA",
+        side="long",
+        leverage=5,
+        margin=2.5,
+        entry_price=entry,
+        current_price=current,
+        tp=110.0,
+        sl=95.0,
+        funding_paid=0.01,
+        liquidation_price=80.0,
+        position_id="",
+        opened_at="2026-11-18T07:00:00Z",
+    )
+
+
+class _CloseClient:
+    def __init__(self, res):
+        self._res = res
+
+    def execute(self, token):
+        return self._res
+
+
+def test_response_shape_hanya_nama_kunci_dan_tipe_sama_sekali():
+    res = {"ok": True, "order": {"fill_price": 123.4567, "order_id": "SECRET-123"}, "ids": [1, 2, 3]}
+    shape = walt_bot._response_shape(res)
+    text = str(shape)
+    assert "123.4567" not in text and "SECRET-123" not in text, "form shape membocorkan nilai"
+    assert shape["ok"] == "bool"
+    assert shape["order"] == "dict{fill_price,order_id}"
+    assert shape["ids"] == "list[3]"
+
+
+def test_probe_hanya_untuk_sumber_fallback_lokal(monkeypatch, caplog):
+    monkeypatch.setattr(walt_bot, "CLOSE_SCHEMA_PROBED", set())
+    monkeypatch.setattr(walt_bot, "CLOSE_FILL_MISSING_COUNT", 0, raising=True)
+    caplog.clear()
+
+    # harga datang dari respons -> tidak ada probe sama sekali
+    walt_bot._probe_close_response_shape({"avg_close_price": 101.0}, "exchange_fill", "NVDA")
+    assert [r for r in caplog.records if "CLOSE-SHAPE" in r.getMessage()] == []
+
+    # harga dari fallback lokal -> probe menyala
+    walt_bot._probe_close_response_shape({"ok": True, "status": "closed"}, "unavailable", "NVDA")
+    hits = [r for r in caplog.records if "CLOSE-SHAPE" in r.getMessage()]
+    assert len(hits) == 1
+    assert "TIDAK memuat harga fill" in hits[0].getMessage()
+    assert "avg_close_price" not in hits[0].getMessage()
+
+    # bentuk yang sama tidak diulang, tapi jumlah kejadiannya tetap dihitung
+    walt_bot._probe_close_response_shape({"ok": True, "status": "closed"}, "entry_fallback", "BTC")
+    assert len([r for r in caplog.records if "CLOSE-SHAPE" in r.getMessage()]) == 1
+
+
+def test_execute_validated_close_merekam_shape_saat_harga_fill_absen(tmp_path, monkeypatch, captured_closes, caplog):
+    monkeypatch.setattr(walt_bot, "CLOSE_SCHEMA_PROBED", set())
+    monkeypatch.setattr(walt_bot, "CLOSE_FILL_MISSING_COUNT", 0)
+    monkeypatch.setenv("GOOGLE_SHEET_ID", "")
+    monkeypatch.setattr(walt_bot, "send_telegram", lambda *a, **k: False)
+    caplog.clear()
+
+    res = {"ok": True, "status": "closed"}
+    out = walt_bot._execute_validated_close(
+        _CloseClient(res),
+        _pos(entry=100.0, current=0.0),
+        preview={"ok": True, "confirmationToken": "tok"},
+        reason="SL breached",
+    )
+
+    assert out["action"] == "CLOSE"
+    assert any("CLOSE-SHAPE" in r.getMessage() for r in caplog.records), "shape tidak direkam"
+    assert walt_bot.CLOSE_FILL_MISSING_COUNT == 1
+    assert len(captured_closes) == 1
+    row = captured_closes[0]
+    assert row["exit_source"] == "entry_fallback", "jujur: harga berasal dari entry, bukan fill bursa"
+    assert row["pnl_quote"] is not None
+
+
+def test_execute_validated_close_tanpa_probe_saat_api_memberi_harga(tmp_path, monkeypatch, captured_closes, caplog):
+    monkeypatch.setattr(walt_bot, "CLOSE_SCHEMA_PROBED", set())
+    monkeypatch.setattr(walt_bot, "CLOSE_FILL_MISSING_COUNT", 0)
+    monkeypatch.setenv("GOOGLE_SHEET_ID", "")
+    monkeypatch.setattr(walt_bot, "send_telegram", lambda *a, **k: False)
+    caplog.clear()
+
+    out = walt_bot._execute_validated_close(
+        _CloseClient({"order": {"avg_close_price": 102.5}}),
+        _pos(entry=100.0, current=103.9),
+        preview={"ok": True, "confirmationToken": "tok"},
+        reason="TP breached",
+    )
+
+    assert out["action"] == "CLOSE"
+    assert [r for r in caplog.records if "CLOSE-SHAPE" in r.getMessage()] == []
+    assert captured_closes[0]["exit_source"] == "response_position"
+    assert round(captured_closes[0]["exit_price"], 4) == 102.5, "harga harus dari respons, bukan snapshot"
+    assert walt_bot.CLOSE_FILL_MISSING_COUNT == 0
+
+
+def test_regresi_harga_penutupan_di_dalam_order_tidak_lagi_dilewatkan():
+    """
+    Bug yang ditemukan test bentuk respons (ronde 6): respons bersistem order.avg_close_price dulu
+    TIDAK terbaca sehingga sistem diam-diam memakai snapshot lokal sebagai harga keluar. Kini harga
+    itu dipakai, dan presedensi antar kelas kunci tetap dijaga.
+    """
+    pos = _pos(entry=100.0, current=111.0)
+    assert walt_bot._extract_close_exit_price({"order": {"avg_close_price": 102.5}}, pos) == (
+        102.5, "response_position",
+    )
+    # fill di dalam order mengalahkan harga penutupan di dalam order yang sama
+    assert walt_bot._extract_close_exit_price(
+        {"order": {"avg_close_price": 102.5, "avg_fill_price": 101.25}}, pos
+    ) == (101.25, "exchange_fill")
+    # sub-objek diperiksa sebelum top-level (presedensi lama dipertahankan)
+    assert walt_bot._extract_close_exit_price(
+        {"exit_price": 103.0, "position": {"close_price": 102.0}}, pos
+    ) == (102.0, "response_position")
+    # tanpa harga di respons, snapshot lokal dipakai dan mengakuinya sebagai estimasi
+    assert walt_bot._extract_close_exit_price({"ok": True}, pos) == (111.0, "snapshot_estimate")
+    # mark price tetap terlabel proxy, walau letaknya di dalam order
+    assert walt_bot._extract_close_exit_price({"order": {"mark_price": 105.0}}, pos) == (
+        105.0, "mark_price_proxy",
+    )
+
+
+def test_marker_close_shape_muncul_di_safe_summary(monkeypatch):
+    monkeypatch.setattr(walt_bot, "CLOSE_FILL_MISSING_COUNT", 2)
+    monkeypatch.setattr(walt_bot, "CLOSE_SCHEMA_PROBED", {"a"})
+    s = walt_bot.build_safe_stdout_summary("monitor", {"actions": []})
+    assert s["close_fill_missing_count"] == 2
+    assert s["close_response_shapes"] == ["a"]
+
+
+def test_sheet_fingerprint_tidak_pernah_memuat_id_penuh(monkeypatch):
+    import sheet_logger
+
+    monkeypatch.setenv("GOOGLE_SHEET_ID", "1FAkEsheEtIdForTestsOnly_000000000000000000")
+    fp = sheet_logger.sheet_fingerprint()
+    assert fp == {"configured": True, "length": 43, "sha8": "f8daaee3"}
+    assert "1FAkEsheEtId" not in str(fp)
+
+    monkeypatch.setenv("GOOGLE_SHEET_ID", "")
+    assert sheet_logger.sheet_fingerprint() == {"configured": False, "length": 0, "sha8": ""}

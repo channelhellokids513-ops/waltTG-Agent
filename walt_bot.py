@@ -1324,40 +1324,34 @@ def _extract_close_exit_price(res: Any, pos: Position) -> tuple[Optional[float],
     """
     entry = float(pos.entry_price) if _parse_positive_finite_float(pos.entry_price) is not None else 0.0
     if isinstance(res, dict):
+        # Kandidat per kelas kunci, mempertahankan presedensi lama (sub-objek diperiksa lebih dulu)
+        # DAN menambah cakupan yang dulu bolong: kunci harga penutupan di dalam `order`, serta
+        # kunci fill di dalam `position`. Label sumber mengikuti KELAS kunci, bukan lokasi.
+        order_obj = res.get("order") if isinstance(res.get("order"), dict) else None
+        pos_obj = res.get("position") if isinstance(res.get("position"), dict) else None
+        fill_candidates = [d for d in (order_obj, res) if d is not None]
+        pos_candidates = [d for d in (pos_obj, order_obj, res) if d is not None]
+
         # 1. Harga fill riil dari objek order/top-level hasil close
-        order_obj = res.get("order")
-        if isinstance(order_obj, dict):
+        for cand in fill_candidates:
             for key in _CLOSE_FILL_PRICE_KEYS:
-                parsed = _parse_sane_exit_price(order_obj.get(key), entry)
+                parsed = _parse_sane_exit_price(cand.get(key), entry)
                 if parsed is not None:
                     return parsed, "exchange_fill"
-        for key in _CLOSE_FILL_PRICE_KEYS:
-            parsed = _parse_sane_exit_price(res.get(key), entry)
-            if parsed is not None:
-                return parsed, "exchange_fill"
 
         # 2. Harga posisi penutupan pada respons close (jika ada)
-        pos_obj = res.get("position")
-        if isinstance(pos_obj, dict):
+        for cand in pos_candidates:
             for key in _CLOSE_POSITION_PRICE_KEYS:
-                parsed = _parse_sane_exit_price(pos_obj.get(key), entry)
+                parsed = _parse_sane_exit_price(cand.get(key), entry)
                 if parsed is not None:
                     return parsed, "response_position"
-        for key in _CLOSE_POSITION_PRICE_KEYS:
-            parsed = _parse_sane_exit_price(res.get(key), entry)
-            if parsed is not None:
-                return parsed, "response_position"
 
         # 3. Mark price (dipisahkan dari fill/response_position karena mark price bukan harga fill)
-        if isinstance(pos_obj, dict):
+        for cand in pos_candidates:
             for key in _CLOSE_MARK_PRICE_KEYS:
-                parsed = _parse_sane_exit_price(pos_obj.get(key), entry)
+                parsed = _parse_sane_exit_price(cand.get(key), entry)
                 if parsed is not None:
                     return parsed, "mark_price_proxy"
-        for key in _CLOSE_MARK_PRICE_KEYS:
-            parsed = _parse_sane_exit_price(res.get(key), entry)
-            if parsed is not None:
-                return parsed, "mark_price_proxy"
 
     # 4. Fallback snapshot: pos.current_price  # estimasi snapshot, bukan fill riil
     snap_price = _parse_sane_exit_price(pos.current_price, entry)  # estimasi snapshot, bukan fill riil
@@ -1369,6 +1363,50 @@ def _extract_close_exit_price(res: Any, pos: Position) -> tuple[Optional[float],
     if entry_fallback is not None:
         return entry_fallback, "entry_fallback"
     return None, "unavailable"
+
+
+# Ronde 6: sumber yang berarti harga datang dari DATA LOKAL, bukan dari respons execute.
+CLOSE_FALLBACK_SOURCES = ("snapshot_estimate", "entry_fallback", "unavailable")
+CLOSE_SCHEMA_PROBED: set[str] = set()
+CLOSE_FILL_MISSING_COUNT = 0
+
+
+def _response_shape(res: Any) -> dict[str, str]:
+    """Nama kunci + tipe respons execute (TIDAK PERNAH memuat nilai/harga/order_id/token)."""
+    if not isinstance(res, dict):
+        return {"__type__": type(res).__name__}
+    shape: dict[str, str] = {}
+    for k, v in res.items():
+        key = str(k)
+        if isinstance(v, dict):
+            shape[key] = "dict{" + ",".join(sorted(str(x) for x in v)) + "}"
+        elif isinstance(v, list):
+            shape[key] = f"list[{len(v)}]"
+        else:
+            shape[key] = type(v).__name__
+    return shape
+
+
+def _probe_close_response_shape(res: Any, source: str, asset: str) -> None:
+    """
+    Menutup pertanyaan terbuka ronde ini: apakah respons `execute` untuk close memuat harga fill?
+    Jawabannya hanya bisa datang dari satu penutupan RIIL, jadi bentuk respons direkam otomatis
+    setiap kali ekstraksi harga jatuh ke fallback lokal (artinya respons tidak memberi harga).
+
+    Satu baris per BENTUK unik (bukan per kejadian) supaya tidak spam; hanya nama kunci & tipe.
+    """
+    global CLOSE_FILL_MISSING_COUNT
+    if source not in CLOSE_FALLBACK_SOURCES:
+        return
+    CLOSE_FILL_MISSING_COUNT += 1
+    sig = json.dumps(_response_shape(res), sort_keys=True, ensure_ascii=False)[:600]
+    if sig in CLOSE_SCHEMA_PROBED:
+        return
+    CLOSE_SCHEMA_PROBED.add(sig)
+    log.info(
+        f"🔎 [CLOSE-SHAPE] respons execute close TIDAK memuat harga fill untuk {asset} "
+        f"(sumber={source}); bentuk={sig}"
+    )
 
 
 def _execute_validated_close(
@@ -1393,6 +1431,7 @@ def _execute_validated_close(
             "result": res,
         }
     final_exit_price, exit_price_source = _extract_close_exit_price(res, pos)
+    _probe_close_response_shape(res, exit_price_source, pos.base_asset)
     price_lbl = f"{final_exit_price:.4f}" if final_exit_price is not None else "None"
     log.debug(
         f"Close exit price {pos.base_asset}: {price_lbl} (sumber={exit_price_source})"
@@ -4012,6 +4051,9 @@ def build_safe_stdout_summary(command: str, result: Any) -> dict[str, Any]:
         "crypto_gear": regime.get("crypto_gear"),
         # R6-2: marker hangat/dingin terlihat di Step Summary tanpa membocorkan isi state.
         "state_warm": is_state_warm(),
+        # Ronde 6: jawaban atas "execute close memberi harga fill atau tidak" — hanya nama kunci.
+        "close_fill_missing_count": CLOSE_FILL_MISSING_COUNT,
+        "close_response_shapes": sorted(CLOSE_SCHEMA_PROBED)[:2],
     }
     return {k: v for k, v in summary.items() if v is not None}
 
@@ -4041,6 +4083,7 @@ def dump_closed_schema(client: WaltClient, limit: int = 3) -> dict[str, Any]:
     positions = resp.get("positions", resp) if isinstance(resp, dict) else (resp or [])
     if not isinstance(positions, list):
         positions = []
+    from sheet_logger import sheet_fingerprint
 
     sample_schemas = []
     for idx, p in enumerate(positions[:limit]):
@@ -4056,6 +4099,8 @@ def dump_closed_schema(client: WaltClient, limit: int = 3) -> dict[str, Any]:
         # R6-1: pengukuran yang sama dipakai reconcile_history — dicetak di diagnostics CI agar
         # kelengkapan riwayat (termasuk kemungkinan TERPOTONG) terlihat tanpa kredensial lokal.
         "history_measurement": describe_closed_history(client, positions=positions, resp=resp),
+        # Ronde 6: cocokkan sheet yang dipakai CI dengan yang disebut pemilik, tanpa membocorkan ID.
+        "sheet_fingerprint": sheet_fingerprint(),
     }
     if not positions:
         try:

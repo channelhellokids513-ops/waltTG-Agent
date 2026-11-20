@@ -231,7 +231,46 @@ Di GitHub: **Settings -> Secrets and variables -> Actions -> New repository secr
 | `GOOGLE_SHEET_WEBHOOK_URL`| URL Webhook Google Apps Script (lihat `google_apps_script.js`) |
 | `GH_PAT` | GitHub Personal Access Token (`repo` scope) untuk auto-update secret |
 
+- **Bila `stats`/`reconcile_history` gagal dengan `invalid_grant` dan run CI juga gagal** — berarti
+  refresh token di secret DAN `.env` sudah **sama-sama terbakar** (rotasi single-use). Kill-switch
+  tidak memperbaiki token; yang diperlukan adalah otentikasi ulang:
+  1. `gh variable set MAINTENANCE_MODE --body "true"` lalu tunggu run yang sedang berjalan selesai.
+  2. `python setup_walt_oauth.py` — skrip ini **mendaftarkan klien OAuth baru** (DCR RFC 7591), membuka
+     browser, dan mendengarkan `http://localhost:8765/callback` sekali. Karena klien baru ikut dibuat,
+     **dua secret** harus diperbarui: `WALT_CLIENT_ID` **dan** `WALT_REFRESH_TOKEN` (nilai yang dicetak skrip).
+  3. Tulis ke GitHub Actions, lalu matikan kill-switch dan verifikasi:
+     ```bash
+     gh secret set WALT_CLIENT_ID
+     gh secret set WALT_REFRESH_TOKEN
+     gh variable set MAINTENANCE_MODE --body "false"
+     gh workflow run risk-monitor.yml && gh run watch   # wajib success
+     ```
+  4. Setelah kredensial hidup, jalankan satu `python walt_bot.py reconcile_history` (dry-run) untuk
+     memverifikasi kelengkapan riwayat, baru operasinya yang mengubah strategi.
+- **Catatan arsitektur pemicu:** proyek GCP ini **tidak menjalankan VM/Compute** — yang aktif hanya
+  **Cloud Scheduler** (region `asia-southeast2`) yang menembak REST `workflow_dispatch` GitHub.
+  Tidak ada proses lokal yang harus hidup. Cara memeriksa keberadaan & jadwal job-nya (butuh `gcloud`
+  ter-autentikasi, tidak butuh VM):
+  ```bash
+  gcloud scheduler jobs list --location=asia-southeast2
+  gcloud scheduler jobs describe walt-risk-monitor --location=asia-southeast2   # cek state + jadwal + terakhir sukses
+  ```
+  Karena sisi Scheduler tidak bisa diamati dari GitHub, ronde 6 menutup risikonya dari sisi gejala:
+  `watchdog.yml` membandingkan usia run `success` tiap workflow terhadap ambang berbasis cadensi
+  (lihat §"Watchdog penuh") dan akan membunyikan alert walau Scheduler berhenti menembak sama sekali.
+- **Membaca Google Sheet lewat gviz butuh sheet bisa diakses publik (link: Viewer).** Sheet yang
+  dipakai pemilik (sidik jari `sha8=06bded7f`, panjang 44) saat ini **privat**, jadi gviz export
+  menjawab **HTTP 401** dengan halaman login untuk keempat tab — bukan masalah ID salah, melainkan
+  level berbagi. Pilihan (keputusan pemilik): (a) ubah berbagi sheet ke *Anyone with the link: Viewer*
+  agar jalur baca gviz berfungsi tanpa perubahan kode, atau (b) tetap privat dan tambahkan endpoint
+  **baca** di Apps Script (`doGet`) yang dipanggil `sheet_logger` memakai `GOOGLE_SHEET_WEBHOOK_URL`
+  — script berjalan sebagai pemilik sehingga bisa membaca tanpa membuka data ke publik. Sementara itu
+  sumber kebenaran riwayat tetap **API bursa** (`reconcile_history`), dan `stats` menandai ledger yang
+  tidak terbaca secara eksplisit.
+
+
 ### 3. Hubungkan Google Cloud Scheduler Bridge (Opsional tapi Direkomendasikan)
+
 Gunakan project GCP gratis Anda untuk menjadwalkan trigger presisi:
 ```bash
 gcloud scheduler jobs create http walt-market-execute \

@@ -34,6 +34,12 @@ Sistem **tidak bisa trading** sejak 2026-11-20 10:20 UTC: `WALT_REFRESH_TOKEN` d
 sudah terbakar dan tidak ada salinan yang hidup (`.env` lokal + berkas cadangannya adalah token yang
 sama dan juga sudah mati). Penyebabnya adalah keputusan saya di Item 4 ronde ini — lihat **S3** di §3c.
 
+**Status per 11:23:25 UTC:** `MAINTENANCE_MODE=true` sudah saya set (atas laporan pemilik bahwa alert
+`invalid_grant` terulang tiap 10 menit). Efeknya run API di-*skip*, bukan gagal berisik — jadi
+**jangan lupa** mengembalikannya ke `false` setelah token baru dipasang, atau sistem berhenti tanpa
+suara. Posisi terbuka nol (`positions_checked: 0` pada run success terakhir), jadi tidak ada proteksi
+trailing yang sedang tertunda karena kill-switch ini.
+
 Pemulihan (butuh interaksi pemilik, tidak bisa saya kerjakan):
 
 ```powershell
@@ -169,6 +175,18 @@ kesalahan keputusan ronde ini sendiri yang dipaksa keluar oleh bukti.
 5. Satu test ronde 4 (`test_r4_4_...maintenance_gated`) ikut berubah: lokatornya mengunci teks
    heredoc lama dari `watchdog.yml`; invarian yang dijaga (maintenance sebelum alert/dispatch)
    tetap dan kini diperiksa lebih ketat di dalam modul + ada test perilaku terpisah.
+
+## 3d. Jawaban atas lima pertanyaan pemilik (2026-11-20, 11:2x UTC)
+
+| # | Pertanyaan pemilik | Jawaban + bukti |
+|---|---|---|
+| 1 | "Seharusnya benar itu closed; tidak ada aset dalam posisi" | **Terkonfirmasi.** Run risk-monitor success terakhir #44716888020 (10:10:15Z) mencetak `💤 [SMART IDLE] 0 posisi aktif. Semua order aman/kas cair` dan `positions_checked: 0`. Riwayat closed juga **tidak terpotong pada angka bulat**: `closed_positions_count` = 50 pada diagnostics 2026-11-19T16:25 (#44565856937), lalu 52 pada tiga run berikutnya (06:57 #44691413854, 08:00 #44699103468, 10:19 #44718293679) — angka naik melewati 50 dan kemudian plateau, konsisten dengan "tidak ada penutupan baru + tidak ada posisi terbuka", bukan dengan cap daftar. Sisa batasan jujur: `created_at` tertua yang terlihat adalah 2026-11-17T08:49:04Z, jadi penutupan sebelum tanggal itu tetap tidak bisa dibuktikan dari endpoint ini. |
+| 2 | "Butuh debug untuk memastikan strategi berjalan baik" | Instrumen dipasang **dan langsung menemukan bug nyata**. (a) `_probe_close_response_shape` kini mencatat BENTUK respons `execute` close (nama kunci + tipe, nol nilai) setiap kali harga keluar jatuh ke fallback lokal — satu baris per bentuk unik, plus penghitung di Step Summary; pertanyaannya jadi terjawab oleh penutupan riil berikutnya tanpa perlu DEBUG manual. (b) Saat menulis test bentuk respons itu, terbukti respons dengan bentuk `order.avg_close_price` **tidak terbaca** oleh `_extract_close_exit_price`: kunci harga penutupan hanya dicari di top-level dan di objek `position`, tidak di dalam `order` — sehingga sistem diam-diam memakai `snapshot_estimate` (harga lokal) sebagai harga keluar, bukan harga dari bursa. Diperbaiki (presedensi kelas kunci dipertahankan: fill > response_position > mark > snapshot > entry), dengan test `test_regresi_harga_penutupan_di_dalam_order_tidak_lagi_dilewatkan` + 201 test lama-baru hijau. Tidak ada nilai strategi yang disentuh. |
+| 3 | "Beritahu langkah pemulihan kredensial" | Ditulis di README §"Panduan Setup" (butiran baru, baris 234+). Inti yang tadinya tidak terdokumentasi: bila secret **dan** `.env` sudah sama-sama terbakar, kill-switch tidak menolong — harus `python setup_walt_oauth.py`, yang **mendaftarkan klien OAuth baru (DCR)** sehingga **`WALT_CLIENT_ID` juga berubah** dan ikut harus di-`gh secret set`. `MAINTENANCE_MODE=true` sudah saya set pada 11:23:25Z untuk menghentikan badai alert; **jangan lupa kembalikan ke `false`** setelah token diganti, atau sistem berhenti diam-diam. |
+| 4 | "GCP tidak pakai VM, hanya Scheduler yang aktif" | Dicatat. Konsekuensi audit: tidak ada proses pemantau di sisi Google, sehingga satu-satunya sinyal hidup pemicu adalah ada/tidaknya run GitHub — persis yang kini diukur watchdog per workflow (ambang berbasis cadensi). Verifikasi job langsung (dari laptop pemilik, `gcloud`, tanpa VM): `gcloud scheduler jobs list --location=asia-southeast2` dan `gcloud scheduler jobs describe walt-risk-monitor --location=asia-southeast2`. |
+| 5 | "Sheet ID ini yang konek" | ID yang Anda kirim adalah yang dulu di-hardcode: panjang 44, **sha8 `06bded7f`**. Saya uji jalur bacanya **tanpa kredensial Walt** (gviz tidak butuh token Walt): keempat tab menjawab **HTTP 401 + halaman login** → sheet-nya **privat**. Jadi penyebab ledger tidak terbaca bukan ID salah, tapi level berbagi; daftar nama secret di CI menunjukkan `GOOGLE_SHEET_ID` memang ada sebagai secret di CI, dan `dump_closed` sekarang mencetak `sheet_fingerprint` (configured/length/sha8) supaya ID yang dipakai CI bisa dibandingkan dengan `06bded7f` tanpa pernah menampilkan nilainya. Dua opsi keputusan pemilik ada di README; sementara itu API bursa tetap sumber kebenaran, dan tulis ke sheet tetap jalan karena Apps Script berjalan sebagai pemilik (webhook = kredensial tulis, bukan baca publik). |
+
+**Status kill-switch saat ini:** `MAINTENANCE_MODE=true` (diset 2026-11-20T11:23:25Z oleh inspector untuk membungkam alert `invalid_grant` tiap 10 menit). Ini **bukan** keadaan normal: sistem tidak akan memantau atau membuka posisi sampai kredensial dipulihkan dan variabel dikembalikan ke `false`.
 
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
