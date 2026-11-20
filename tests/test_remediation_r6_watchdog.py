@@ -212,6 +212,42 @@ def test_guard_antrean_ganda_tetap_ada_per_workflow():
     assert gh.dispatched == []
 
 
+def test_watchdog_yml_checkout_mendahului_langkah_gh():
+    """
+    Regresi nyata (ditemukan Ronde 6): watchdog lama GAGAL di 3/3 run terjadwal karena `gh run list`
+    dipanggil di workspace tanpa .git -> "failed to determine base repo". Checkout harus lebih dulu.
+    """
+    wf = yaml.safe_load((WORKFLOWS / "watchdog.yml").read_text(encoding="utf-8"))
+    steps = _steps(wf)
+    checkout_idx = next((i for i, s in enumerate(steps) if "actions/checkout" in (s.get("uses") or "")), None)
+    assert checkout_idx is not None
+    gh_idx = next((i for i, s in enumerate(steps) if "watchdog_check" in (s.get("run") or "")), None)
+    assert gh_idx is not None
+    assert checkout_idx < gh_idx, "langkah gh/modul harus setelah checkout"
+    env = _steps(wf)[gh_idx].get("env") or {}
+    assert "GH_TOKEN" in env, "modul butuh GH_TOKEN agar gh punya kredensial"
+
+
+def test_bukti_historis_defek_watchdog_lama_tidak_ada_checkout():
+    """
+    Non-vakum untuk test urutan di atas: pada baseline e68e0eb watchdog memang TIDAK punya langkah
+    checkout (inilah punca kegagalannya). Test ini mengunci fakta historis; bila seseorang
+    mengembalikan watchdog ke bentuk itu, test urutan di atas yang akan merah.
+    """
+    import subprocess
+
+    old = subprocess.run(
+        ["git", "show", "e68e0eb:.github/workflows/watchdog.yml"],
+        capture_output=True,
+        text=True,
+    )
+    if old.returncode != 0:
+        # CI memakai checkout dangkal (fetch-depth 1) sehingga objek baseline tidak tersedia.
+        pytest.skip("baseline e68e0eb tidak tersedia di checkout dangkal")
+    assert "actions/checkout" not in old.stdout, "baseline seharusnya tanpa checkout (punca kegagalan)"
+    assert "gh" in old.stdout and '"run", "list"' in old.stdout
+
+
 def test_watchdog_yml_memakai_modul_tanpa_heredoc_dan_tanpa_walt_api():
     raw = (WORKFLOWS / "watchdog.yml").read_text(encoding="utf-8")
     wf = yaml.safe_load(raw)

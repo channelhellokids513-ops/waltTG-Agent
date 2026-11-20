@@ -81,13 +81,16 @@ def test_repro_cp1252_jadi_rc_nol():
     proc = subprocess.run(
         [sys.executable, "-c", code],
         capture_output=True,
-        text=True,
         env=env,
         cwd=str(REPO_ROOT),
         timeout=90,
     )
-    assert proc.returncode == 0, f"rc={proc.returncode}\nSTDERR:\n{proc.stderr[-800:]}"
-    combined = (proc.stdout or "") + (proc.stderr or "")
+    # Anak dipaksa cp1252, jadi byte-nya WAJIB didekode cp1252 — memakai text=True di parent
+    # (UTF-8) justru melempar UnicodeDecodeError di CI Linux dan itu bug harness, bukan produk.
+    combined = (proc.stdout or b"") .decode("cp1252", errors="replace") + (
+        proc.stderr or b""
+    ).decode("cp1252", errors="replace")
+    assert proc.returncode == 0, f"rc={proc.returncode}\nSTDOUT:\n{combined[-1200:]}"
     assert "UnicodeEncodeError" not in combined
     assert "siklus selesai" in combined, f"pesan hilang: {combined[-400:]}"
     assert "SEND_RETURNED False" in combined, "cabang dummy harus tetap skip + return False"
