@@ -1,6 +1,8 @@
 name: Walt Read-Only Diagnostics
 
 # Sengaja TIDAK diberi guard MAINTENANCE_MODE karena workflow read-only ini justru dipakai selama jendela pemeliharaan.
+# Urutan langkah (Ronde 6): yang TIDAK butuh kredensial Walt jalan lebih dulu, supaya diagnostik tetap
+# menghasilkan data saat refresh token mati (sheet read + stats) — baru kemudian langkah bursa.
 on:
   workflow_dispatch:
 
@@ -30,9 +32,20 @@ jobs:
           GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || secrets.GOOGLE_SHEET_ID }}
         run: |
           set -o pipefail
-          { echo "### 0. Sheet read probe (sanitized, sha8 saja)"; echo '```text'; python tools/sheet_probe.py | tee /dev/stderr; echo '```'; echo; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "## 🔍 Walt Read-Only Diagnostics (Redacted)"; echo; echo "### 0. Sheet read probe (sidik jari sha8, ID tidak pernah dicetak)"; echo '```text'; python tools/sheet_probe.py | tee /dev/stderr; echo '```'; echo; } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Run read-only dump_closed and stats
+      - name: Ledger stats (tanpa kredensial Walt)
+        env:
+          GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SHEET_WEBHOOK_URL: ${{ secrets.GOOGLE_SHEET_WEBHOOK_URL }}
+          STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}
+          LOG_REDACT: "true"
+        run: |
+          set -o pipefail
+          mkdir -p logs
+          { echo "### 1. \`stats\` Summary (sumber: sheet/CSV, tidak menyentuh bursa)"; echo '```text'; python walt_bot.py stats | tee -a "$GITHUB_STEP_SUMMARY"; echo '```'; echo; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Exchange schema dump (butuh OAuth Walt; menulis balik rotasi token)
         env:
           WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}
           WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
@@ -45,15 +58,4 @@ jobs:
           WALT_TOKEN_SYNC: "on"  # R6-fix: refresh OAuth membakar token single-use => wajib menulis balik
         run: |
           set -o pipefail
-          mkdir -p logs
-          echo "## 🔍 Walt Read-Only Diagnostics (Redacted)" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### 1. \`dump_closed\` Schema" >> "$GITHUB_STEP_SUMMARY"
-          echo '```json' >> "$GITHUB_STEP_SUMMARY"
-          python walt_bot.py dump_closed | tee -a "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### 2. \`stats\` Summary" >> "$GITHUB_STEP_SUMMARY"
-          echo '```text' >> "$GITHUB_STEP_SUMMARY"
-          python walt_bot.py stats | tee -a "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          { echo "### 2. \`dump_closed\` Schema + pengukuran riwayat bursa"; echo '```json'; python walt_bot.py dump_closed | tee -a "$GITHUB_STEP_SUMMARY"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
