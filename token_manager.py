@@ -20,6 +20,16 @@ log = logging.getLogger("token_manager")
 AUTH_SERVER = "https://walletbot.me/bot-relay/public-api"
 TOKEN_URL = f"{AUTH_SERVER}/oauth/v1/token"
 
+# R6-4: workflow berlabel read-only tidak boleh mengonsumsi rotasi refresh token single-use.
+# Default "on" = perilaku jalur trading tidak berubah sama sekali.
+TOKEN_SYNC_ENV = "WALT_TOKEN_SYNC"
+_TOKEN_SYNC_OFF = {"off", "0", "false", "no", "read-only", "readonly"}
+
+
+def token_sync_enabled() -> bool:
+    """False hanya bila WALT_TOKEN_SYNC diset eksplisit ke nilai mati (off/false/0/no/read-only)."""
+    return (os.environ.get(TOKEN_SYNC_ENV, "on").strip().lower() not in _TOKEN_SYNC_OFF)
+
 
 def _redact_oauth_snippet(text: str, limit: int = 200) -> str:
     """Redaksi nilai token pada potongan respons OAuth dan potong maks `limit` karakter."""
@@ -149,27 +159,32 @@ class TokenManager:
             self.refresh_token = data["refresh_token"]
             log.warning("TokenManager._refresh: refresh_token di-rotate oleh Walt.")
 
-            # 1. Update file .env lokal jika ada
-            self._update_local_env(self.refresh_token)
-
-            # 2. Auto-update GitHub Secret jika GH_PAT & GITHUB_REPOSITORY ada
-            pat = os.environ.get("GH_PAT")
-            repo = os.environ.get("GITHUB_REPOSITORY")
-            synced = False
-            if pat and repo:
-                synced = update_github_secret(repo, "WALT_REFRESH_TOKEN", self.refresh_token, pat)
+            if not token_sync_enabled():
+                # R6-4: mode read-only (mis. diagnostics.yml) — jangan menulis secret GitHub maupun
+                # .env lokal, dan jangan mengirim alert "auto-sync gagal" karena ini pilihan sadar.
+                log.info("sinkronisasi secret dilewati (mode read-only)")
             else:
-                if not pat:
-                    log.warning("[AUTO-SYNC GAGAL] Secret 'GH_PAT' belum ada di GitHub Secrets.")
-                if not repo:
-                    log.warning("[AUTO-SYNC GAGAL] GITHUB_REPOSITORY tidak terdeteksi.")
+                # 1. Update file .env lokal jika ada
+                self._update_local_env(self.refresh_token)
 
-            if not synced:
-                _notify_telegram_safe(
-                    "⚠️ *ALERT TOKEN ROTATION*: `WALT_REFRESH_TOKEN` telah di-rotate oleh Walt, "
-                    "tetapi auto-update GitHub Secret gagal atau `GH_PAT` tidak tersedia. "
-                    "Harap perbarui secret `WALT_REFRESH_TOKEN` secara manual!"
-                )
+                # 2. Auto-update GitHub Secret jika GH_PAT & GITHUB_REPOSITORY ada
+                pat = os.environ.get("GH_PAT")
+                repo = os.environ.get("GITHUB_REPOSITORY")
+                synced = False
+                if pat and repo:
+                    synced = update_github_secret(repo, "WALT_REFRESH_TOKEN", self.refresh_token, pat)
+                else:
+                    if not pat:
+                        log.warning("[AUTO-SYNC GAGAL] Secret 'GH_PAT' belum ada di GitHub Secrets.")
+                    if not repo:
+                        log.warning("[AUTO-SYNC GAGAL] GITHUB_REPOSITORY tidak terdeteksi.")
+
+                if not synced:
+                    _notify_telegram_safe(
+                        "⚠️ *ALERT TOKEN ROTATION*: `WALT_REFRESH_TOKEN` telah di-rotate oleh Walt, "
+                        "tetapi auto-update GitHub Secret gagal atau `GH_PAT` tidak tersedia. "
+                        "Harap perbarui secret `WALT_REFRESH_TOKEN` secara manual!"
+                    )
 
     def _update_local_env(self, new_token: str):
         env_path = Path(__file__).resolve().parent / ".env"

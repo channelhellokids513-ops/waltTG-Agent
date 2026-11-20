@@ -1,4 +1,6 @@
+# Ronde 6 [R6-4]: versi dikunci `==` persis seperti yang terpasang di venv Python 3.14.7 lokal
+# (diverifikasi `pip freeze`) sehingga build CI memakai graf dependensi yang sama, bukan yang
+# bergeser mengikuti tag mayor.
 -r requirements.txt
-pynacl>=1.5.0
-pytest>=8.0.0
-pyyaml>=6.0
+pytest==9.2.0
+pyyaml==6.0.3
