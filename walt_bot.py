@@ -315,6 +315,96 @@ logging.basicConfig(level=logging.INFO, handlers=[_handler], force=True)
 log = logging.getLogger("walt-bot")
 
 
+# =============================================================================
+# STATE WARMTH (R6-2) — deteksi cache-miss Actions agar start dingin tidak menyamar
+# =============================================================================
+
+STATE_WARM_ENV = "WALT_STATE_WARM"
+ALLOW_COLD_ENTRY_ENV = "WALT_ALLOW_COLD_ENTRY"
+_cold_state_alerted: set[str] = set()
+
+
+def is_state_warm() -> bool:
+    """
+    True bila state risiko (cooldown, counter entry 24 jam, jangkar circuit breaker, closed_ids,
+    open_snapshot) berhasil dipulihkan dari cache Actions.
+
+    Di CI langkah restore menyetel WALT_STATE_WARM dari output `cache-hit`. Default "true" untuk
+    CLI lokal (di mana logs/ memang persisten) sehingga perilaku lama tidak berubah di luar CI.
+    """
+    return (os.getenv(STATE_WARM_ENV, "true").strip().lower() != "false")
+
+
+def cold_start_override_enabled() -> bool:
+    """Override sadar untuk keadaan darurat: WALT_ALLOW_COLD_ENTRY=true mengizinkan entry dingin."""
+    return (os.getenv(ALLOW_COLD_ENTRY_ENV, "").strip().lower() in ("1", "true", "yes", "on"))
+
+
+def risk_memory_available(regime_path: str = "logs/market_regime.json") -> bool:
+    """
+    False hanya bila benar-benar tidak ada memori risiko: file tidak ada ATAU kosong
+    tanpa cooldown, tanpa riwayat entry, dan tanpa jangkar circuit breaker.
+    """
+    state = _load_execution_regime(regime_path)
+    if not isinstance(state, dict) or not state:
+        return False
+    if isinstance(state.get("cooldowns"), dict) and state["cooldowns"]:
+        return True
+    if isinstance(state.get("entry_history_24h"), list) and state["entry_history_24h"]:
+        return True
+    if isinstance(state.get("daily_circuit_breaker"), dict) and state["daily_circuit_breaker"]:
+        return True
+    return False
+
+
+def check_cold_state_entry_gate(regime_path: str = "logs/market_regime.json") -> tuple[bool, str]:
+    """
+    Gerbang entry saat start dingin. Aturan desainnya: **kehilangan memori risiko harus mengurangi
+    eksposur, bukan menambah** — karena counter 8 entry/hari & 2 entry/aset bisa kembali nol dan
+    jangkar daily circuit breaker hilang, entry baru DILEWATI sampai state hangat lagi.
+
+    Return (allowed, reason).
+    """
+    if is_state_warm():
+        return True, "OK"
+    if cold_start_override_enabled():
+        return True, "state dingin tapi override WALT_ALLOW_COLD_ENTRY aktif (atas keputusan pemilik)"
+    if risk_memory_available(regime_path):
+        return True, "OK (memori risiko ditemukan walau cache miss)"
+    return False, "state dingin: batas harian/cooldown tidak diketahui"
+
+
+def _notify_cold_state_once(reason: str) -> None:
+    """Satu alert Telegram per alasan per proses (bukan per kandidat, bukan 8 alert)."""
+    if not reason or reason in _cold_state_alerted:
+        return
+    _cold_state_alerted.add(reason)
+    log.warning(f"🧊 [STATE DINGIN] {reason} — entry baru dilewati untuk siklus ini")
+    try:
+        send_telegram(
+            f"🧊 *STATE DINGIN TERDETEKSI*\n{reason}\n"
+            "Entry baru *dilewati* sampai cache state pulih (aturan: kehilangan memori risiko "
+            "mengurangi eksposur).\n"
+            "Bila ini memang disengaja, set variable `WALT_ALLOW_COLD_ENTRY=true`."
+        )
+    except Exception as exc:
+        log.warning(f"Gagal kirim alert state dingin ({type(exc).__name__}): {exc}")
+
+
+def reset_cold_state_alert_state() -> None:
+    """Kosongkan jendela dedupe alert (dipakai test; di CI satu proses = satu siklus)."""
+    _cold_state_alerted.clear()
+
+
+def rehydrate_closed_keys_from_exchange(client: WaltClient) -> set[str]:
+    """
+    Bangun kembali kunci dedupe dari riwayat closed bursa (read-only, SATU skema kunci dengan
+    jalur live karena memakai build_backfill_rows / make_position_dedupe_key).
+    """
+    resp = client.list_positions(statuses=["closed"])
+    return {row["position_id"] for row in build_backfill_rows(_extract_positions(resp))}
+
+
 def _log_failure_summary(
     context: str,
     failures: list[str],
@@ -2073,12 +2163,46 @@ def _infer_close_reason_from_price(
     return "UNKNOWN (data close tidak tersedia)"
 
 
+def _handle_cold_detect_cycle(
+    client: WaltClient,
+    current_snapshot: dict[str, dict],
+    closed_ids_path: str,
+    closed_csv_path: str,
+) -> tuple[dict[str, dict], list[dict]]:
+    """
+    R6-2: cache Actions miss. Snapshot lama tidak bisa dipercaya (hilang, atau basi dari
+    restore-keys parsial), jadi diff snapshot DILEWATI dan nol baris close ditulis jalur ini.
+
+    Yang tetap dikerjakan: ukur jarak antara riwayat bursa dan ledger memakai SATU skema kunci,
+    lalu beri tahu operator cara menutupnya secara eksplisit (reconcile_history --write).
+    Menulis riwayat ke ledger bukan keputusan otomatis sebuah siklus monitoring.
+    """
+    try:
+        api_keys = rehydrate_closed_keys_from_exchange(client)
+    except Exception as exc:
+        log.warning(
+            f"🧊 [START DINGIN] rehidrasi riwayat dari API gagal ({type(exc).__name__}: {str(exc)[:120]}) "
+            "— siklus deteksi dilewati, nol baris close ditulis"
+        )
+        return current_snapshot, []
+
+    known = set(_load_closed_ids(closed_ids_path)) | _fetch_recorded_closed_ids(closed_csv_path)
+    gap = sorted(api_keys - known)
+    log.warning(
+        f"🧊 [START DINGIN] cache miss terdeteksi: {len(api_keys)} posisi closed di bursa, "
+        f"{len(gap)} belum tercatat di ledger. Diff snapshot dilewati (nol baris UNKNOWN). "
+        "Backfill sadar: `python walt_bot.py reconcile_history --write`."
+    )
+    return current_snapshot, []
+
+
 def _detect_and_log_exchange_closes(
     client: WaltClient,
     active_positions: list[dict],
     snapshot_path: str = "logs/open_snapshot.json",
     closed_ids_path: str = CLOSED_IDS_PATH,
     closed_csv_path: str = "logs/closed_history.csv",
+    state_warm: Optional[bool] = None,
 ) -> tuple[dict[str, dict], list[dict]]:
     """
     Bandingkan posisi open saat ini dengan snapshot run sebelumnya (logs/open_snapshot.json).
@@ -2131,6 +2255,12 @@ def _detect_and_log_exchange_closes(
             "verdict": verdict,
         }
     _log_failure_summary("detect_exchange_closes.infer_verdict", verdict_failures, total=len(active_positions))
+
+    # R6-2: cache Actions miss (deteksi dari `cache-hit`, bukan dari tebakan). Snapshot lama tidak
+    # boleh dipakai sebagai dasar deteksi — itu yang membuat close fiktif berlabel UNKNOWN.
+    warm = is_state_warm() if state_warm is None else bool(state_warm)
+    if not warm:
+        return _handle_cold_detect_cycle(client, current_snapshot, closed_ids_path, closed_csv_path)
 
     # Hindari false missing jika prev_snapshot masih format lama (key = contract_id)
     active_cids = {str(v.get("contract_id")) for v in current_snapshot.values()}
@@ -2967,6 +3097,12 @@ def scan_with_research(
             raw_opps = []
         else:
             raw_opps = summary.get("_raw_opportunities", [])
+
+        # R6-2: start dingin (cache Actions miss) TANPA memori risiko => lewati entry siklus ini.
+        cold_allowed, cold_reason = check_cold_state_entry_gate()
+        if not cold_allowed:
+            _notify_cold_state_once(cold_reason)
+            raw_opps = []
         for opp_idx, opp in enumerate(raw_opps):
             if active_slot_count >= max_slots:
                 log.info(f"  Slot maksimal tercapai ({active_slot_count}/{max_slots}), hentikan alokasi.")
@@ -3278,6 +3414,12 @@ def market_execute(
     cb_tripped, cb_reason = check_daily_circuit_breaker(total_equity)
     if cb_tripped:
         log.warning(f"🚨 [CIRCUIT BREAKER] {cb_reason}")
+        opps = []
+
+    # R6-2: start dingin tanpa memori risiko => lewati entry siklus ini (dan hemat panggilan riset).
+    cold_allowed, cold_reason = check_cold_state_entry_gate()
+    if not cold_allowed:
+        _notify_cold_state_once(cold_reason)
         opps = []
 
     for opp in opps:
@@ -3868,6 +4010,8 @@ def build_safe_stdout_summary(command: str, result: Any) -> dict[str, Any]:
         "opportunities_count": len(opps) if isinstance(opps, list) else None,
         "market_gear": regime.get("market_gear") or result.get("gear"),
         "crypto_gear": regime.get("crypto_gear"),
+        # R6-2: marker hangat/dingin terlihat di Step Summary tanpa membocorkan isi state.
+        "state_warm": is_state_warm(),
     }
     return {k: v for k, v in summary.items() if v is not None}
 

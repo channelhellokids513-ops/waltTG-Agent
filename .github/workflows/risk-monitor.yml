@@ -25,6 +25,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Restore logs/state cache
+        id: restore_state
         uses: actions/cache/restore@v4
         with:
           path: logs/
@@ -33,6 +34,7 @@ jobs:
             walt-logs-state-
 
       - name: Restore risk-monitor open_snapshot cache
+        id: restore_snapshot
         uses: actions/cache/restore@v4
         with:
           path: logs/open_snapshot.json
@@ -56,6 +58,7 @@ jobs:
           JOB_TIMEOUT_MIN: "20"
           LOG_REDACT: "true"
           STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}
+          WALT_STATE_WARM: ${{ steps.restore_state.outputs.cache-hit == 'true' && steps.restore_snapshot.outputs.cache-hit == 'true' }}
         run: |
           mkdir -p logs
           set -o pipefail
@@ -91,4 +94,5 @@ jobs:
           print(f"- **Positions Checked:** `{s.get('positions_checked', '-')}`")
           print(f"- **Actions Count:** `{s.get('actions_count', 0)}`")
           print(f"- **Gear:** market=`{s.get('market_gear', '-')}`, crypto=`{s.get('crypto_gear', '-')}`")
+          print(f"- **State Warm (cache hit):** `{s.get('state_warm', 'tidak tercatat')}`")
           PY

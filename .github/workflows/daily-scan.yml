@@ -34,6 +34,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Restore logs/snapshot cache
+        id: restore_state
         uses: actions/cache/restore@v4
         with:
           path: logs/
@@ -60,6 +61,7 @@ jobs:
           STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}
           AUTO_EXECUTE_ON_SCAN: ${{ github.event.inputs.auto_execute || vars.AUTO_EXECUTE_ON_SCAN || 'true' }}
           DRY_RUN: ${{ github.event.inputs.dry_run || vars.DRY_RUN || 'false' }}
+          WALT_STATE_WARM: ${{ steps.restore_state.outputs.cache-hit == 'true' }}
         run: |
           mkdir -p logs
           set -o pipefail
@@ -91,4 +93,5 @@ jobs:
           print(f"- **Opportunities Count:** `{s.get('opportunities_count', 0)}`")
           print(f"- **Executions Count:** `{s.get('executions_count', 0)}`")
           print(f"- **Gear:** market=`{s.get('market_gear', '-')}`, crypto=`{s.get('crypto_gear', '-')}`")
+          print(f"- **State Warm (cache hit):** `{s.get('state_warm', 'tidak tercatat')}`")
           PY

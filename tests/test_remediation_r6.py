@@ -6,7 +6,10 @@ penulisan ke state produksi (fixture isolate_writes conftest + path tmp_path eks
 from __future__ import annotations
 
 import csv
+import datetime as _dt
+import inspect
 import io
+import json
 
 import pytest
 
@@ -378,3 +381,250 @@ def test_default_sheet_id_hilang_dari_kode():
     src = io.open("sheet_logger.py", encoding="utf-8").read()
     assert "DEFAULT_SPREADSHEET_ID" not in src
     assert not any(line.strip().startswith("DEFAULT_SPREADSHEET_ID") for line in src.splitlines())
+
+
+# ==============================================================================
+# ITEM 2 [R6-2] — cache-miss terdeteksi; start dingin tidak menyamar jadi "semua tertutup"
+# ==============================================================================
+import textwrap
+from pathlib import Path
+
+import yaml
+
+WORKFLOWS = Path(".github/workflows")
+TRADING_WORKFLOWS = ["daily-scan.yml", "market-execute.yml", "crypto-execute.yml", "risk-monitor.yml"]
+
+
+def _snapshot_with_stale_entry(key: str = "777:123.45:2026-11-01T00:00:00Z") -> dict:
+    return {
+        key: {
+            "position_id": key,
+            "contract_id": 777,
+            "base_asset": "OLDC",
+            "side": "long",
+            "leverage": 5,
+            "margin": 2.5,
+            "entry_price": 123.45,
+            "funding_paid": 0.0,
+            "tp": 130.0,
+            "sl": 120.0,
+            "opened_at": "2026-11-01T00:00:00Z",
+            "verdict": "GO",
+        }
+    }
+
+
+def _write_snapshot(path: Path, data: dict) -> None:
+    path.write_text(__import__("json").dumps(data), encoding="utf-8")
+
+
+def test_cold_dengan_snapshot_basi_nol_baris_close(tmp_path, monkeypatch, captured_closes):
+    """S2 inti: snapshot basi + cache miss tidak boleh melahirkan baris UNKNOWN."""
+    monkeypatch.setenv("GOOGLE_SHEET_ID", "")
+    sheet_logger.reset_ledger_warning_state()
+    snap = tmp_path / "open_snapshot.json"
+    _write_snapshot(snap, _snapshot_with_stale_entry())
+    client = FakeClient([])
+
+    snapshot, events = walt_bot._detect_and_log_exchange_closes(
+        client,
+        active_positions=[],
+        snapshot_path=str(snap),
+        closed_ids_path=str(tmp_path / "closed_ids.json"),
+        closed_csv_path=str(tmp_path / "closed_history.csv"),
+        state_warm=False,
+    )
+
+    assert events == []
+    assert captured_closes == [], "start dingin tidak boleh menulis baris ledger sama sekali"
+    assert snapshot == {}
+
+
+def test_warm_dengan_snapshot_basi_memang_mencatat_close_bukti_cold_tidak_vakum(
+    tmp_path, monkeypatch, captured_closes
+):
+    """
+    Non-vacuity: dalam kondisi hangat, snapshot yang hilang dari daftar posisi open memang
+    menghasilkan satu percobaan pencatatan close. Jadi test dingin di atas menguji sesuatu.
+    """
+    monkeypatch.setenv("GOOGLE_SHEET_ID", "")
+    monkeypatch.setattr(walt_bot, "send_telegram", lambda *a, **k: False)
+    sheet_logger.reset_ledger_warning_state()
+    snap = tmp_path / "open_snapshot.json"
+    stale = _snapshot_with_stale_entry()
+    _write_snapshot(snap, stale)
+    client = FakeClient([])
+
+    _snapshot, events = walt_bot._detect_and_log_exchange_closes(
+        client,
+        active_positions=[],
+        snapshot_path=str(snap),
+        closed_ids_path=str(tmp_path / "closed_ids.json"),
+        closed_csv_path=str(tmp_path / "closed_history.csv"),
+        state_warm=True,
+    )
+
+    assert len(events) == 1
+    assert len(captured_closes) == 1
+
+
+def test_cold_saat_api_gagal_tetap_nol_baris_dan_satu_peringatan(tmp_path, monkeypatch, caplog, captured_closes):
+    monkeypatch.setenv("GOOGLE_SHEET_ID", "")
+
+    class DeadClient:
+        def list_positions(self, statuses=None):
+            raise RuntimeError("exchange unreachable")
+
+    snap = tmp_path / "open_snapshot.json"
+    _write_snapshot(snap, _snapshot_with_stale_entry())
+    sheet_logger.reset_ledger_warning_state()
+    caplog.clear()
+
+    _snapshot, events = walt_bot._detect_and_log_exchange_closes(
+        DeadClient(),
+        active_positions=[],
+        snapshot_path=str(snap),
+        closed_ids_path=str(tmp_path / "closed_ids.json"),
+        closed_csv_path=str(tmp_path / "closed_history.csv"),
+        state_warm=False,
+    )
+
+    assert events == [] and captured_closes == []
+    cold_lines = [r for r in caplog.records if "START DINGIN" in r.getMessage()]
+    assert len(cold_lines) == 1
+
+
+def test_rehidrasi_pakai_kunci_yang_sama_dengan_ledger(tmp_path, monkeypatch):
+    """Rehidrasi dedupe harus collapse ke identitas baris hasil reconcile_history."""
+    monkeypatch.setenv("GOOGLE_SHEET_ID", "")
+    payload = _closed_payload(3)
+    client = FakeClient(payload)
+    api_keys = walt_bot.rehydrate_closed_keys_from_exchange(client)
+    ledger_keys = {r["position_id"] for r in walt_bot.build_backfill_rows(payload)}
+    assert api_keys == ledger_keys and len(api_keys) == 3
+
+
+def test_risk_memory_available_membedakan_dingin_dan_hangat(tmp_path):
+    p = tmp_path / "market_regime.json"
+    assert walt_bot.risk_memory_available(str(p)) is False, "file tidak ada = memori hilang"
+
+    p.write_text("{}", encoding="utf-8")
+    assert walt_bot.risk_memory_available(str(p)) is False
+
+    p.write_text('{"cooldowns": {}, "entry_history_24h": []}', encoding="utf-8")
+    assert walt_bot.risk_memory_available(str(p)) is False, "state ada tapi kosong"
+
+    p.write_text('{"cooldowns": {"NVDA": 1790000000}}', encoding="utf-8")
+    assert walt_bot.risk_memory_available(str(p)) is True
+
+    p.write_text('{"daily_circuit_breaker": {"date_utc": "2026-11-20", "start_equity": 100}}', encoding="utf-8")
+    assert walt_bot.risk_memory_available(str(p)) is True
+
+
+def test_gerbang_entry_dingin_konservatif_dan_override(tmp_path, monkeypatch):
+    empty_regime = tmp_path / "market_regime.json"
+    empty_regime.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setenv("WALT_STATE_WARM", "false")
+    monkeypatch.delenv("WALT_ALLOW_COLD_ENTRY", raising=False)
+    allowed, reason = walt_bot.check_cold_state_entry_gate(str(empty_regime))
+    assert allowed is False and "state dingin" in reason
+
+    monkeypatch.setenv("WALT_ALLOW_COLD_ENTRY", "true")
+    allowed, reason = walt_bot.check_cold_state_entry_gate(str(empty_regime))
+    assert allowed is True and "WALT_ALLOW_COLD_ENTRY" in reason
+
+    monkeypatch.delenv("WALT_ALLOW_COLD_ENTRY")
+    warm_regime = tmp_path / "warm.json"
+    warm_regime.write_text('{"cooldowns": {"BTC": 9999999999}}', encoding="utf-8")
+    allowed, _ = walt_bot.check_cold_state_entry_gate(str(warm_regime))
+    assert allowed is True
+
+    monkeypatch.setenv("WALT_STATE_WARM", "true")
+    allowed, _ = walt_bot.check_cold_state_entry_gate(str(empty_regime))
+    assert allowed is True, "kondisi hangat tidak boleh terkena gerbang"
+
+
+def _steps(wf: dict) -> list[dict]:
+    job = next(iter(wf["jobs"].values()))
+    return job["steps"]
+
+
+def _step_with_id(steps: list[dict], step_id: str) -> dict:
+    found = [s for s in steps if s.get("id") == step_id]
+    assert found, f"langkah dengan id={step_id!r} tidak ada"
+    return found[0]
+
+
+@pytest.mark.parametrize("filename", TRADING_WORKFLOWS)
+def test_workflow_mengekspos_cache_hit_ke_WALT_STATE_WARM(filename):
+    wf = yaml.safe_load((WORKFLOWS / filename).read_text(encoding="utf-8"))
+    steps = _steps(wf)
+
+    restore = _step_with_id(steps, "restore_state")
+    assert "cache/restore" in restore["uses"], "id harus menempel pada langkah restore, bukan save"
+
+    run_steps = [s for s in steps if s.get("env") and "WALT_STATE_WARM" in s["env"]]
+    assert run_steps, f"{filename}: tidak ada langkah run yang menerima WALT_STATE_WARM"
+    expr = run_steps[0]["env"]["WALT_STATE_WARM"]
+    assert "steps.restore_state.outputs.cache-hit" in expr, f"{filename}: WALT_STATE_WARM bukan dari cache-hit: {expr}"
+
+    if filename == "risk-monitor.yml":
+        snap = _step_with_id(steps, "restore_snapshot")
+        assert "cache/restore" in snap["uses"]
+        assert "steps.restore_snapshot.outputs.cache-hit" in expr, (
+            "risk-monitor punya 2 cache: keduanya harus dihitung"
+        )
+
+
+@pytest.mark.parametrize("filename", TRADING_WORKFLOWS)
+def test_workflow_mencetak_marker_state_di_step_summary(filename):
+    wf = yaml.safe_load((WORKFLOWS / filename).read_text(encoding="utf-8"))
+    summary_steps = [s for s in _steps(wf) if s.get("name", "").startswith("Publish Summary")]
+    assert summary_steps, f"{filename} kehilangan Publish Summary"
+    assert "state_warm" in summary_steps[0]["run"], f"{filename}: marker dingin tidak masuk Step Summary"
+
+
+def test_marker_state_warm_ada_di_safe_summary(monkeypatch):
+    monkeypatch.setenv("WALT_STATE_WARM", "true")
+    assert walt_bot.build_safe_stdout_summary("monitor", {"actions": []})["state_warm"] is True
+
+    monkeypatch.setenv("WALT_STATE_WARM", "false")
+    assert walt_bot.build_safe_stdout_summary("monitor", {"actions": []})["state_warm"] is False
+
+    monkeypatch.delenv("WALT_STATE_WARM")
+    assert walt_bot.build_safe_stdout_summary("monitor", {"actions": []})["state_warm"] is True, (
+        "CLI lokal tetap hangat (logs/ persisten) agar perilaku lama tidak berubah"
+    )
+
+
+def test_alert_state_dingin_hanya_satu_walau_delapan_kandidat(monkeypatch):
+    sent: list[str] = []
+    monkeypatch.setattr(walt_bot, "send_telegram", lambda text, *a, **k: sent.append(text) or True)
+    walt_bot.reset_cold_state_alert_state()
+    try:
+        for _ in range(8):
+            walt_bot._notify_cold_state_once("state dingin: batas harian/cooldown tidak diketahui")
+        assert len(sent) == 1, "satu siklus dingin = satu alert, bukan delapan"
+        assert "WALT_ALLOW_COLD_ENTRY" in sent[0]
+    finally:
+        walt_bot.reset_cold_state_alert_state()
+
+
+def test_kedua_jalur_entry_memanggil_gerbang_dingin_sebelum_order(monkeypatch):
+    """
+    Guard struktural: gerbang dingin harus dieksekusi SEBELUM panggilan open_position() di kedua
+    jalur entry. Kalau seseorang memindahkan/menghapus gerbang, test ini merah — dan itu memang
+    yang diinginkan (gerbang yang selalu hijau bukan gerbang).
+    """
+    for fn_name in ("market_execute", "scan_with_research"):
+        src = textwrap.dedent(inspect.getsource(getattr(walt_bot, fn_name)))
+        gate_at = src.find("check_cold_state_entry_gate(")
+        order_at = src.find("open_position(")
+        assert gate_at != -1, f"{fn_name} tidak lagi memanggil check_cold_state_entry_gate"
+        assert order_at != -1, f"{fn_name}: panggilan open_position tidak ditemukan (perlu ditinjau ulang)"
+        assert gate_at < order_at, f"{fn_name}: gerbang dingin harus sebelum order apa pun"
+        assert "_notify_cold_state_once(" in src[:order_at], f"{fn_name}: alert dingin harus di jalur gerbang"
+        assert "opps = []" in src[:order_at] or "raw_opps = []" in src[:order_at], (
+            f"{fn_name}: gerbang dingin harus benar-benar menghapus kandidat entry"
+        )
