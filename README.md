@@ -53,7 +53,7 @@ Autonomous delta-neutral & directional funding rate arbitrage trading system unt
 
 ### 1. Dual-AI Swarm Consensus (50/50 Vendor Balance)
 Analisis sentimen berita, katalis earnings, dan momentum makro dilakukan oleh 4 voter seimbang dari dua vendor terdepan:
-- **Alibaba Cloud:** `qwen-turbo` & `qwen-plus`
+- **Alibaba Cloud:** `qwen-flash` & `qwen-plus` (V1 dulunya `qwen-turbo` — dipensiunkan upstream; lihat *Jendela Pemeliharaan & Pemulihan Kredensial*)
 - **Google Cloud:** `gemini-flash-latest` & `gemini-pro-latest`
 - **Meta-Aggregator:** `qwen-max` mengevaluasi konsensus 7 parameter standar (**P1–P7**) untuk menghasilkan keputusan:
   - `GO` (Full size $2.50 – $3.00 margin)
@@ -279,15 +279,38 @@ Di GitHub: **Settings -> Secrets and variables -> Actions -> New repository secr
   Karena sisi Scheduler tidak bisa diamati dari GitHub, ronde 6 menutup risikonya dari sisi gejala:
   `watchdog.yml` membandingkan usia run `success` tiap workflow terhadap ambang berbasis cadensi
   (lihat §"Watchdog penuh") dan akan membunyikan alert walau Scheduler berhenti menembak sama sekali.
-- **Membaca Google Sheet lewat gviz butuh sheet bisa diakses publik (link: Viewer).** Sheet yang
-  dipakai pemilik (sidik jari `sha8=06bded7f`, panjang 44) saat ini **privat**, jadi gviz export
-  menjawab **HTTP 401** dengan halaman login untuk keempat tab — bukan masalah ID salah, melainkan
-  level berbagi. Pilihan (keputusan pemilik): (a) ubah berbagi sheet ke *Anyone with the link: Viewer*
-  agar jalur baca gviz berfungsi tanpa perubahan kode, atau (b) tetap privat dan tambahkan endpoint
-  **baca** di Apps Script (`doGet`) yang dipanggil `sheet_logger` memakai `GOOGLE_SHEET_WEBHOOK_URL`
-  — script berjalan sebagai pemilik sehingga bisa membaca tanpa membuka data ke publik. Sementara itu
-  sumber kebenaran riwayat tetap **API bursa** (`reconcile_history`), dan `stats` menandai ledger yang
-  tidak terbaca secara eksplisit.
+- **Membaca Google Sheet lewat gviz butuh sheet bisa diakses publik (link: Viewer).** Jalur ini
+  **TERBUKTI BERFUNGSI** sejak 2026-11-20 13:53:42Z: `diagnostics.yml` membaca CSV gviz untuk keempat
+  tab dan `stats` melaporkan `Sumber ledger: ok` (sidik jari `sha8=06bded7f`, panjang 44 — ID tidak
+  pernah dicetak). Penyebab kegagalan sebelumnya **bukan** level berbagi, melainkan secret/variable CI
+  yang menunjuk ID sheet lain (`sha8=c8899991`, panjang 45) sehingga menjawab 401/404. Bila kelak
+  muncul lagi `401` dengan halaman login, urutannya: (1) cocokkan sidik jari `sha8` variable
+  `GOOGLE_SHEET_ID` dengan sheet yang Anda buka, (2) baru periksa level berbagi. Alternatif bila sheet
+  ingin tetap privat: tambahkan endpoint **baca** (`doGet`) di Apps Script dan panggil lewat
+  `GOOGLE_SHEET_WEBHOOK_URL` — script berjalan sebagai pemilik. Apapun itu, sumber kebenaran riwayat
+  tetap **API bursa** (`reconcile_history`), dan `stats` menandai ledger yang tidak terbaca secara
+  eksplisit — angka performansi tidak pernah dihitung dari asumsi.
+
+### 2b. Konfigurasi GitHub Repository Variables
+
+Beda dengan secret, **variable** terlihat nilainya di UI — dipakai untuk *knop* operasional sehingga
+status sistem bisa dibaca tanpa menebak. Di GitHub: **Settings → Secrets and variables → Actions →
+→ Variables → New repository variable** (atau `gh variable set`).
+
+| Variable | Default (bila tidak diset) | Fungsi |
+|---|---|---|
+| `MAINTENANCE_MODE` | `false` | Kill-switch: membungkam workflow entry + risiko saat pemulihan kredensial. |
+| `DRY_RUN` | `false` | `true` = pantau nyata, entry disimulasikan (`verdict: DRY_RUN`). Dipakai untuk pelepasan bertahap. |
+| `WALT_COLD_REHYDRATE` | `report` | Start dingin (cache Actions ter-eviksi): `report` = ukur & bunyikan jarak ledger-vs-bursa; `write` = tutup jarak lewat jalur backfill (backup dulu, PnL tetap *belum terukur*, dan diblokir selama `DRY_RUN=true`). |
+| `DASHSCOPE_MODEL_V1` | `qwen-flash` | Model Voter 1. `qwen-turbo` sudah dipensiunkan upstream (404) — jangan dipakai. |
+| `GEMINI_MODEL_V4` | `gemini-pro-latest` | Model Voter 4. |
+| `DASHSCOPE_MODEL_AGG` | `qwen-max` | Model meta-aggregator P1–P7. |
+| `DASHSCOPE_MODEL` | `qwen-plus` | Model Voter 2. |
+| `GEMINI_MODEL` | `gemini-flash-latest` | Model Voter 3. |
+| `WALT_TOKEN_SYNC` | `on` | `off` **menolak refresh** (bukan "refresh lalu buang hasilnya") — wajib `on` untuk workflow yang butuh OAuth. |
+| `WALT_WATCHDOG_DISPATCH_ENTRY` | `false` | `true` mengizinkan watchdog men-dispatch ulang workflow entry; default *alert-only* karena dispatch membuka order nyata. |
+| `GOOGLE_SHEET_ID` | — | ID spreadsheet ledger (yang benar bersidik jari `06bded7f`). |
+| `STRATEGY_CONFIG_JSON` | berkas `strategy_config.json` | Override parameter strategi dari CI tanpa commit. |
 
 
 ### 3. Hubungkan Google Cloud Scheduler Bridge (Opsional tapi Direkomendasikan)

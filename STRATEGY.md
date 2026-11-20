@@ -129,7 +129,7 @@ Memberi ruang napas bagi harga agar tidak terpicu *noise* jangka pendek sekaligu
 ## 5. Dual-AI Collaboration Layer (Qwen-Plus + Google Gemini)
 
 Khusus untuk instrumen saham US, sebelum order dieksekusi, bot menjalankan lapisan analisis fundamental dan sentimen menggunakan arsitektur **4-Voter Swarm AI + Qwen-Max Aggregator** (sesuai PRD 3.5) yang memadukan 4 model kecerdasan buatan dengan keseimbangan vendor 50/50:
-1. **V1: Alibaba Qwen-Turbo** — *Quick Signal Analyst* (deteksi kata kunci dan polaritas permukaan).
+1. **V1: Alibaba Qwen-Flash** — *Quick Signal Analyst* (deteksi kata kunci dan polaritas permukaan). Dulunya `qwen-turbo`; model tersebut sudah dipensiunkan di DashScope intl (404 `model_not_found`, diverifikasi 2026-11-20) sehingga nama model dapat dioverride lewat variable `DASHSCOPE_MODEL_V1`.
 2. **V2: Alibaba Qwen-Plus** — *Balanced Equity Analyst* (kredibilitas sumber berita dan konsistensi narasi).
 3. **V3: Google Gemini-Flash-Latest** — *Realtime Market Validator* (cek breaking news 24 jam dan katalis terkini).
 4. **V4: Google Gemini-Pro-Latest** — *Deep Multi-Angle Reasoner* (analisis kausalitas, contrarian crowdedness, dan pola historis).

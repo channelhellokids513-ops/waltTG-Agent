@@ -318,6 +318,87 @@ lakukan. Path dingin tetap terbukti di level unit (`test_gerbang_entry_dingin_ko
 marker fail-closed baru); bukti end-to-end ditunda sampai ada jalur rehidrasi, yang justru membuat
 keadaan dingin tidak lagi berbahaya.
 
+## 3g. Pra-Ronde 7 — input yang mati dihidupkan, dan nol palsu diburu (2026-11-20, 14:30–15:45 UTC)
+
+Pemilik memilih **Opsi B**: perbaiki input dulu, baru lepas `DRY_RUN`. Semua keputusan di bawah
+didasarkan pada **probe langsung**, bukan asumsi.
+
+### Probe model DashScope (penyebab voter V1 mati)
+
+| Model | HTTP | Kesimpulan |
+|---|---|---|
+| `qwen-turbo` | **404** `{"code":"model_not_found"}` | persis penyebab `Voter 1 (Qwen-Turbo) error` di 4/4 aset |
+| `qwen-turbo-latest` | 403 `access_denied` | bukan jalan keluar (akun tidak punya akses) |
+| **`qwen-flash`** | **200** | pengganti yang benar (generasi penerus turbo) |
+| `qwen-plus` / `qwen-max` | 200 / 200 | V2 dan meta-aggregator sehat sejak awal |
+| `qwen-plus-latest` | 403 "free quota exhausted" | varian `-latest` dihindari sebagai default |
+
+Perbaikan: `MODEL_V1 = os.getenv("DASHSCOPE_MODEL_V1", "qwen-flash")`, V4/aggregator ikut dapat
+dioverride, dan fallback 429 diperluas ke **404** (dengan alasan berbeda di log). 500 sengaja TIDAK
+memicu ganti model — itu bukan sinyal "model mati". **Hasil terverifikasi langsung:**
+`voters_count = 4 | voter_failures = []` untuk NVDA (V1–V4 + aggregator `qwen-max`, semua 200).
+
+### Jebakan "nol" pada kalender earnings (kelas bug yang lebih umum dari 401)
+
+`fetch_earnings_days` lama memetakan tanggal berapa pun ke `max(0, hari)`. Setelah 401 beres
+(alur: `fc.yahoo.com` untuk cookie → `/v1/test/getcrumb` → `quoteSummary?...&crumb=` **pada klien
+yang sama**; terbukti crumb + klien baru tetap 401), data asli menunjukkan:
+
+| Ticker | `earningsDate` | Interpretasi lama | Sekarang |
+|---|---|---|---|
+| NVDA | 2026-11-17 (**sudah lewat**) | `H-0` → **SKIP permanen** | `(None, "past_only")` |
+| AAPL | 2027-01-28 | `H-69` | `(69, "ok")` |
+| SPY | 404 (ETF tanpa kalender) | `no_data` diam-diam | `(None, "no_data")` — BUKAN outage |
+
+Ini menjelaskan sebagian SKIP yang selama ini tampak "bijak": tanggal rilis terakhir yang mengisi
+slot "berikutnya" akan membekukan aset dari entry selamanya. Aturan yang sama menjerat ETF: 404
+adalah "tidak ada kalender", bukan "sumber data mati", sehingga tidak ikut dialarm.
+
+### Register kesehatan input (prinsip: hijau = semua yang dipakai benar-benar hidup)
+
+`walt_bot.record_research_health()` / `flush_input_health()` mengumpulkan, sekali per siklus:
+`input.voter_swarm`, `input.earnings_source`, `input.riset_error`, `input.riset_hilang`,
+`input.riset_webhook` — lewat `_log_failure_summary` (satu baris + satu alert bila ≥3 item dan
+≥30%), lalu tampil di `logs/last_safe_summary.json` dan *Step Summary* sebagai `input_health`
+(dict kosong = bersih) dan `input_meta` (mis. `research_read_status`, `cold_rehydrate`).
+`no_data`/`past_only` sengaja TIDAK dialarm: itu kondisi data, bukan kerusakan sensor.
+
+Jalur baca riset Apps Script juga tidak lagi senyap: balasan 200-non-JSON kini tercatat
+`html_or_unparsable` (dengan peringatan 15-menit), fallback ke CSV lokal terlihat sebagai
+`local_csv`, dan webhook sukses-tapi-basi semua terlihat sebagai `empty`.
+
+### Start dingin tidak lagi berarti lubang permanen di ledger
+
+`WALT_COLD_REHYDRATE` (default `report` = perilaku lama). Mode `write` menutup jarak memakai
+**satu jalur yang sudah ada** (`reconcile_history(write=True)`: backup → label jujur → tanpa webhook),
+tetap **diblokir saat `DRY_RUN=true`**, dan nilai env tak dikenal jatuh ke `report` (fail-closed untuk
+penulisan). Variable sudah diset eksplisit di repo: `WALT_COLD_REHYDRATE=report`, `DASHSCOPE_MODEL_V1=qwen-flash`.
+
+### Koreksi diri selama ronde ini (semuanya tertangkap oleh guard, bukan oleh keberuntungan)
+
+1. Karakter CJK menyelinap ke docstring saya sendiri → dihapus; gerbang sanitasi sekarang juga
+   memeriksa berkas Python yang disentuh, bukan hanya dokumen.
+2. Test fallback 404 saya **awalnya salah** (lolos karena menyimpan referensi payload yang sama):
+   diperbaiki dengan menyalin payload.
+3. Non-vakuitas dibuktikan dengan mutasi: `_dry_run_requested()` saya paksa `False` →
+   tepat `test_mode_write_diblokir_saat_dry_run` yang gagal, lalu mutasi dikembalikan.
+4. Dua test higiene milik ronde 6 menegur saya dan **saya yang menyesuaikan diri**, bukan test-nya:
+   env baru wajib terdokumentasi (`.env.example` + tabel variable README) dan skrip probe tidak boleh
+   tertinggal di `logs/` (probe kini ditulis ke temp luar repo).
+5. Crumb sesi Yahoo hampir tercetak di log CI publik lewat INFO `httpx` → filter redaksi dipasang.
+6. README saya perbaiki: klaim "sheet privat → gviz 401" sudah **basi**; fakta terverifikasi
+   13:53:42Z adalah `Sumber ledger: ok` (punca lama = ID sheet salah, `sha8=c8899991`).
+
+### Yang masih terbuka setelah ronde ini
+
+- `DRY_RUN=true` (keputusan pemilik berikutnya, sesudah >=1 siklus hijau dengan swarm 4/4).
+- Backfill 46 baris belum ditulis; `WALT_COLD_REHYDRATE=report`.
+- Penjelasan 4 SKIP siklus 13:58Z (bukan bug): 3× `gerbang ekonomi funding vs fee`
+  (exp_funding 0.61–0.85% < cost 1.18% untuk hold 24h) dan 1× `High Risk Catalyst (P5=0.81)`.
+
+Ukuran suite: **223 → 253 test** (+30), semuanya lulus; ledger lokal tidak disentuh
+(`logs/closed_history.csv` tetap `C9BFC1D811B6`).
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 
@@ -479,6 +560,16 @@ mempertahankan semuanya:
     tidak pernah tercatat (bukti: 52 di bursa vs 17 di sheet). State yang harus bertahan lintas eviksi
     wajib punya sumber tahan-lama (API bursa sebagai kebenaran, sheet sebagai mirror) dan jalur rehidrasi
     sadar saat cold start — bukan didiamkan menjadi amnesia, dan bukan pula diisi dengan PnL karangan.
+13. **(Pra-Ronde 7) "Tidak ada data" tidak pernah boleh menjadi angka nol.** `max(0, hari)` atas tanggal
+    lampau, PnL kosong jadi `0.0`, atau harga keluar tak terbaca jadi `0` — semuanya terdengar aman
+    tetapi menggeser perilaku sistem secara diam-diam. Yang benar: `None` + status (`past_only`,
+    `no_data`, `unavailable`), dan pemanggil memutuskan dengan gerbang yang eksplisit. Nol adalah
+    nilai; `None` adalah pengakuan.
+14. **(Pra-Ronde 7) Aset pihak ketiga bukan fakta permanen.** Nama model, endpoint, dan syarat
+    autentikasi (cookie+crumb) bisa dicabut upstream kapan pun; kode yang menyimpannya sebagai konstanta
+    akan mati tanpa suara. Setiap input eksternal wajib: (a) dapat dioverride lewat variable tanpa
+    deploy, (b) melaporkan statusnya per siklus, (c) kegagalannya masuk agregator kesehatan input —
+    bukan hanya baris log yang tidak dibaca siapa pun.
 
 
 ## 7. ID spreadsheet: status terbaru (yang disanitasi hanya nilainya, bukan keberadaannya)
