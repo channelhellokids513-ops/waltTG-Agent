@@ -772,6 +772,67 @@ Selisih keduanya memisahkan "mustahil" dari "longgar", tapi alat ukurnya
     adalah menebak di antara dua dunia - bukan optimasi.
 (d) Tidak ada perubahan `strategy_config` yang saya lakukan di ronde ini.
 
+## 3m. Dokumen referensi pemilik (Market Gravity + Comfort Point + Monte Carlo): mana yang saya pakai, mana yang saya bantah (2026-11-21)
+
+**Masuk.** `penelitian_model_market_gravity_implementasi_python.md`. Isinya sebagian besar
+transkripsi Pine yang cocok dengan transkripsi baris-per-baris saya (konstanta, bobot
+strength, decay Cauchy, half-life, FSM, modifier). Tambahan barunya dua: **Comfort Point**
+(pusat massa magnet) dan **peramalan drift-diffusion Monte Carlo** dengan probabilitas
+first-passage.
+
+**Dipakai** (diimplementasikan pure-Python, tanpa numpy/pandas karena keduanya tidak ada
+di `requirements.txt`): `GravitySnapshot` + `analyze_market_gravity(trace_every=...)`,
+`comfort_points()`, `forecast_first_passage()`, `calibrate_diffusion()`, dan
+`tools/gravity_strategy.py`. Semua diuji (`tests/test_market_gravity.py`: 9 test baru;
+suite 387 lulus).
+
+**Dibantah dengan ukuran, bukan pendapat.**
+1. **Konstanta Monte Carlo dokumen itu tidak pernah difit.** Ia memakai alpha=0,12,
+   beta=0,08, gamma=0,65. Difit pada 14.700 pasangan (bar, hari berikutnya) dari 20 koin
+   bar harian: **alpha=+0,0278** (dokumen 4,3x terlalu besar), **beta=+0,0027** (30x
+   terlalu besar), **gamma=0,676** (ini justru benar, ~4% meleset), dengan **R²=0,0002**.
+   Artinya: skala difusi terhadap ATR valid, tetapi DRIFT yang diklaim berasal dari
+   gravity/trend hampir tidak ada. Konsekuensinya tegas - probabilitas first-passage dari
+   model ini TIDAK boleh dipakai untuk ukuran posisi.
+2. **Probabilitas first-passage BELUM Tervalidasi (bukan sekadar gagal).** Setelah
+   perbandingan dibuat apple-to-apple (prediksi dikondisikan pada "salah satu magnet
+   tersentuh"), hanya satu decile yang punya sampel cukup (n~40-44): prediksi ~2-4%
+   terhadap kenyataan ~16-18%, rata-rata selisih ~13 poin. Dengan n total ~160 prediksi
+   ini TERLALU SEDIKIT untuk menerima maupun menolak model - yang sah disimpulkan adalah
+   "belum terbukti", dan itu sudah cukup untuk melarangnya dipakai menentukan ukuran posisi.
+3. **Klaim "GOOGLEFINANCE(...) menyediakan data historis"** perlu diperkecil. Yang benar:
+   Google Finance menyediakan data **harian/mingguan** melalui Sheets; ia tidak
+   menyediakan intraday yang stabil, dan (terverifikasi di 3l) halaman quotenya tidak
+   memuat deret historis sama sekali. Untuk universe perps kita, sumber bar tetap
+   Hyperliquid/Binance; Google Finance hanya layak jadi pembanding harga - sudah dibuat
+   sebagai `tools/gravity_parity_check.py`.
+
+**Temuan positif pertama dari seluruh rangkaian ini.** Aturan **fade rejected sweep**
+(harga menyapu magnet, lalu ditutup kembali ke sisi asal - status `Rejected` di FSM)
+menghasilkan arah yang lebih baik dari cerminannya SECARA KONSISTEN pada semua bentuk
+target: selisih gross terhadap null +0,59R (R1), +0,68R (R2), +0,56R (R3), +0,42R
+(magnet). Ini satu-satunya sinyal di repo ini yang melampaui kontrolnya. Tapi bentuk
+target menentukan apakah tepi itu survives:
+
+| target (bar 1d, 20 koin, SL = sweep + 0,5 ATR) | trades | win% | grossR | net@0,18% | net@1,18% | tahan |
+|---|---|---|---|---|---|---|
+| fade_R1 | 2202 | 71,3 | +0,129 | **+0,075** | −0,224 | 2,2 bar |
+| fade_R2 | 1509 | 57,3 | −0,011 | −0,073 | −0,413 | 5,3 |
+| fade_R3 | 1104 | 38,2 | −0,230 | −0,296 | −0,659 | 8,9 |
+| fade_magnet | 1058 | 31,5 | −0,262 | −0,329 | −0,704 | 9,6 |
+| null_R1 (cermin) | 2202 | 27,5 | −0,457 | −1,180 | −5,192 | 2,2 |
+
+Ini sekaligus menjawab permintaan RR 1:3 dengan cara yang paling tegas: **RR 1:3 pada
+sinyal ini menghasilkan win rate 38,2% (di atas 30%) tapi EV-nya NEGATIF bahkan sebelum
+biaya** - tepi strukturnya nyata, tetapi berumur pendek (habis dalam ~2 hari), sehingga
+memaksa TP sejauh 3R justru membuangnya. Bentuk yang membayar: TP = 1x jarak stop.
+
+**Batas.** In-sample, 750 bar harian (±3 tahun), tanpa walk-forward, satu buffer SL
+(0,5 ATR), biaya dua titik (0,18% dan 1,18%) yang keduanya BELUM terukur pada bursa, dan
+belum termasuk carry funding. Pada tahan 2,2 bar dan risiko ~3,3%, carry 0,52%/hari
+menambah ~0,35R - cukup untuk membalik net@1,18% menjadi sedikit positif, yang lagi-lagi
+berarti **semua kesimpulan ekonomi bergantung pada pengukuran biaya yang belum dikerjakan**.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 

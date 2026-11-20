@@ -395,6 +395,107 @@ def test_scan_payload_is_name_keyed_for_header_reconciliation():
     assert all(name in sent["header"] for name in sheet_logger.MG_COLUMNS)
 
 
+# --- Comfort point, kalibrasi drift, dan Monte Carlo (ekstensi dokumen referensi) --
+
+
+def _snapshot(**overrides):
+    base = dict(
+        bar_index=10, close=100.0, atr=2.0, trend_bias=0.0, regime="Range",
+        net_gravity=0.0, bullish_pressure=50.0,
+        upper=[mg.Magnet(price=110.0, zone_low=109.0, zone_high=111.0, score=80.0, state="Active",
+                         strength=70.0, distance_atr=4.5, accessibility=0.1, freshness=0.9,
+                         member_count=3, touches=2, age=10, sources="Swing High")],
+        lower=[mg.Magnet(price=90.0, zone_low=89.0, zone_high=91.0, score=40.0, state="Active",
+                         strength=60.0, distance_atr=4.5, accessibility=0.1, freshness=0.9,
+                         member_count=2, touches=1, age=20, sources="Swing Low")],
+    )
+    base.update(overrides)
+    return mg.GravitySnapshot(**base)
+
+
+def test_comfort_point_is_score_weighted_centre_of_mass():
+    comfort = mg.comfort_points(_snapshot())
+    assert abs(comfort["structural"] - (80.0 * 110.0 + 40.0 * 90.0) / 120.0) < 1e-9
+    assert abs(comfort["anchored"] - (80.0 * 110.0 + 40.0 * 90.0 + 50.0 * 100.0) / 170.0) < 1e-9
+    assert abs(comfort["distance_atr"] - (comfort["structural"] - 100.0) / 2.0) < 1e-12
+
+
+def test_comfort_point_without_magnets_falls_back_to_close_not_zero():
+    comfort = mg.comfort_points(_snapshot(upper=[], lower=[]))
+    assert comfort["structural"] == 100.0 and comfort["anchored"] == 100.0
+    assert comfort["evidence_weight"] == 0.0
+
+
+def test_calibrate_diffusion_recovers_a_known_linear_relation():
+    # y/ATR = 0.5*(net/100) + 0.25*trend  ->  alpha 0.5, beta 0.25, gamma ~ 0, r2 ~ 1
+    samples = []
+    for i in range(200):
+        net = float((i * 37) % 201 - 100)
+        trend = ((i * 53) % 201 - 100) / 100.0
+        atr = 1.5 + (i % 7) * 0.1
+        samples.append((net, trend, atr, atr * (0.5 * (net / 100.0) + 0.25 * trend)))
+    fit = mg.calibrate_diffusion(samples)
+    assert abs(fit["alpha"] - 0.5) < 1e-6
+    assert abs(fit["beta"] - 0.25) < 1e-6
+    assert fit["r2"] > 0.999 and fit["gamma"] < 1e-6
+
+
+def test_calibrate_refuses_to_fit_a_sample_too_small():
+    assert mg.calibrate_diffusion([(0.0, 0.0, 1.0, 0.0)] * 5) == {
+        "alpha": 0.0, "beta": 0.0, "gamma": 0.0, "r2": 0.0, "n": 5}
+
+
+def test_forecast_is_deterministic_and_probabilities_account_for_every_path():
+    kwargs = dict(alpha=0.03, beta=0.01, gamma=0.7, horizon_bars=10, simulations=600)
+    first = mg.forecast_first_passage(_snapshot(), seed=7, **kwargs)
+    second = mg.forecast_first_passage(_snapshot(), seed=7, **kwargs)
+    assert first == second, "forecast harus deterministik pada seed yang sama"
+    total = (first["prob_upper_magnet_first"] + first["prob_lower_magnet_first"]
+             + first["prob_ambiguous"] + first["prob_no_magnet"])
+    assert abs(total - 100.0) < 1e-6
+    assert first["p95_low"] <= first["p68_low"] <= first["median_end"] <= first["p68_high"] <= first["p95_high"]
+
+
+def test_forecast_drift_follows_the_sign_of_the_predictors():
+    up = mg.forecast_first_passage(_snapshot(net_gravity=100.0), alpha=0.30, beta=0.0,
+                                   gamma=0.25, horizon_bars=10, simulations=800)
+    down = mg.forecast_first_passage(_snapshot(net_gravity=-100.0), alpha=0.30, beta=0.0,
+                                     gamma=0.25, horizon_bars=10, simulations=800)
+    assert up["prob_upper_magnet_first"] > down["prob_upper_magnet_first"]
+    assert up["expected_move_pct"] > down["expected_move_pct"]
+
+
+def test_forecast_reports_unusable_instead_of_inventing_numbers():
+    assert mg.forecast_first_passage(_snapshot(atr=0.0), alpha=0.1, beta=0.1, gamma=0.1) == {"usable": 0.0}
+
+
+def test_trace_is_causal_and_reproducible_across_window_lengths():
+    """Snapshot pada bar yang sama harus identik walau panjang jendela berbeda."""
+    series = candles(420)
+    short = mg.analyze_market_gravity(series[:250], PARAMS, trace_every=25)
+    long = mg.analyze_market_gravity(series, PARAMS, trace_every=25)
+    assert short.usable and long.usable
+    assert len(long.trace) >= len(short.trace) > 0
+    assert all(snap.bar_index % PARAMS.pivot_right == 0 for snap in long.trace)
+    shared = {s.bar_index for s in short.trace} & {s.bar_index for s in long.trace}
+    assert shared
+    for index in shared:
+        a = next(s for s in short.trace if s.bar_index == index)
+        b = next(s for s in long.trace if s.bar_index == index)
+        assert (a.close, a.atr, a.net_gravity) == (b.close, b.atr, b.net_gravity)
+    for snap in long.trace:
+        for magnet in snap.upper:
+            assert magnet.zone_high >= snap.close - 1e-9
+        for magnet in snap.lower:
+            assert magnet.zone_low <= snap.close + 1e-9
+
+
+def test_analyze_stores_trace_only_on_request():
+    series = candles(320)
+    assert mg.analyze_market_gravity(series, PARAMS).trace == []
+    assert mg.analyze_market_gravity(series, PARAMS, trace_every=50).trace != []
+
+
 
 def test_source_notice_and_spec_are_retained():
     text = (ROOT / "market_gravity.py").read_text(encoding="utf-8")

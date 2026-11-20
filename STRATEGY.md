@@ -348,3 +348,49 @@ Sistem beroperasi dengan arsitektur hibrida: cron internal GitHub Actions diduku
 - [`google_apps_script.js`](file:///google_apps_script.js) — Skrip Google Apps Script endpoint penampung data spreadsheet.
 - [`.github/workflows/`](file:///.github/workflows/) — Definisi cron scheduler cloud runners (daily scan, risk monitor, market execute, crypto execute).
 - [PRD.md](file:///PRD.md) — Dokumen spesifikasi kebutuhan produk untuk Roadmap Evolusi SaaS Fase 1 & Fase 2.
+
+## 10. USULAN strategi berbasis struktur likuiditas (Ronde 8) - **BELUM AKTIF**
+
+Status: **usulan**. Tidak ada satu pun parameter di `strategy_config.py` yang diubah untuk
+ini. Angka-angkanya berasal dari `tools/gravity_strategy.py` (in-sample, 20 koin perps,
+750 bar harian, resolusi intrabar konservatif, satu posisi per aset) dan detailnya ada di
+`AUDIT.md` 3l-3m.
+
+### 10.1 Aturan yang diusulkan
+
+| Tahap | Aturan | Dasar ukur |
+|---|---|---|
+| Sinyal | FSM `market_gravity` mencatat status **`Rejected`** pada sebuah magnet (harga menyapu zona + buffer 0,05 ATR, lalu ditutup kembali ke sisi asal dalam 2 bar) | selisih gross terhadap cerminnya **+0,42R s.d. +0,68R** pada semua bentuk target |
+| Arah | **Fade**: rejected di atas -> short; rejected di bawah -> long | fade_R1 71,3% vs null_R1 27,5% |
+| Stop | ekstrem sweep **+/- 0,5 ATR(14)** di luar sisi yang tersapu | jarak stop terukur ~3,3% |
+| Target | **1x jarak stop** (BUKAN 3R, BUKAN magnet seberang) | grossR +0,129 pada R1 vs -0,230 pada R3 |
+| Durasi | biarkan bekerja ~2 bar; jangan memaksa target jauh | rata-rata tahan 2,2 bar |
+| Carry | hanya bila sisi posisi MENANGKAR funding (gerbang E5 tetap berlaku) | +0,35R pada 0,52%/hari x 2,2 hari |
+
+### 10.2 Dua syarat yang harus lolos sebelum ini menyentuh order
+
+1. **Ukur biaya round-trip nyata** (`tools/contract_economics.py`, belum ditulis; butuh
+   satu rotasi OAuth). Keputusan seluruhnya bergantung padanya: pada biaya 0,18% aturan
+   ini **+0,075R**; pada 1,18% ia **-0,224R**. Tidak ada ruang tafsir di antaranya.
+2. **Walk-forward / out-of-sample.** Semua angka di atas in-sample. Yang diterima sebagai
+   bukti adalah EV bersih positif pada data yang tidak dipakai untuk memilih aturannya.
+
+### 10.3 Konsekuensi risiko yang harus diterima lebih dulu
+
+- Stop ~3,3% pada leverage 2x = ~6,6% margin per posisi. Sizing per trade HARUS turun,
+  bukan TP dinaikkan; `max_slots` 15 pada 20 koin yang saling berkorelasi bukan
+  diversifikasi - saat satu faktor jatuh, sebagian besar posisi kena stop bersamaan.
+- Probabilitas first-passage Monte Carlo **tidak** dipakai sebagai dasar ukuran posisi:
+  kalibrasinya R2=0,0002 dan probabilitasnya belum tervalidasi (n ~160 prediksi, satu
+  decile terisi, selisih ~13 poin - AUDIT 3m). Boleh dipakai untuk menggambarkan sebaran,
+  bukan untuk menentukan besar posisi.
+- Comfort Point tetap dihitung dan ditulis ke kolom diagnostik sebagai konteks target
+  mean-reversion, tetapi TP aturan ini diambil dari jarak stop, bukan dari Comfort Point,
+  karena pada pengukuran di atas target Comfort Point terlalu dekat untuk membayar biaya.
+
+### 10.4 Kriteria promosi (biarkan angka yang memutuskan, bukan narasi)
+
+Naikkan ke `DRY_RUN=true` bila dan hanya bila: EV bersih > 0 pada hold-out, >= 200 trade
+out-of-sample, dan biaya nyata terukur. Bila itu terpenuhi, baru dibahas sebagai gerbang
+entry tambahan di samping E1-E5.
+

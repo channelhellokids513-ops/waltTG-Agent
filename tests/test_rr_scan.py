@@ -95,3 +95,4 @@ def test_signals_only_look_backwards():
     for rule, entries in table.items():
         for index in entries:
             assert 20 <= index < len(close), rule
+

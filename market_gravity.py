@@ -915,6 +915,60 @@ class Magnet:
 
 
 @dataclass
+class GravitySnapshot:
+    """Per-bar causal read-out, produced by ``analyze_market_gravity(trace_every=...)``.
+
+    Only information available up to ``bar_index`` is used, so a snapshot can feed a
+    backtest without leaking the future.
+    """
+
+    bar_index: int
+    close: float
+    atr: float
+    trend_bias: float
+    regime: str
+    net_gravity: float
+    bullish_pressure: float
+    upper: list[Magnet] = field(default_factory=list)
+    lower: list[Magnet] = field(default_factory=list)
+    rejected_up: list[float] = field(default_factory=list)
+    rejected_down: list[float] = field(default_factory=list)
+    accepted_up: list[float] = field(default_factory=list)
+    accepted_down: list[float] = field(default_factory=list)
+
+
+def comfort_points(snapshot: GravitySnapshot) -> dict[str, float]:
+    """Centre of mass of the ranked magnets - the reference document's key extension.
+
+    ``structural`` is the pure balance point of upper and lower magnets weighted by
+    rank weight x gravity score; ``anchored`` adds the current close as an inertial
+    anchor so the equilibrium cannot fly off when one side is thin. Weighting by score
+    is deliberate: score is relative attraction, the only quantity the source model
+    claims to measure. It is NOT a probability.
+    """
+    weights = (1.00, 0.65, 0.40)
+    numerator = 0.0
+    denominator = 0.0
+    for side in (snapshot.upper, snapshot.lower):
+        for position, magnet in enumerate(side[:3]):
+            weight = weights[position] * magnet.score
+            numerator += weight * magnet.price
+            denominator += weight
+    structural = (numerator / denominator) if denominator > 0 else snapshot.close
+    anchor_weight = 50.0
+    anchored = ((numerator + anchor_weight * snapshot.close) / (denominator + anchor_weight)
+                if denominator > 0 else snapshot.close)
+    atr = snapshot.atr
+    return {
+        "structural": structural,
+        "anchored": anchored,
+        "distance_atr": (structural - snapshot.close) / atr if atr > 0 else 0.0,
+        "evidence_weight": denominator,
+    }
+
+
+
+@dataclass
 class MarketGravityResult:
     """Deterministic structural read-out. Gravity scores are relative attraction, NOT probabilities."""
 
@@ -935,6 +989,7 @@ class MarketGravityResult:
     net_gravity: float = 0.0
     pools_upper: int = 0
     pools_lower: int = 0
+    trace: list[GravitySnapshot] = field(default_factory=list)
 
     @property
     def usable(self) -> bool:
@@ -961,6 +1016,57 @@ class MarketGravityResult:
         }
 
 
+def _context_at(index, fast_ema, slow_ema, adx_values, atr_average, atr_value) -> tuple[float, str]:
+    """Trend bias and regime at one bar (L2702-L2743), reused by trace and final read-out."""
+    bias = 0.0
+    if fast_ema[index] is not None and slow_ema[index] is not None and atr_value > 0:
+        bias = clamp_signed((fast_ema[index] - slow_ema[index]) / (atr_value * 2.0))
+    regime = "Range"
+    adx_value, atr_avg = adx_values[index], atr_average[index]
+    if adx_value is not None and atr_avg is not None:
+        if adx_value >= 25 and atr_value > atr_avg * 1.05:
+            regime = "Trend Expansion"
+        elif adx_value >= 25:
+            regime = "Trend"
+        elif atr_value < atr_avg * 0.85:
+            regime = "Compression"
+    return bias, regime
+
+
+def _rank_side(
+    side: SidePools,
+    bar_index: int,
+    close: float,
+    current_atr: float,
+    trend_bias: float,
+    direction: int,
+    regime: str,
+    timeframe_seconds: float,
+    params: GravityParams,
+) -> tuple[list[Magnet], float]:
+    """Top-3 magnets for one side, ranked by gravity (exclusion by argmax picks, as Pine)."""
+    weights = (params.primary_rank_weight, params.secondary_rank_weight, params.tertiary_rank_weight)
+    scored = [
+        (gravity_components(pool, bar_index, close, current_atr, trend_bias, direction, regime,
+                            timeframe_seconds, params), pool)
+        for pool in side.eligible(close, current_atr, direction)
+    ]
+    scored.sort(key=lambda pair: pair[0]["gravity"], reverse=True)
+    magnets: list[Magnet] = []
+    pull = 0.0
+    for position, (parts, pool) in enumerate(scored[:3]):
+        pull += parts["gravity"] * weights[position]
+        magnets.append(
+            Magnet(price=pool.centroid, zone_low=pool.zone_low, zone_high=pool.zone_high,
+                   score=parts["gravity"], state=STATE_NAMES[pool.state],
+                   strength=parts["liquidity_strength"], distance_atr=parts["distance_atr"],
+                   accessibility=parts["accessibility"], freshness=parts["freshness"],
+                   member_count=pool.member_count, touches=pool.independent_touches,
+                   age=int(parts["age"]), sources=pool.sources)
+        )
+    return magnets, pull
+
+
 def _add_htf(
     side: SidePools, price: float, source: str, weight: float, index: int, current_atr: float, params: GravityParams
 ) -> None:
@@ -979,6 +1085,7 @@ def analyze_market_gravity(
     candles: Sequence[Any],
     params: GravityParams | None = None,
     timeframe_seconds: float | None = None,
+    trace_every: int = 0,
 ) -> MarketGravityResult:
     """Replay ``candles`` through the Market Gravity model, reading the final bar.
 
@@ -1024,6 +1131,7 @@ def analyze_market_gravity(
     day_bucket = _bucket_index(times[0], timeframe_seconds, "day")
     week_bucket = _bucket_index(times[0], timeframe_seconds, "week")
     day_high = day_low = week_high = week_low = float("nan")
+    trace: list[GravitySnapshot] = []
 
     for index in range(size):
         current_atr = atr_values[index]
@@ -1066,49 +1174,42 @@ def analyze_market_gravity(
         upper.expire(index)
         lower.expire(index)
 
+        if trace_every > 0 and index % trace_every == 0:
+            bias_i, regime_i = _context_at(index, fast_ema, slow_ema, adx_values, atr_average, current_atr)
+            up_magnets, up_pull = _rank_side(upper, index, close[index], current_atr, bias_i, 1,
+                                             regime_i, timeframe_seconds, params)
+            dn_magnets, dn_pull = _rank_side(lower, index, close[index], current_atr, bias_i, -1,
+                                             regime_i, timeframe_seconds, params)
+            total_i = up_pull + dn_pull
+            trace.append(
+                GravitySnapshot(
+                    bar_index=index, close=close[index], atr=current_atr, trend_bias=bias_i,
+                    regime=regime_i,
+                    net_gravity=((up_pull - dn_pull) / total_i * 100.0) if total_i > 0 else 0.0,
+                    bullish_pressure=(up_pull / total_i * 100.0) if total_i > 0 else 50.0,
+                    upper=up_magnets, lower=dn_magnets,
+                    rejected_up=[pool.centroid for pool in upper.pools
+                                 if pool.state == REJECTED and pool.resolution_bar == index],
+                    rejected_down=[pool.centroid for pool in lower.pools
+                                   if pool.state == REJECTED and pool.resolution_bar == index],
+                    accepted_up=[pool.centroid for pool in upper.pools
+                                 if pool.state == ACCEPTED and pool.resolution_bar == index],
+                    accepted_down=[pool.centroid for pool in lower.pools
+                                   if pool.state == ACCEPTED and pool.resolution_bar == index],
+                )
+            )
+
     last = size - 1
     final_atr = atr_values[last]
     if final_atr is None or final_atr <= 0:
         return MarketGravityResult(status="insufficient_data", bars=size,
                                    notes=notes + ["ATR unavailable on the last bar"])
 
-    trend_bias = 0.0
-    if fast_ema[last] is not None and slow_ema[last] is not None:
-        trend_bias = clamp_signed((fast_ema[last] - slow_ema[last]) / (final_atr * 2.0))
-    adx_value, atr_avg = adx_values[last], atr_average[last]
-    regime = "Range"
-    if adx_value is not None and atr_avg is not None:
-        if adx_value >= 25 and final_atr > atr_avg * 1.05:
-            regime = "Trend Expansion"
-        elif adx_value >= 25:
-            regime = "Trend"
-        elif final_atr < atr_avg * 0.85:
-            regime = "Compression"
-
-    def rank(side: SidePools, direction: int) -> tuple[list[Magnet], float]:
-        weights = (params.primary_rank_weight, params.secondary_rank_weight, params.tertiary_rank_weight)
-        scored = [
-            (gravity_components(pool, last, close[last], final_atr, trend_bias, direction, regime,
-                                timeframe_seconds, params), pool)
-            for pool in side.eligible(close[last], final_atr, direction)
-        ]
-        scored.sort(key=lambda pair: pair[0]["gravity"], reverse=True)
-        magnets: list[Magnet] = []
-        pull = 0.0
-        for position, (parts, pool) in enumerate(scored[:3]):
-            pull += parts["gravity"] * weights[position]
-            magnets.append(
-                Magnet(price=pool.centroid, zone_low=pool.zone_low, zone_high=pool.zone_high,
-                       score=parts["gravity"], state=STATE_NAMES[pool.state],
-                       strength=parts["liquidity_strength"], distance_atr=parts["distance_atr"],
-                       accessibility=parts["accessibility"], freshness=parts["freshness"],
-                       member_count=pool.member_count, touches=pool.independent_touches,
-                       age=int(parts["age"]), sources=pool.sources)
-            )
-        return magnets, pull
-
-    upper_magnets, upper_pull = rank(upper, 1)
-    lower_magnets, lower_pull = rank(lower, -1)
+    trend_bias, regime = _context_at(last, fast_ema, slow_ema, adx_values, atr_average, final_atr)
+    upper_magnets, upper_pull = _rank_side(upper, last, close[last], final_atr, trend_bias, 1,
+                                           regime, timeframe_seconds, params)
+    lower_magnets, lower_pull = _rank_side(lower, last, close[last], final_atr, trend_bias, -1,
+                                           regime, timeframe_seconds, params)
     total_pull = upper_pull + lower_pull
     bullish = (upper_pull / total_pull * 100.0) if total_pull > 0 else 50.0
     net = ((upper_pull - lower_pull) / total_pull * 100.0) if total_pull > 0 else 0.0
@@ -1118,8 +1219,132 @@ def analyze_market_gravity(
         timeframe_seconds=timeframe_seconds, trend_bias=trend_bias, regime=regime,
         upper=upper_magnets, lower=lower_magnets, upper_pull=upper_pull, lower_pull=lower_pull,
         bullish_pressure=bullish, bearish_pressure=100.0 - bullish, net_gravity=net,
-        pools_upper=len(upper.pools), pools_lower=len(lower.pools),
+        pools_upper=len(upper.pools), pools_lower=len(lower.pools), trace=trace,
     )
+
+
+def forecast_first_passage(
+    snapshot: GravitySnapshot,
+    *,
+    alpha: float,
+    beta: float,
+    gamma: float,
+    vol_scale: float = 1.0,
+    horizon_bars: int = 20,
+    simulations: int = 2000,
+    seed: int = 1234,
+) -> dict[str, float]:
+    """Drift-diffusion Monte Carlo driven by net gravity and trend bias.
+
+    ``alpha`` (gravity pull per bar, in ATR units), ``beta`` (trend drift per bar) and
+    ``gamma`` (diffusion scale on ATR) MUST come from :func:`calibrate_diffusion`.
+    The reference document's 0.12 / 0.08 / 0.65 were never fitted to any data; feeding
+    unfitted constants in here would print confident-looking probabilities that carry
+    no information.
+
+    First passage is measured against the nearer ZONE EDGE of each primary magnet,
+    because that is what a sweep actually consumes.
+    """
+    import random
+
+    start, atr = snapshot.close, snapshot.atr
+    if atr <= 0 or simulations <= 0 or horizon_bars <= 0:
+        return {"usable": 0.0}
+    rng = random.Random(seed)
+    gaussian = rng.gauss
+    drift = (alpha * (snapshot.net_gravity / 100.0) + beta * snapshot.trend_bias) * atr
+    sigma = gamma * vol_scale * atr
+
+    upper_target = snapshot.upper[0].zone_low if snapshot.upper else None
+    lower_target = snapshot.lower[0].zone_high if snapshot.lower else None
+
+    u_first = l_first = both = 0
+    ends: list[float] = []
+    for _ in range(simulations):
+        price = start
+        hit_u = hit_l = 0
+        for _bar in range(horizon_bars):
+            price += drift + sigma * gaussian(0.0, 1.0)
+            if not hit_u and upper_target is not None and price >= upper_target:
+                hit_u = 1
+            if not hit_l and lower_target is not None and price <= lower_target:
+                hit_l = 1
+            if hit_u and hit_l:
+                break
+        ends.append(price)
+        if hit_u and hit_l:
+            both += 1
+        elif hit_u:
+            u_first += 1
+        elif hit_l:
+            l_first += 1
+    ends.sort()
+    high_water = simulations - u_first - l_first - both
+    return {
+        "usable": 1.0,
+        "median_end": ends[len(ends) // 2],
+        "expected_move_pct": (ends[len(ends) // 2] / start - 1.0) * 100.0 if start else 0.0,
+        "p68_low": ends[int(len(ends) * 0.16)],
+        "p68_high": ends[int(len(ends) * 0.84)],
+        "p95_low": ends[int(len(ends) * 0.025)],
+        "p95_high": ends[min(len(ends) - 1, int(len(ends) * 0.975))],
+        "prob_upper_magnet_first": u_first / simulations * 100.0,
+        "prob_lower_magnet_first": l_first / simulations * 100.0,
+        "prob_ambiguous": both / simulations * 100.0,
+        "prob_no_magnet": max(0, high_water) / simulations * 100.0,
+    }
+
+
+def calibrate_diffusion(samples: Sequence[tuple[float, float, float, float]]) -> dict[str, float]:
+    """Least-squares fit of a realised 1-bar price change on gravity and trend bias.
+
+    Each sample is ``(net_gravity, trend_bias, atr, forward_change)``. Returns alpha,
+    beta, gamma (residual sigma in ATR units) and ``r2`` - the last reported on purpose,
+    so a weak regressor cannot be mistaken for a validated forecasting edge.
+    """
+    count = len(samples)
+    if count < 30:
+        return {"alpha": 0.0, "beta": 0.0, "gamma": 0.0, "r2": 0.0, "n": count}
+    matrix = [(gravity / 100.0, trend) for gravity, trend, _atr, _y in samples]
+    target = [y / atr if atr > 0 else 0.0 for _g, _t, atr, y in samples]
+    sx1 = sum(row[0] for row in matrix)
+    sx2 = sum(row[1] for row in matrix)
+    sxx11 = sum(row[0] * row[0] for row in matrix)
+    sxx12 = sum(row[0] * row[1] for row in matrix)
+    sxx22 = sum(row[1] * row[1] for row in matrix)
+    sy = sum(target)
+    sxy1 = sum(row[0] * y for row, y in zip(matrix, target))
+    sxy2 = sum(row[1] * y for row, y in zip(matrix, target))
+    rows = [
+        [float(count), sx1, sx2, sy],
+        [sx1, sxx11, sxx12, sxy1],
+        [sx2, sxx12, sxx22, sxy2],
+    ]
+    for column in range(3):
+        pivot = max(range(column, 3), key=lambda r: abs(rows[r][column]))
+        rows[column], rows[pivot] = rows[pivot], rows[column]
+        base = rows[column][column]
+        if abs(base) < 1e-12:
+            return {"alpha": 0.0, "beta": 0.0, "gamma": 0.0, "r2": 0.0, "n": count}
+        rows[column] = [value / base for value in rows[column]]
+        for other in range(3):
+            if other == column:
+                continue
+            factor = rows[other][column]
+            rows[other] = [a - factor * b for a, b in zip(rows[other], rows[column])]
+    intercept, alpha, beta = (row[3] for row in rows)
+    mean_y = sy / count
+    residual = sum((y - (intercept + alpha * row[0] + beta * row[1])) ** 2 for row, y in zip(matrix, target))
+    total = sum((y - mean_y) ** 2 for y in target)
+    return {
+        "alpha": alpha,
+        "beta": beta,
+        "gamma": math.sqrt(residual / max(1, count - 3)),
+        "intercept": intercept,
+        "r2": 0.0 if total <= 0 else 1.0 - residual / total,
+        "n": count,
+    }
+
 
 
 
