@@ -201,6 +201,13 @@ def section_a(client: Any, hold_h: float) -> dict:
                 or "step" in k.lower() or "lot" in k.lower()}
         print(f"   field minimum {asset}: {mins or '(tidak ada field min/size/step/lot)'}")
         print(f"     semua field {asset}: {sorted(fields.keys())}")
+        # Nilai field status: inilah yang membedakan "bursa menolak menahan posisi" dari
+        # "kita yang menutup". Tanpa nilai, daftar nama field tidak menjawab apa pun.
+        status_fields = {k: fields.get(k) for k in
+                         ("venue_status", "trading_hours_state", "is_active", "margin",
+                          "tpsl_buffer_pct", "taker_fee_pct", "maker_fee_pct",
+                          "max_leverage", "next_funding_at", "funding_rate_hourly")}
+        print(f"     status {asset}: {status_fields}")
     return {"rows": rows, "stats": stats}
 
 
