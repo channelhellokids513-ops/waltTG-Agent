@@ -8,6 +8,7 @@ def test_produksi_str_shape_mengukur_konten_harga_tanpa_membocorkannya():
     masuk produksi sebagai NameError laten karena `re` belum diimpor di walt_bot.
     """
     import re as _re  # noqa: F401  - bukti impor tersedia di jalur produksi
+    import walt_bot
     assert hasattr(walt_bot, "re"), "walt_bot harus mengimpor `re` sebelum cabang str dipakai"
 
     price_bearing = walt_bot._response_shape("Order closed at price 0.0627 USDC")
