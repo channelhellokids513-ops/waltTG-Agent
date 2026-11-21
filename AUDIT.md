@@ -1011,6 +1011,44 @@ Bentuk P8 yang saya usulkan (**berdasarkan yang terukur, bukan yang diklaim**):
   (c) P8 boleh menurunkan ukuran. Tanpa (a), P8 akan selalu 0 dan diam-diam jadi ornamen —
   persis kelas kegagalan yang sudah kita tangani dua kali di ronde ini.
 
+### 3p.5 Sampel ke-2 probe + satu temuan yang lebih penting dari slippage (P1, 2026-11-21 06:50Z)
+
+Sampel kedua (BTC long, margin $2,50): rate sebelum execute 57.700,00 → fill bursa 57.781,40 =
+**slippage masuk +0,1411%**. Dua sampel kini berlawanan tanda (−0,0154% dan +0,1411%), yang
+konsisten dengan "noise kecil di sekitar mid", BUKAN bias searah — dan rata-rata |0,078%| itu
+tetap **~13x lebih kecil** dari konstanta venue 1,00%.
+
+Probe lalu menunggu umur-minimum (54s, sesuai perbaikan 3p.4) dan mencoba close. Hasilnya
+membuka masalah yang lebih serius daripada biaya:
+
+```
+close_ok=False posisi_sisa=0
+attempt 3 preview menolak: ok=False risk_ok=False
+checks=[open_position=False(No open position exists for this contract.)] token=False expires=None
+```
+
+**Posisi probe sudah TIDAK ADA dalam <60 detik setelah open.** Bursa menolak close bukan karena
+guard umur, melainkan karena tidak ada lagi posisi untuk ditutup. Ini dibuktikan silang oleh
+ledger diagnostics pada job yang sama: `PnL terukur` naik dari **2 → 4** (dua penutupan dengan
+harga fill nyata = dua sampel probe), jadi posisinya memang tertutup, bukan tidak pernah ada.
+
+Kenapa ini P1 dan bukan catatan kaki: jalur produksi memasang autoClose (TP/SL) lewat
+`preview_auto_close`/`execute` SETELAH order terisi, dengan 3 retry. Kalau posisi bisa hilang
+sebelum kita selesai memasang TP/SL — atau TP/SL yang terpasang langsung terpicu — maka klaim
+"SEMUA posisi punya SL" yang selama ini kita andalkan tidak terbukti untuk posisi berumur pendek.
+Dua hipotesis yang harus diuji berurutan: (a) SL/TP otomatis terpicu sangat cepat (mis. SL
+dipasang di sisi yang salah untuk arah long, atau `compute_baseline_tpsl` menghasilkan harga
+yang sudah terlampaui oleh fill), (b) bursa menolak/membalikkan order ber-margin minimum
+(`min_size_base` clip) setelah menerima, sehingga posisi terbentuk-tertutup seketika.
+
+Yang TIDAK saya lakukan: menyimpulkan penyebabnya. Yang harus dilakukan berikutnya: baca
+`avg_entry_price` vs `TP/SL` dan `created_at`/`updated_at` dua baris closed terakhir, plus log
+`autoClose` pada jam 06:50-06:52Z. Sampai itu jelas, **ukuran posisi nyata tidak boleh dinaikkan**
+dan hasil probe tidak boleh dipakai mengubah `COSTS`.
+
+MAINTENANCE_MODE sudah dikembalikan ke `false` (terverifikasi) segera setelah exit code 4, dan
+alert Telegram terkirim sesuai desain alat. Tidak ada posisi tersisa (`posisi_sisa=0`).
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 
