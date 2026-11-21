@@ -60,6 +60,13 @@ ALLOWED_CRYPTO = {
 }
 ALLOWED_ASSETS = ALLOWED_STOCKS | ALLOWED_COMMODITIES | ALLOWED_CRYPTO
 
+# Ronde 8 (permintaan pemilik): AI swarm dulu hanya dinilai untuk saham; crypto & komoditas
+# dipotong langsung GO tanpa riset. Sekarang mereka ikut dinilai, TETAPI dengan aturan yang
+# sama pentingnya: AI hanya boleh MENURUNKAN (HALF/SKIP), tidak pernah menciptakan entry, dan
+# riset yang hilang untuk crypto TIDAK memblokir (jalur baca riset sedang sakit - memblokir
+# berarti berhenti trading diam-diam). Saham tetap wajib riset segar (E3 tidak berubah).
+RESEARCH_ELIGIBLE = ALLOWED_ASSETS
+
 # Position sizing
 MAX_LEVERAGE = 2
 DEFAULT_MARGIN = 2.50       # USDC per posisi minimum (floor)
@@ -976,10 +983,32 @@ def decide_go_nogo(
     if opp.base_asset not in ALLOWED_ASSETS:
         return "SKIP", f"aset {opp.base_asset} tidak masuk whitelist", 0.0
 
-    # Komoditas / Crypto Bluechip: langsung GO dengan Dynamic TP/SL (no stock research needed)
+    # Komoditas / Crypto Bluechip: funding & struktur yang memutuskan; AI ikut menilai tetapi
+    # hanya boleh MENURUNKAN (HALF/SKIP), tidak pernah membuat entry baru. (Ronde 8, permintaan
+    # pemilik.) Riset yang HILANG tidak memblokir crypto - beda dengan saham - karena jalur BACA
+    # riset sedang sakit (webhook masih stub): memblokir saat itu berarti berhenti trading diam-diam.
     if opp.base_asset in ALLOWED_COMMODITIES or opp.base_asset in ALLOWED_CRYPTO:
         label = "crypto bluechip" if opp.base_asset in ALLOWED_CRYPTO else "komoditas"
-        return "GO", f"{label}, dynamic TP/SL carry capture", 1.0
+        base_reason = f"{label}, dynamic TP/SL carry capture"
+        if research is None:
+            return "GO", f"{base_reason} (riset tidak tersedia -> status quo, tidak diblokir)", 1.0
+        p5 = research.p1_to_p7_scores.get("P5_risk_catalysts", 0.0) if research.p1_to_p7_scores else 0.0
+        if p5 >= MAX_P5_RISK:
+            return "SKIP", f"{label}: katalis risiko tinggi (P5={p5:.2f} >= {MAX_P5_RISK:.2f}) -> SKIP", 0.0
+        opposed = (
+            (opp.side == "short" and research.news_sentiment == "bullish")
+            or (opp.side == "long" and research.news_sentiment == "bearish")
+        )
+        if opposed:
+            return ("SKIP",
+                    f"{label}: berita `{research.news_sentiment}` (skor {research.final_score:+.2f}) "
+                    f"bertentangan dengan {opp.side.upper()} -> SKIP", 0.0)
+        if (research.overall_consensus_level == "SPLIT" or research.vendor_alignment == "split"
+                or research.consensus == "CONFLICT"):
+            return ("HALF",
+                    f"{label}: swarm SPLIT (Qwen:{research.qwen_sentiment} vs "
+                    f"Gemini:{research.gemini_sentiment}) -> proteksi HALF size", 0.5)
+        return "GO", f"{base_reason} (riset tidak bertentangan)", 1.0
 
     # E3: Saham wajib memiliki riset segar (<= max_research_age_hours); jika tidak ada -> SKIP "riset basi"
     if research is None:
@@ -3235,7 +3264,7 @@ def scan_with_research(
 
     for opp in summary["top_opportunities"]:
         asset = opp["asset"]
-        if asset in ALLOWED_STOCKS and (qwen or gemini):
+        if asset in RESEARCH_ELIGIBLE and (qwen or gemini):
             try:
                 researches[asset] = research_stock(
                     asset,
@@ -3302,7 +3331,7 @@ def scan_with_research(
                 log.info(f"  Buffer saldo tercapai (${deployed:.2f}/${target_deploy:.2f}), hentikan alokasi.")
                 break
             asset = opp.base_asset
-            if asset in ALLOWED_STOCKS and asset not in researches and (qwen or gemini):
+            if asset in RESEARCH_ELIGIBLE and asset not in researches and (qwen or gemini):
                 try:
                     researches[asset] = research_stock(
                         asset,
@@ -3631,7 +3660,7 @@ def market_execute(
         opps = []
 
     for opp in opps:
-        if opp.base_asset in ALLOWED_STOCKS:
+        if opp.base_asset in RESEARCH_ELIGIBLE:
             if opp.base_asset in cached_researches:
                 cached = cached_researches[opp.base_asset]
                 log.info(f"  ✓ Pakai riset spreadsheet {opp.base_asset}: skor {cached.final_score:+.2f}, sentimen {cached.news_sentiment}")

@@ -922,6 +922,95 @@ itu bukan pekerjaan read-only.
 dan carry akun yang nyata (0,0665%/hari). **Yang belum:** slippage — tetap 1,00% sebagai
 pernyataan bursa, diberi label "asumsi venue", bukan "terukur".
 
+## 3p. Probe order NYATA (slippage), koneksi AI ke crypto, dan rancangan P8 (2026-11-21)
+
+### 3p.1 Probe slippage — satu order nyata, dan apa yang boleh disimpulkan darinya
+
+Alat `tools/slippage_probe.py`, dijalankan dari `diagnostics.yml oauth_step=slippage_probe`
+dengan PINTU KEDUA `real_order=YA_ORDER_NYATA` (saya letakkan di kode, bukan di `if:` YAML,
+agar teruji; lihat 3p.3). Clip yang dipakai = clip PRODUKSI, bukan clip khayalan.
+
+| Tahap | Nilai |
+|---|---|
+| Posisi | BTC long, leverage 2, **margin $2,50** (`min_size_base=7e-05`) |
+| `latest_rate` tepat sebelum execute | 58.995,20 |
+| Fill yang bursa laporkan | 58.986,10 |
+| **Slippage masuk TERUKUR** | **−0,0154% (−1,5 bps; kebetulan menguntungkan)** |
+| Slippage keluar | **TIDAK TERUKUR** — sengaja tidak diisi nol |
+
+`preview_close` **ditolak bursa 3×** dengan risk check yang namanya terpotong `open_posi…`
+(kemungkinan guard umur-minimum setelah open). Ini tidak saya sebut "gagal total": verifikasi
+independent menunjukkan **posisi tertutup** — hitungan riwayat bursa naik dari
+`posisi tertutup terbaca=52` menjadi **53** pada run berikutnya, dan median carry hanya
+bergeser 0,0665% → 0,0651%/hari, konsisten dengan trade berdurasi menit. Penutupan terjadi
+lewat jalur otomatis (autoClose/monitor), bukan lewat probe saya.
+
+Konsekuensi yang sah, dan yang tidak:
+- **Sah:** bukti langsung pertama bahwa dampak eksekusi pada clip terkecil kita (~1,5 bps)
+  berada **>=65x di bawah** konstanta slippage venue 1,00%. Dasar biaya 1,18% yang selama ini
+  membuat SEMUA kandidat SKIP kemungkinan besar terlalu pesimis.
+- **Tidak sah:** menganggap ini estimasi slippage kita. Dampak membesar dengan ukuran order,
+  jadi 1,5 bps pada $2,50 adalah **batas bawah**, satu sampel, satu arah, satu momen pasar.
+  Butuh >=10-20 sampel terarah sebelum `COSTS` di `gravity_strategy`/`rr_scan` boleh diganti.
+- Perbaikan yang perlu untuk probe berikutnya: hormati umur-minimum sebelum close (sleep +
+  backoff pada `preview_close`) supaya sisi keluar ikut terukur.
+
+### 3p.2 AI sekarang ikut menilai crypto & komoditas (permintaan pemilik)
+
+Sebelum: `decide_go_nogo` memotong crypto/komoditas ke `GO` tanpa riset apa pun — 4 voter +
+P1–P7 **tidak punya efek** pada mayoritas universe kita. Sekarang mereka ikut dinilai, dengan
+batas kuasa yang saya buat eksplisit dan dites (`tests/test_research_crypto_r8.py`, 10 test):
+
+1. AI **hanya boleh MENURUNKAN** (HALF/SKIP) — tidak pernah menciptakan entry, tidak pernah
+   menaikkan ukuran di atas 1.0 (dites terhadap semua kombinasi riset).
+2. `P5_risk_catalysts >= MAX_P5_RISK` -> SKIP; berita **bertentangan** dengan arah posisi ->
+   SKIP; konsensus `SPLIT`/`CONFLICT`/vendor split -> **HALF**.
+3. **Riset hilang untuk crypto TIDAK memblokir** (status quo GO). Pilihan sadar: jalur BACA
+   riset sedang sakit (webhook masih stub, 3p.4), jadi meniru aturan saham
+   ("riset basi -> SKIP") berarti **berhenti trading diam-diam**. Saham TIDAK berubah — E3
+   tetap mewajibkan riset segar (dites).
+4. Cakupan = `RESEARCH_ELIGIBLE = ALLOWED_ASSETS`. Aset di luar whitelist (mis. `BBCA`) tidak
+   ikut tersedot ke jalur riset (dites).
+
+Konsekuensi langsung: satu siklus scan kini memanggil swarm untuk aset crypto juga
+(±10 kandidat × 4 voter) — biaya dan durasi job naik. Kalau terlalu mahal, jalan tengahnya
+membatasi riset crypto pada kandidat teratas saja; itu perubahan kecil.
+
+### 3p.3 Dua kegagalan proses saya sendiri pada langkah ini (dicatat, bukan dibuang)
+
+- `real_order` pertama saya indentasikan sebagai key **di dalam** `oauth_step`, bukan sibling
+  di bawah `inputs:`. GitHub menolak dispatch (`HTTP 422: Unexpected inputs provided`) — dan itu
+  **fail-closed**: tidak ada order yang dibuat. Struktur yaml kini terverifikasi.
+- Versi pertama `if:` langkah probe berisi dua klausa gerbang; test invariant lama
+  (`test_mode_read_only_menjalankan_nol_langkah_oauth`) menuntut satu klausa `oauth_step ==`
+  per langkah OAuth. Saya pindahkan pintu kedua ke dalam kode — lebih baik, karena kini teruji,
+  bukan cuma terbaca di YAML.
+
+### 3p.4 Rancangan P8 (BELUM diimplementasikan) — dari sheet BBCA pemilik
+
+Sheet `1rB7Bxuo…` ringkasan (range AE1:AI24) memuat output Market Gravity untuk BBCA:
+Close 5.550 · ATR14 203,84 · Trend Bias −0,53 · **U1 6.850 (skor 38,34, Active)** · U2 7.925
+(34,30) · **L1 4.740 (33,20)** · Upper Pull 60,64 / Lower Pull 33,20 · Bullish 64,62% ·
+**Net Gravity +29,23** · **Comfort struktural 6.359 / anchored 6.078** · forecast 35 hari
+6.078 dengan pita 68% [5.451 … 6.705]. Catatan penting: sel `Market Regime` **KOSONG** —
+kolomnya ada tapi tidak terisi, dan itu harus dibetulkan sebelum P8 memakainya.
+
+Bentuk P8 yang saya usulkan (**berdasarkan yang terukur, bukan yang diklaim**):
+
+- `P8_liquidity_structure = clamp(0,7 × sweep_state + 0,3 × equilibrium_pull, −1, +1)`
+  - `sweep_state`: −1 bila `Rejected` pada magnet atas (0–3 bar terakhir), +1 bila pada magnet
+    bawah, selain itu 0. **Komponen inilah yang punya bukti:** fade rejected sweep unggul
+    +0,694R atas cerminannya DI LUAR SAMPEL dan stabil di 5 fold (3n).
+  - `equilibrium_pull`: `clamp((comfort_struct − close)/ATR / 3, −1, +1)`. Bobotnya sengaja
+    kecil karena hubungan net_gravity → return 1 bar terukur **R² = 0,0002** (3m).
+- Pemakaian: hanya boleh **menurunkan** (P8 berlawanan kuat dengan arah posisi → HALF). P8 TIDAK
+  masuk `PARAM_WEIGHTS`/prompt voter: opini LLM tidak boleh bercampur dengan angka yang bisa
+  diverifikasi ulang, dan menambah bobot akan mengubah `final_score` saham secara tak terduga.
+- Prasyarat sebelum P8 dinyalakan: (a) Apps Script ter-deploy benar sehingga kolom `mg_*` dan
+  `Market Regime` TERISI, (b) satu siklus tercatat untuk mengaudit nilai P8 per hari, baru
+  (c) P8 boleh menurunkan ukuran. Tanpa (a), P8 akan selalu 0 dan diam-diam jadi ornamen —
+  persis kelas kegagalan yang sudah kita tangani dua kali di ronde ini.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 
