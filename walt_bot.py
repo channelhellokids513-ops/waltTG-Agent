@@ -5127,7 +5127,11 @@ def main(command: str = "scan"):
             msg = f"*🛡️ Walt Risk Monitor*\n{len(result['actions'])} proteksi risiko diperbarui:\n"
             for a in result["actions"]:
                 info = a.get("detail") or a.get("layer") or a.get("action")
-                msg += f"• *{a['asset']}* — {info}\n"
+                # Bukti produksi #44915963109 (14:55:52Z): aset "MARKET_UNIVERSE" + info
+                # "GEAR_2_ACTIVE_60M (60m): 0 opened" menghasilkan entitas tumpang-tindih
+                # *..._...*..._ yang ditolak parser Markdown v1 Telegram (HTTP 400).
+                asset = md_escape(str(a.get("asset", "?")))
+                msg += f"• *{asset}* — {md_escape(str(info or ''))}\n"
             send_telegram(msg)
         _emit_cli_result(command, result)
 
