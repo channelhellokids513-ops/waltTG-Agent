@@ -16,6 +16,7 @@ on:
           - reconcile_history
           - reconcile_write
           - contract_economics
+          - contract_schema
           - slippage_probe
           - read_only
       real_order:
@@ -109,12 +110,6 @@ jobs:
         run: |
           set -o pipefail
           { echo "### 1d. Sensus identitas baris Closed_Positions (penahan duplikat backfill)"; echo '```text'; python tools/ledger_census.py | tee -a "$GITHUB_STEP_SUMMARY" | tee /dev/stderr; echo '```'; echo; } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Contract size-limit schema probe (read-only; hanya nama kunci, tanpa nilai)
-        if: always()
-        run: |
-          set -o pipefail
-          { echo "### 1f. Batas ATAS ukuran order di payload kontrak (pertanyaan #44900424439)"; echo '```text'; python tools/contract_schema_probe.py | tee -a "$GITHUB_STEP_SUMMARY" | tee /dev/stderr; echo '```'; echo; } >> "$GITHUB_STEP_SUMMARY" || echo "(probe kontrak gagal - lewati, jangan merahkan CI)"
 
       - name: Slippage report (baca logs/ dari cache; read-only)
         if: always()
@@ -240,3 +235,15 @@ jobs:
         run: |
           set -o pipefail
           { echo "### 3. \`reconcile_history\` dry-run (riwayat bursa vs ledger; tidak ada file diubah)"; echo '```text'; python walt_bot.py reconcile_history | tee -a "$GITHUB_STEP_SUMMARY" | tee /dev/stderr; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Contract size-limit schema probe (read-only; hanya nama kunci, tanpa nilai)
+        if: always() && github.event.inputs.oauth_step == 'contract_schema'
+        env:
+          WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}
+          WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
+          STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}
+          LOG_REDACT: "true"
+          WALT_TOKEN_SYNC: "on"  # refresh OAuth membakar token single-use => wajib ditulis balik
+        run: |
+          set -o pipefail
+          { echo "### 1f. Batas ATAS ukuran order di payload kontrak (pertanyaan #44900424439)"; echo '```text'; python tools/contract_schema_probe.py | tee -a "$GITHUB_STEP_SUMMARY" | tee /dev/stderr; echo '```'; echo; } >> "$GITHUB_STEP_SUMMARY" || echo "(probe kontrak gagal - lewati, jangan merahkan CI)"
