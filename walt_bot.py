@@ -36,7 +36,7 @@ from llm_research import (
     Research,
     fetch_earnings_days_with_status,
 )
-from notifier import send_telegram
+from notifier import send_telegram, md_escape
 
 
 # =============================================================================
@@ -902,6 +902,52 @@ class WaltClient:
             log.debug(f"record_execution_slippage diabaikan ({type(exc).__name__})")
             return None
 
+    def record_open_slippage(self, contract_id: int, result: Any,
+                             settle_seconds: float = 3.0) -> Optional[dict]:
+        """Tambalan untuk celah yang terbukti di produksi #44893261886.
+
+        Respons `perps_execute_operation` saat open hanya memuat order_id dan harga
+        kuotasi; `avg_entry_price` baru muncul di `list_positions(statuses=["open"])`
+        setelah order settled. Tanpa pembacaan ulang ini, stage=open tidak akan PERNAH
+        terukur di jalur produksi walaupun order nyata terjadi - dan dasar biaya E5
+        hibrida akan selamanya memakai floor.
+        """
+        measured = self.record_execution_slippage(result)
+        if measured is not None:
+            return measured
+        pending = getattr(self, "_quotes", None) or {}
+        if ("open", int(contract_id)) not in pending:
+            return None
+        try:
+            time.sleep(settle_seconds)
+            for pos in _extract_positions(self.list_positions(statuses=["open"])):
+                try:
+                    if int(pos.get("contract_id") or -1) != int(contract_id):
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                fill = _parse_positive_finite_price(pos.get("avg_entry_price"))
+                if fill is None:
+                    continue
+                quote, quoted_at = pending.pop(("open", int(contract_id)))
+                side = str(pos.get("side") or "").lower()
+                signed = (quote - fill) / quote if side == "short" else (fill - quote) / quote
+                record = {
+                    "stage": "open", "contract_id": int(contract_id), "side": side,
+                    "quote": quote, "fill": fill, "slippage_pct": signed * 100.0,
+                    "quote_age_s": round(time.time() - quoted_at, 3), "source": "list_positions",
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+                log.info(f"📐 SLIPPAGE open contract={contract_id} quote={quote:.6f} "
+                         f"fill={fill:.6f} -> {signed * 10000:+.2f} bps "
+                         f"(sumber: list_positions setelah settle)")
+                _append_slippage_log(record)
+                return record
+        except Exception as exc:
+            log.warning(f"record_open_slippage gagal (order tetap diproses): "
+                        f"{type(exc).__name__}: {str(exc)[:160]}")
+        return None
+
     def execute(self, token: str):
         result = self._call("perps_execute_operation", {"confirmationToken": token})
         try:
@@ -1390,6 +1436,13 @@ def open_position(
         return None
 
     order_id = result.get("order", {}).get("order_id") if isinstance(result, dict) else None
+    # Pengukuran slippage entry: respons execute tidak selalu memuat harga fill, jadi
+    # helper ini membaca ulang posisi terbuka bila perlu (3 detik). Kegagalannya tidak
+    # pernah boleh menghentikan jalur entry.
+    try:
+        client.record_open_slippage(opp.contract_id, result)
+    except Exception as exc:
+        log.debug(f"open_position: pengukuran slippage dilewati ({type(exc).__name__})")
     log.info(
         f"✅ {opp.side.upper()} {opp.base_asset} opened: margin ${margin} @ ${price:.4f}, "
         f"TP ${tp}, SL ${sl}, order_id={order_id}"
@@ -3421,7 +3474,7 @@ def format_summary_telegram(
                         f"P6(`{p1_7.get('P6_contrarian_check', 0.0):.2f}`)"
                     )
             if research.narrative:
-                lines.append(f"   _{research.narrative[:180]}_")
+                lines.append(f"   _{md_escape(research.narrative[:180])}_")
         lines.append(f"   → Keputusan: *{verdict}* ({reason})")
 
     executed_list = [e for e in (executions or []) if e.get("verdict") == "EXECUTED"]
@@ -4103,7 +4156,7 @@ def market_execute(
         msg_lines.append("*✅ Opened Positions:*")
         for e in executed_list:
             msg_lines.append(f"• {e['side'].upper()} {e['asset']} — margin `${e['margin']:.2f}`")
-            msg_lines.append(f"   _{e['reason']}_")
+            msg_lines.append(f"   _{md_escape(e['reason'])}_")
     if skipped_list:
         msg_lines.append("\n*❌ Skipped:*")
         for e in skipped_list[:5]:

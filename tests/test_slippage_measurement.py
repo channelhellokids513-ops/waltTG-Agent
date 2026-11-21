@@ -9,6 +9,7 @@ dalam try/except, dan itu justru yang kita kunci di sini.
 from __future__ import annotations
 
 import json
+import re as _re
 
 import pytest
 
@@ -150,3 +151,71 @@ def test_daftar_kontrak_gagal_tidak_menghancurkan_close():
     client.list_contracts = broken_list
     out = client.preview_close(5)
     assert out["ok"] is True
+
+
+# --- fallback fill saat open (celah yang terbukti di produksi #44893261886) ----
+
+
+def test_fill_dibaca_ulang_dari_list_positions_saat_execute_tidak_memuat_harga(tmp_path, monkeypatch):
+    """Respons execute hanya berisi order_id -> avg_entry_price baru ada di list_positions."""
+    monkeypatch.setattr(walt_bot, "SLIPPAGE_OBSERVED_PATH", str(tmp_path / "s.jsonl"))
+    client = make_client(None, {
+        "perps_execute_operation": {"ok": True, "order": {"order_id": "abc123", "price": "0.6189"}},
+        "perps_list_positions": {"positions": [{
+            "contract_id": 42, "side": "long", "avg_entry_price": "0.6201",
+            "margin_quote": "2.5", "status": "open"}]},
+    })
+    client.note_quote("open", 42, 0.6189)
+    result = client.execute("tok")
+    assert result["ok"] is True
+    record = client.record_open_slippage(42, result, settle_seconds=0)
+    assert record is not None, "fallback harus menghasilkan pengukuran, bukan None"
+    assert record["source"] == "list_positions"
+    assert record["slippage_pct"] == pytest.approx((0.6201 - 0.6189) / 0.6189 * 100.0)
+    assert ("open", 42) not in client._quotes, "kuotasi dikonsumsi sekali"
+    assert (tmp_path / "s.jsonl").exists()
+
+
+def test_fallback_tidak_mengarang_angka_bila_fill_masih_belum_ada(tmp_path, monkeypatch):
+    monkeypatch.setattr(walt_bot, "SLIPPAGE_OBSERVED_PATH", str(tmp_path / "s.jsonl"))
+    client = make_client(None, {
+        "perps_execute_operation": {"ok": True, "order": {"order_id": "x"}},
+        "perps_list_positions": {"positions": [{"contract_id": 42, "side": "long",
+                                                "avg_entry_price": None}]},
+    })
+    client.note_quote("open", 42, 0.6189)
+    assert client.record_open_slippage(42, {"order": {}}, settle_seconds=0) is None
+    assert ("open", 42) in client._quotes, "kuotasi jangan dibuang bila belum terukur"
+    assert not (tmp_path / "s.jsonl").exists()
+
+
+def test_fallback_diam_bila_tidak_ada_kuotasi_tergantung():
+    client = make_client(None)
+    assert client.record_open_slippage(7, {"order": {}}, settle_seconds=0) is None
+
+
+def test_fallback_gagal_total_tidak_menjatuhkan_entry():
+    client = make_client(None)
+    client.note_quote("open", 9, 100.0)
+    def boom(statuses=None):
+        raise RuntimeError("relay mati")
+    client.list_positions = boom
+    assert client.record_open_slippage(9, {"order": {}}, settle_seconds=0) is None
+
+
+# --- sanitasi Markdown Telegram (400 Bad Request karena underscore) ------------
+
+
+@pytest.mark.parametrize("raw", [
+    "STRONG_CONSENSUS, exp_funding=0.653%",
+    "Swarm Strong Consensus (+0.42) aligns with SHORT",
+    "risk [high] *uncertain* `code`",
+    "",
+])
+def test_md_escape_menyeimbangkan_entity_markdown(raw):
+    escaped = walt_bot.md_escape(raw)
+    body = f"   _{escaped}_"
+    # jumlah penanda miring TANPA backslash harus genap, atau Telegram balas 400
+    unescaped_underscores = len(_re.findall(r'(?<!\\)_', body))
+    assert unescaped_underscores % 2 == 0
+    assert unescaped_underscores == 2, "hanya pembungkus miring kita yang boleh tersisa"

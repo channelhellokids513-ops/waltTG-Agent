@@ -37,6 +37,21 @@ def _safe_print(text: str) -> None:
     print(text.encode("ascii", errors="backslashreplace").decode("ascii"))
 
 
+def md_escape(text: Any) -> str:
+    """Lindungi teks bebas dari 400 Bad Request Telegram Markdown v1.
+
+    Markdown v1 menolak pesan bila entity miring/tebal tidak seimbang. Teks bebas
+    (reason engine, narrative LLM) sering memuat underscore - misalnya
+    `STRONG_CONSENSUS` di dalam `_{reason}_` menghasilkan pasangan underscore ganjil
+    dan seluruh notifikasi gagal terkirim. Kita hanya menyalakan kembali karakter yang
+    benar-benar membentuk entity di v1, supaya pesan tetap enak dibaca.
+    """
+    out = str(text if text is not None else "")
+    for char in ("\\", "_", "*", "`", "[", "]"):
+        out = out.replace(char, "\\" + char)
+    return out
+
+
 def send_telegram(text: str, parse_mode: str = "Markdown") -> bool:
     """Kirim pesan ke Telegram. Return True kalau sukses."""
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
