@@ -43,13 +43,32 @@ def md_escape(text: Any) -> str:
     Markdown v1 menolak pesan bila entity miring/tebal tidak seimbang. Teks bebas
     (reason engine, narrative LLM) sering memuat underscore - misalnya
     `STRONG_CONSENSUS` di dalam `_{reason}_` menghasilkan pasangan underscore ganjil
-    dan seluruh notifikasi gagal terkirim. Kita hanya menyalakan kembali karakter yang
-    benar-benar membentuk entity di v1, supaya pesan tetap enak dibaca.
+    dan seluruh notifikasi gagal terkirim.
+
+    Daftar karakter yang di-escape sengaja SEMPIT: di Markdown v1 hanya `_`, `*`,
+    `` ` `` dan `[` yang aman di-escape. `\\]` bukan escape valid di v1 (itu MarkdownV2),
+    dan mengirimnya justru memicu 400 - persis yang masih terlihat di #44895344591.
     """
     out = str(text if text is not None else "")
-    for char in ("\\", "_", "*", "`", "[", "]"):
+    for char in ("_", "*", "`", "["):
         out = out.replace(char, "\\" + char)
     return out
+
+
+def md_italic(text: Any) -> str:
+    """Render teks bebas sebagai miring, atau menyerah dengan sopan.
+
+    `\\_` di DALAM pembungkus `_..._` tetap sering dianggap penutup italic oleh parser
+    legacy Telegram, jadi entity-nya jadi tidak seimbang. Kalau isinya masih memuat
+    underscore setelah escaping, kita buang pembungkus miringnya (isi tetap terkirim,
+    hanya gayanya hilang) daripada seluruh notifikasi posisi baru gagal terkirim.
+    """
+    body = str(text if text is not None else "")
+    for char in ("*", "`", "["):
+        body = body.replace(char, "\\" + char)
+    if "_" in body:
+        return body.replace("_", " ")
+    return f"_{body}_"
 
 
 def send_telegram(text: str, parse_mode: str = "Markdown") -> bool:

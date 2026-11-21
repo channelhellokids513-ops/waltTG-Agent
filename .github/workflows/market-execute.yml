@@ -68,6 +68,7 @@ jobs:
           JOB_TIMEOUT_MIN: "12"
           LOG_REDACT: "true"
           STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}
+          E5_SLIPPAGE_BASIS: ${{ vars.E5_SLIPPAGE_BASIS }}
           WALT_STATE_WARM: ${{ steps.state_probe.outputs.warm }}
         run: |
           mkdir -p logs

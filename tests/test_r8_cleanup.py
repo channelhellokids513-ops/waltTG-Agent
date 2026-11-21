@@ -197,3 +197,25 @@ def test_config_coherence_memakai_basis_engine_yang_sama(monkeypatch):
     assert cc.active_slippage_basis() == walt_bot.effective_price_slippage(cc.SLIPPAGE_TERAMATI)
     monkeypatch.setenv("E5_SLIPPAGE_BASIS", "venue")
     assert cc.active_slippage_basis() == cc.SLIPPAGE_TERAMATI
+
+
+# --- knob env harus tersambung ke workflow entry ------------------------------
+
+
+@pytest.mark.parametrize("knob", walt_bot.CI_ENV_KNOBS)
+@pytest.mark.parametrize("workflow", walt_bot.ENTRY_WORKFLOWS)
+def test_setiap_knob_env_dibaca_oleh_workflow_entry(knob, workflow):
+    """os.getenv yang tidak ada di blok env workflow = knob mati di produksi.
+
+    Ini persis lubang yang ditemukan setelah #44895344591: kill switch E5_SLIPPAGE_BASIS
+    terbaca di kode tapi tidak pernah dioper ke runner.
+    """
+    text = (ROOT / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
+    assert f"{knob}: ${{{{ vars.{knob}" in text, f"{knob} tidak dioper ke {workflow}"
+
+
+def test_daftar_knob_ci_tidak_kosong_dan_semua_terdaftar_di_env_example():
+    assert walt_bot.CI_ENV_KNOBS
+    example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    for knob in walt_bot.CI_ENV_KNOBS:
+        assert f"{knob}=" in example, f"{knob} belum terdokumentasi di .env.example"

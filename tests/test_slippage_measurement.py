@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import json
 import re as _re
+from pathlib import Path
 
 import pytest
 
 import walt_bot
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def make_client(monkeypatch, responses=None, rate=None, rate_error=None):
@@ -219,3 +222,46 @@ def test_md_escape_menyeimbangkan_entity_markdown(raw):
     unescaped_underscores = len(_re.findall(r'(?<!\\)_', body))
     assert unescaped_underscores % 2 == 0
     assert unescaped_underscores == 2, "hanya pembungkus miring kita yang boleh tersisa"
+
+
+# --- Markdown v1: escape set yang benar + pembungkus miring yang tahu diri ------
+
+
+@pytest.mark.parametrize("raw", [
+    "berita `bearish` bertolak belakang",
+    "STRONG_CONSENSUS exp_funding=0.653%",
+    "risk [high] (USD) ~tilde",
+    "sudah di-escape \\ dulu",
+])
+def test_md_escape_hanya_mengescape_karakter_yang_valid_di_markdown_v1(raw):
+    out = walt_bot.md_escape(raw)
+    assert "\\]" not in out, "`\\]` bukan escape valid di Markdown v1 -> memicu 400"
+    assert "\\~" not in out and "\\(" not in out
+    for char in ("_", "*", "`", "["):
+        if char in raw:
+            assert "\\" + char in out, f"{char} harus di-escape"
+
+
+def test_md_italic_menyerah_daripada_menghasilkan_entity_pecah():
+    nasty = "STRONG_CONSENSUS, exp_funding=0.653%"
+    out = walt_bot.md_italic(nasty)
+    assert "_" not in out, "isi ber-underscore TIDAK boleh dibungkus miring"
+    assert "STRONG" in out and "0.653%" in out, "isi tetap terkirim, hanya gayanya hilang"
+    clean = "sintesis swarm searah dengan posisi"
+    assert walt_bot.md_italic(clean) == f"_{clean}_"
+    assert walt_bot.md_italic(None) == "__" or walt_bot.md_italic(None) == ""
+
+
+def test_tidak_ada_pembungkusan_miring_mentah_pada_teks_bebas():
+    """Semua teks bebas (reason/narrative) wajib lewat md_italic atau md_escape.
+
+    Daftarnya eksplisit, bukan regex longgar: yang mau dijaga adalah field tertentu yang
+    terbukti mengirim underscore/backtick ke Telegram, bukan semua kurung kurawal.
+    """
+    src = (ROOT / "walt_bot.py").read_text(encoding="utf-8")
+    mentah = [
+        "_{e['reason']}", "_{reason}", "_{research.narrative", "_{e['detail']}", "_{note}",
+    ]
+    offenders = [pola for pola in mentah if pola in src]
+    assert offenders == [], f"teks bebas dibungkus miring tanpa pelindung: {offenders}"
+    assert "md_italic(" in src and "md_escape(" in src, "kedua helper harus benar-benar dipakai"

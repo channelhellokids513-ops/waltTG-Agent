@@ -71,6 +71,7 @@ jobs:
           JOB_TIMEOUT_MIN: "12"
           LOG_REDACT: "true"
           STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}
+          E5_SLIPPAGE_BASIS: ${{ vars.E5_SLIPPAGE_BASIS }}
           AUTO_EXECUTE_ON_SCAN: ${{ github.event.inputs.auto_execute || vars.AUTO_EXECUTE_ON_SCAN || 'true' }}
           DRY_RUN: ${{ github.event.inputs.dry_run || vars.DRY_RUN || 'false' }}
           WALT_STATE_WARM: ${{ steps.state_probe.outputs.warm }}

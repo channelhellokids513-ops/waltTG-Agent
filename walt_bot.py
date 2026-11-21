@@ -36,7 +36,7 @@ from llm_research import (
     Research,
     fetch_earnings_days_with_status,
 )
-from notifier import send_telegram, md_escape
+from notifier import send_telegram, md_escape, md_italic
 
 
 # =============================================================================
@@ -574,6 +574,12 @@ def _append_slippage_log(record: dict) -> None:
 # perilaku lama tanpa mengubah kode.
 E5_SLIPPAGE_BASIS_ENV = "E5_SLIPPAGE_BASIS"
 MIN_MEASURED_SLIPPAGE_BASIS = 0.0010
+
+# Knob yang WAJIB tersambung ke blok env workflow entry. Daftarnya lahir dari lubang
+# nyata: E5_SLIPPAGE_BASIS sempat hanya terbaca dari os.getenv sehingga `gh variable
+# set` tidak ada efeknya di CI - knob yang hidup di kode tapi mati di produksi.
+CI_ENV_KNOBS: tuple[str, ...] = ("E5_SLIPPAGE_BASIS",)
+ENTRY_WORKFLOWS: tuple[str, ...] = ("crypto-execute.yml", "market-execute.yml", "daily-scan.yml")
 
 
 def measured_slippage_basis(path: Optional[str] = None) -> tuple[float, str]:
@@ -3474,8 +3480,8 @@ def format_summary_telegram(
                         f"P6(`{p1_7.get('P6_contrarian_check', 0.0):.2f}`)"
                     )
             if research.narrative:
-                lines.append(f"   _{md_escape(research.narrative[:180])}_")
-        lines.append(f"   → Keputusan: *{verdict}* ({reason})")
+                lines.append(f"   {md_italic(research.narrative[:180])}")
+        lines.append(f"   → Keputusan: *{verdict}* ({md_escape(reason)})")
 
     executed_list = [e for e in (executions or []) if e.get("verdict") == "EXECUTED"]
     if executed_list:
@@ -4156,11 +4162,11 @@ def market_execute(
         msg_lines.append("*✅ Opened Positions:*")
         for e in executed_list:
             msg_lines.append(f"• {e['side'].upper()} {e['asset']} — margin `${e['margin']:.2f}`")
-            msg_lines.append(f"   _{md_escape(e['reason'])}_")
+            msg_lines.append(f"   {md_italic(e['reason'])}")
     if skipped_list:
         msg_lines.append("\n*❌ Skipped:*")
         for e in skipped_list[:5]:
-            msg_lines.append(f"• {e['asset']}: {e['reason']}")
+            msg_lines.append(f"• {e['asset']}: {md_escape(e['reason'])}")
 
     send_telegram("\n".join(msg_lines))
 
