@@ -1387,6 +1387,15 @@ def resolve_order_margin(
     return margin, price
 
 
+_MIN_SIZE_REJECT_MARKERS = ("agent.incorrect.order_params", "margin < contract.min_size_base")
+
+
+def is_min_size_rejection(exc: BaseException) -> bool:
+    """Hanya penolakan min-size internal bursa yang boleh memicu retry margin."""
+    text = str(exc).lower()
+    return any(marker.lower() in text for marker in _MIN_SIZE_REJECT_MARKERS)
+
+
 def open_position(
     client: WaltClient,
     opp: Opportunity,
@@ -1394,7 +1403,17 @@ def open_position(
     leverage: int = MAX_LEVERAGE,
     resolved: Optional[tuple[float, float]] = None,
 ) -> Optional[dict]:
-    """Preview → execute buka posisi dengan Dynamic TP/SL dan minimum order size enforcement."""
+    """Preview → execute buka posisi dengan Dynamic TP/SL dan minimum order size enforcement.
+
+    Retry terbatas (§3r.1, keputusan pemilik): bila bursa menolak dengan
+    `agent.incorrect.order_params` / "margin < contract.min_size_base" - terjadi pada BNB,
+    saat margin kita sudah DI ATAS `min_size_base x harga / leverage` tetapi bursa menuntut
+    cadangan internal yang tidak diekspos ke kita - kita coba SEKALI dengan margin x1,10.
+    Plafon `max_allowed_margin` dan sisa waktu job tetap mengikat; error lain tidak pernah
+    di-retry. Margin yang benar-benar terpakai dicatat di `actual_margin` supaya `deployed`,
+    buffer kas, dan Executions_Log presisi.
+    """
+    requested_margin = float(margin)
     if resolved is None:
         resolved = resolve_order_margin(client, opp, margin, leverage)
         if resolved is None:
@@ -1428,11 +1447,38 @@ def open_position(
         return None
 
     token = preview["confirmationToken"]
+    applied_margin = margin
     try:
         result = client.execute(token)
-    except Exception as e:
-        log.error(f"{opp.base_asset}: execute(token) gagal: {e}")
-        return None
+    except Exception as exc:
+        if not is_min_size_rejection(exc):
+            log.error(f"{opp.base_asset}: execute(token) gagal: {exc}")
+            return None
+        cap = max(requested_margin * 1.5, DEFAULT_MARGIN * 1.5)
+        retry_margin = round(applied_margin * 1.10, 2)
+        if retry_margin > cap:
+            log.error(f"{opp.base_asset}: retry min-size DITOLAK — margin {retry_margin:.2f} "
+                      f"melebihi plafon {cap:.2f}; tidak ada posisi dibuka")
+            return None
+        if not has_enough_job_time(AUTO_CLOSE_RETRY_BUDGET_MIN):
+            log.warning(f"{opp.base_asset}: retry min-size dibatalkan — sisa waktu job tidak "
+                        f"cukup untuk memasang TP/SL setelahnya")
+            return None
+        log.warning(f"{opp.base_asset}: bursa menolak margin {applied_margin:.2f} "
+                    f"(min-size internal), retry SEKALI dengan {retry_margin:.2f}")
+        try:
+            retry_preview = client.preview_order(
+                opp.contract_id, opp.side, leverage, retry_margin, price, tp=tp, sl=sl)
+            if not retry_preview or not retry_preview.get("ok"):
+                detail = retry_preview.get("risk", {}) if isinstance(retry_preview, dict) else retry_preview
+                log.error(f"{opp.base_asset}: retry min-size preview gagal: {detail}")
+                return None
+            result = client.execute(retry_preview["confirmationToken"])
+        except Exception as retry_exc:
+            log.error(f"{opp.base_asset}: retry min-size gagal: {retry_exc}")
+            return None
+        preview = retry_preview
+        applied_margin = retry_margin
 
     if not result or (
         isinstance(result, dict)
@@ -1450,7 +1496,7 @@ def open_position(
     except Exception as exc:
         log.debug(f"open_position: pengukuran slippage dilewati ({type(exc).__name__})")
     log.info(
-        f"✅ {opp.side.upper()} {opp.base_asset} opened: margin ${margin} @ ${price:.4f}, "
+        f"✅ {opp.side.upper()} {opp.base_asset} opened: margin ${applied_margin} @ ${price:.4f}, "
         f"TP ${tp}, SL ${sl}, order_id={order_id}"
     )
 
@@ -1483,7 +1529,7 @@ def open_position(
             send_telegram(f"⚠️ POSISI TANPA SL: {opp.base_asset}")
 
     if isinstance(result, dict):
-        result["actual_margin"] = margin
+        result["actual_margin"] = applied_margin
         result["tp"] = tp
         result["sl"] = sl
         result["price"] = price
