@@ -1195,6 +1195,43 @@ untuk BTC long 08:15Z (15:15 WIB) - apakah berlabel `Take Profit executed`, `Sto
 `Liquidated`, atau hanya `closed`. Label itu membedakan hipotesis (b) dan (c) tanpa perlu order
 baru apa pun.
 
+### 3p.9 Eliminasi selesai: yang tertutup adalah BTC-nya, bukan clip atau TP/SL kita
+
+Field status bursa (dibaca read-only, run #44888404007) menggugurkan sisa tersangka teknis:
+
+| Field BTC | Nilai | Implikasi |
+|---|---|---|
+| `venue_status` / `is_active` | `active` / `true` | bukan karena kontrak non-aktif/jam tutup |
+| `taker_fee_pct` / `maker_fee_pct` | `0.0009` / `0.0` | **fee kita terkonfirmasi presisi** (0,18% round-trip), dan screenshot ($0,00884 / $9,82 = 0,09%) cocok |
+| `tpsl_buffer_pct` | `0.0002` | TP/SL kita (1,5%-2,0%) jauh di atas buffer - bukan pelanggarannya |
+| `margin` (bps notional) | init default 500 / min 200 / maint 120 / **closeout 80** | margin kita 50,9% notional = 5092 bps, bukan 80 bps -> **bukan likuidasi/closeout** |
+| `min_size_base` / `min_size_quote` | `0.00007` / `1.0` | posisi kita 0,00017 BTC / $9,82 -> di atas keduanya, **bukan dust-order** |
+| `funding_rate_hourly` | `-0.000008` (=-0,19%/hari), next 10:00Z | probe 08:15-09:09Z tidak berimpit dengan funding |
+
+Probe kelima (`--no-tpsl`, tanpa TP/SL sama sekali) tetap hilang dalam hitungan detik:
+`fill 57.877,80 vs rate 57.897,10 -> -0,0333%`, lalu `No open position exists`. Jadi
+pemasangan autoClose **bukan** pemicunya.
+
+Pola pembeda yang tersisa dan konsisten di semua data: **yang mati selalu BTC, sementara
+PLTR/XAG/COIN pada notional yang sama kecilnya (~$4,9) bertahan 83-93 menit sampai monitor
+menutupnya sendiri.** Dengan semua penjelasan teknis di sisi kita sudah tereliminasi, sisa
+kemungkinan adalah aturan minimum POSISI khusus BTC di bursa (lebih tinggi dari `min_size_base`
+yang kita hormati) - dan itu hanya bisa dikonfirmasi Walt, bukan dari API yang kita punya.
+
+Dua keputusan yang saya rekomendasikan (keduanya milik Anda):
+1. **Sementara: jangan buka BTC lewat jalur otomatis** sampai ambang minimum posisi BTC
+   dikonfirmasi. Kalau benar, setiap entry BTC di clip kita akan tertutup seketika dengan rugi
+   = fee round-trip (~0,18%) - kebocoran PnL yang senyap, bukan kegagalan yang terlihat.
+2. **Ukur slippage keluar di aset yang bertahan** (mis. XAG/ETH clip $5) - di sana close kita
+   tidak akan kalah balapan, dan angka sisi keluar yang selama ini TIDAK TERUKUR akhirnya dapat
+   diambil.
+
+Slippage masuk yang terukur sampai kini (5 sampel): −0,0154% / +0,1411% / +0,0031% / −0,0341% /
+−0,0333% → median |0,0333%| ≈ **3 bps**. Bersama fee bursa yang kini terkonfirmasi 0,09%/sisi,
+dasar biaya round-trip yang realistis adalah **±0,24%**, bukan 1,18% - sekitar **5x lebih ringan**
+dari angka yang selama ini dipakai semua simulasi kita. Angka itu masih menunggu sisi keluar
+sebelum boleh menggantikan `COSTS`.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 
