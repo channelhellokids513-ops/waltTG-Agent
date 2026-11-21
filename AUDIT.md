@@ -1301,7 +1301,7 @@ angka yang saya karang:
 ### 3r.1 Temuan BNB: preview lolos, execute menolak — dan saya menolak menebak rumusnya
 
 ```
-BNB: margin *** disesuaikan ke batas minimum kontrak $2.68 (min_size_base=0.01 @ $524.94)
+BNB: margin [nilai dihapus di log CI] disesuaikan ke batas minimum kontrak $2.68 (min_size_base=0.01 @ $524.94)
 preview_order -> HTTP 200 OK
 execute(token) -> Walt MCP error (perps_execute_operation):
   {"error":{"code":"agent.incorrect.order_params",
