@@ -1357,6 +1357,68 @@ Belum terverifikasi di produksi pada saat komit ini dibuat: run `crypto-execute`
 masih berjalan. Yang dicari di log-nya: `bursa menolak margin … retry SEKALI dengan …` diikuti
 `✅ … opened: margin $…` dengan nilai retry, dan tanpa `FAILED BNB`.
 
+### 3s. Plafon ATAS bursa & pemulihan kredensial (keputusan pemilik, terverifikasi produksi)
+
+**Fakta terukur.** Probe `contract_schema` (#44926211013) membuktikan `max_size_base` dan
+`max_size_quote` ada di **139/139** kontrak - bukan anomali ANTHROPIC. Kasus itu sendiri:
+margin 2,50 @ lev 2 = notional 5,00 USD sudah melewati `max_size_quote` kontrak tersebut,
+artinya **plafon atas mereka bisa lebih kecil daripada clip minimum kita**. Selama ini
+`resolve_order_margin` hanya menegakkan batas BAWAH, jadi pelanggaran seperti itu baru
+ketahuan setelah execute (dan, lewat bug retry Ronde 8, sempat diperparah dengan margin
+YANG LEBIH BESAR).
+
+**Keputusan (pemilik): SKIP, jangan turunkan clip.** Kalau notional atau ukuran hasil
+perhitungan melewati plafon kontrak, aset dibuang dengan log - konsisten dengan jalur
+buang `min_size_base`. Menurunkan margin ke bawah `DEFAULT_MARGIN` ditolak dengan alasan
+ekonomi, bukan prinsip: clip remah membuat fee tetap memakan carry, dan floor 2,50 USD ada
+justru supaya kita tidak membuka posisi yang secara matematis rugi sejak awal.
+
+**Bacaan yang ditegakkan = paling ketat.** Bursa menulis pesannya `"margin >
+contract.max_size_quote"` padahal nama field-nya `quote` (= notional). Kita memeriksa
+`margin x leverage <= max_size_quote` dan `margin x leverage / price <= max_size_base`
+secara serentak; `0` berarti tidak dibatasi, tepat di plafon berarti boleh. Asimetri
+sengaja: over-skip hanya kehilangan opportunity, under-skip kehilangan kredensial dan
+meninggalkan posisi. Kalau nanti ingin melonggarkan ke bacaan "margin murni", itu harus
+menjadi keputusan tercatat, bukan efek samping.
+
+**Akar terbakarnya kredensial CI (#44926211013, 16:44:44Z) dan tiga lapis penutupnya.**
+Refresh token Walt itu single-use. Langkah `contract_schema` saya menyetel
+`WALT_TOKEN_SYNC: "on"` tetapi TIDAK mengoper `GH_PAT` + `GITHUB_REPOSITORY`, jadi token
+baru terbakar tanpa tempat disimpan -> `invalid_grant` untuk semua run berikutnya.
+(1) YAML: langkah itu kini membawa ketiga kunci. (2) Invarian test
+`test_langkah_oauth_wajib_membawa_tiga_kunci_persistensi` memindai SEMUA workflow: env
+dengan `WALT_REFRESH_TOKEN` wajib memuat `WALT_TOKEN_SYNC` + `GH_PAT` +
+`GITHUB_REPOSITORY`. Test ini langsung menemukan empat jalur produksi yang selamat hanya
+karena *default* (`crypto-execute`, `daily-scan`, `market-execute`, `risk-monitor`) - kini
+ketiganya ditulis eksplisit, karena default tidak bisa diaudit. (3) Kode:
+`require_persistable_refresh()` adalah baris pertama `_refresh()`, dan menolak SEBELUM
+`httpx.post` - dites dengan menambal post dan menuntut nol panggilan, jadi kegagalan
+konfigurasi tidak mungkin lagi membakar token di server Walt.
+
+**Vonis `err_detail` yang salah arah.** Pemicu `Telegram HTTP 400` pada alert OAuth bukan
+teks error yang lupa di-escape (variabel itu tidak ada), melainkan **code-span di dalam
+bold**: `*ALERT OAUTH `invalid_grant`*`. Markdown v1 tidak mengizinkan entity bersarang -
+kelas bug yang sama persis dengan `*MARKET_UNIVERSE*` + `GEAR_2_ACTIVE_60M`. Bentuk benar:
+bold berisi teks yang sudah `md_escape` (`invalid\_grant`).
+
+**Verifikasi produksi pasca-pemulihan (#44929762497, 17:23:13Z).** Rantai kredensial
+terbukti utuh: `POST /oauth/v1/token` 200 -> `PUT .../secrets/WALT_REFRESH_TOKEN` **204**
+-> `AUTO-SYNC berhasil` (guard tidak sekadar lolos; jalur tulis-balik yang bekerja).
+Perbaikan Telegram terbukti di kasus yang paling mungkin gagal: satu run memicu KEDUA
+adaptive execute (`MARKET_UNIVERSE`/`GEAR_2_ACTIVE_60M` + `CRYPTO_UNIVERSE`/
+`GEAR_1_CONSERVATIVE_120M`) dan ketiga pengiriman menjawab 200 pada percobaan pertama,
+tanpa satu pun retry tanpa `parse_mode`. Run ditutup `success` dengan posisi 0 dan
+`batas harian tercapai (8/8 entry dalam 24 jam)` - kas 100% cair.
+
+**Yang MASIH belum terverifikasi di produksi (jangan ditulis sebagai selesai).**
+(a) Retry min-size §3r.1 untuk BNB - BNB terus diveto P5 sebelum mencapai `open_position`,
+jadi jalur retry-nya belum pernah benar-benar terpicu;
+(b) probe cabang `str` (`__has_plausible_price__`) untuk sisi `close` - menunggu penutupan
+alami berikutnya; selama belum ada, `slippage_report` berhak menolak rumus dua sisi;
+(c) gerbang `max_size` yang SKIP sebelum execute - akan terbukti saat ANTHROPIC (atau
+kontrak ber-plafon-kecil lain) kembali menjadi kandidat; yang dicari di log:
+`SKIP — notional ... melewati plafon kontrak max_size_quote`.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 
