@@ -83,6 +83,15 @@ jobs:
           set -o pipefail
           { echo "### 1d. Sensus identitas baris Closed_Positions (penahan duplikat backfill)"; echo '```text'; python tools/ledger_census.py | tee -a "$GITHUB_STEP_SUMMARY" | tee /dev/stderr; echo '```'; echo; } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Webhook deployment probe (verifikasi redeploy Apps Script; tanpa kredensial Walt)
+        if: always()
+        env:
+          GOOGLE_SHEET_WEBHOOK_URL: ${{ secrets.GOOGLE_SHEET_WEBHOOK_URL }}
+          LOG_REDACT: "true"
+        run: |
+          set -o pipefail
+          { echo "### 1d. Verifikasi deployment Apps Script (?probe=1)"; echo '```text'; python tools/webhook_probe.py --expect-version 2026-11-21.1 | tee -a "$GITHUB_STEP_SUMMARY"; echo '```'; echo; } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Research read probe (read-only, tanpa kredensial Walt)
         env:
           GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || secrets.GOOGLE_SHEET_ID }}
