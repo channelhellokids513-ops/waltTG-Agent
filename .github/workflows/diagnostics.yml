@@ -26,6 +26,15 @@ on:
         options:
           - TIDAK_ORDER
           - YA_ORDER_NYATA
+      probe_margin:
+        description: 'Margin USD untuk slippage_probe (menguji ambang clip bursa). Di luar itu tidak dipakai.'
+        required: false
+        default: '2.50'
+        type: choice
+        options:
+          - '2.50'
+          - '3.00'
+          - '5.00'
 
 concurrency:
   group: walt-diagnostics
@@ -182,7 +191,7 @@ jobs:
         run: |
           set -o pipefail
           { echo "### 3. slippage_probe - satu order nyata (buka lalu tutup)"; echo '```text'; } >> "$GITHUB_STEP_SUMMARY"
-          python tools/slippage_probe.py | tee -a "$GITHUB_STEP_SUMMARY"
+          python tools/slippage_probe.py --margin "${{ github.event.inputs.probe_margin }}" --hold-seconds 120 | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Ledger reconciliation dry-run (butuh OAuth; tidak menulis berkas)

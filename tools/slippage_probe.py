@@ -145,6 +145,14 @@ def main() -> int:
     import walt_bot
     from walt_bot import WaltClient
 
+    import argparse
+    parser = argparse.ArgumentParser(description="Satu order nyata untuk mengukur slippage (write path).")
+    parser.add_argument("--margin", type=float, default=walt_bot.DEFAULT_MARGIN,
+                        help="margin USD per posisi; pakai untuk menguji ambang clip bursa (mis. 3.00)")
+    parser.add_argument("--hold-seconds", type=int, default=120,
+                        help="berapa lama memantau posisi tetap terbuka sebelum mencoba menutup")
+    args = parser.parse_args()
+
     client = WaltClient()
     print("slippage_probe - SATU order nyata untuk mengukur slippage murni")
     print("=" * 88)
@@ -173,13 +181,15 @@ def main() -> int:
     )
 
     rate_before = float(client.latest_rate(f"{asset}-USD-PERP")["rate"])
-    resolved = walt_bot.resolve_order_margin(client, opp, walt_bot.DEFAULT_MARGIN, leverage)
+    resolved = walt_bot.resolve_order_margin(client, opp, args.margin, leverage)
     if not resolved:
-        print("DITOLAK: margin minimum tidak terpenuhi untuk clip sekecil apa pun.")
+        print(f"DITOLAK: margin minimum bursa tidak terpenuhi bahkan dengan ${args.margin:.2f} "
+              f"(clip ${args.margin * leverage:.2f} notional) - itu sendiri sudah jawaban P1.")
         return 1
     margin, _price = resolved
     print(f"Clip PRODUKSI: {asset} long lev {leverage} margin ${margin:.2f} "
-          f"(min_size_base={opp.min_size_base}, rate sebelum open={rate_before:.6f})")
+          f"(diminta ${args.margin:.2f}, min_size_base={opp.min_size_base}, "
+          f"rate sebelum open={rate_before:.6f})")
 
     opened = walt_bot.open_position(client, opp, margin, leverage, resolved=resolved)
     if not opened:
@@ -201,13 +211,29 @@ def main() -> int:
     print(f"ENTRY: fill bursa={fill_in:.6f} vs rate sebelum execute={rate_before:.6f} "
           f"-> slippage masuk {slip_in:+.4f}%")
 
-    # Run pertama: preview_close ditolak 3x dengan risk check terpotong. Kandidat terkuat adalah
-    # guard umur-minimum posisi. Tunggu sampai cukup umur SEBELUM mencoba menutup, dan laporkan
-    # nama risk check lengkap bila masih ditolak (lihat risk_summary).
-    wait = max(0.0, MIN_AGE_SECONDS - (time.time() - opened_at_wall))
-    if wait:
-        print(f"Menunggu umur posisi minimum bursa: {wait:.0f}s sebelum mencoba close")
-        time.sleep(wait)
+    # Run pertama: preview_close ditolak 3x dengan risk check terpotong. Riwayat akun pemilik
+    # (screenshot 2026-11-21) membuktikan penyebabnya bukan guard umur: posisi tertutup OLEH
+    # BURSA dalam ~1 menit, tanpa label "Take Profit executed"/"Stop Loss", PnL ~0,001 USD
+    # (≈0,02% notional). Hipotesis yang diuji di bawah: clip $2,50 (notional $5) terlalu kecil
+    # untuk dipertahankan bursa. Karena itu kita lacak kelangsungan hidup posisi per detik,
+    # baru mencoba menutup sendiri.
+    survived = True
+    for elapsed in range(20, max(60, int(args.hold_seconds)) + 1, 20):
+        time.sleep(20)
+        still = [p for p in open_positions(client) if int(p.get("contract_id") or -1) == contract_id]
+        print(f"   +{elapsed}s: {'MASIH TERBUKA' if still else 'SUDAH TIDAK ADA (ditutup bursa)'}")
+        if not still:
+            survived = False
+            break
+
+    if survived:
+        wait = max(0.0, MIN_AGE_SECONDS - (time.time() - opened_at_wall))
+        if wait:
+            print(f"Posisi bertahan; menunggu sisa umur minimum {wait:.0f}s sebelum close")
+            time.sleep(wait)
+    else:
+        print("Posisi hilang sebelum kita sempat menutup sendiri -> slippage keluar TIDAK TERUKUR,")
+        print("dan ini temuan P1: clip ini tidak bisa dipertahankan bursa.")
 
     rate_before_close = float(client.latest_rate(f"{asset}-USD-PERP")["rate"])
     ok, close_result, note = close_position(client, contract_id)
