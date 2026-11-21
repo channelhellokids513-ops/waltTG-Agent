@@ -1232,6 +1232,50 @@ dasar biaya round-trip yang realistis adalah **±0,24%**, bukan 1,18% - sekitar 
 dari angka yang selama ini dipakai semua simulasi kita. Angka itu masih menunggu sisi keluar
 sebelum boleh menggantikan `COSTS`.
 
+### 3p.10 Koreksi penting: penyapuannya BUKAN khusus BTC, dan bukan pekerjaan job kita
+
+Probe keenam (`--asset XAG`, margin $5,00) menghasilkan:
+
+```
+Clip PRODUKSI: XAG long lev 2 margin $5.00 (min_size_base=0.08, rate sebelum open=41.268700)
+ENTRY: fill bursa=41.265000 vs rate sebelum execute=41.268700 -> slippage masuk -0,0090%
+Langsung mencoba close (mode default)
+close_ok=False posisi_sisa=0  checks=[open_position=False(No open position exists...)]
+```
+
+Jadi pernyataan saya di 3p.9 - "yang mati selalu BTC" - **SALAH**. XAG juga disapu dalam hitungan
+detik. Yang masih benar dari 3p.9: semua penjelasan teknis (dust, TP/SL, autoClose, closeout,
+jam trading, funding) sudah tereliminasi.
+
+Yang baru tereliminasi sekarang, dengan bukti jadwal run:
+- **Bukan job kita yang menutup.** Pada 09:00, 09:10, 09:11, 09:20Z `Walt Risk Monitor` dan
+  `Walt Crypto Execute` berstatus **skipped** (MAINTENANCE_MODE=true), jadi tidak ada proses kita
+  yang aktif di jendela probe. Probe 08:20Z juga tidak bersentuh monitor (run-nya skipped).
+
+Pola yang tersisa, dan ini yang membedakan probe dari live: **posisi yang dibuka lewat jalur
+produksi bertahan (COIN short dengan TP $98,21/SL $101,53; PLTR/XAG 83-93 menit), sementara
+posisi yang dibuka dari job diagnostics singkat selalu disapu dalam <1 menit - tanpa peduli
+aset, ukuran, atau ada/tidaknya TP/SL.** Screenshot akun pemilik menampilkan
+`Managed by walt-trading-bot · Disconnect`, yang memberi mekanisme yang masuk akal: bursa
+mungkin menyapu posisi yang dibuka oleh sesi manager yang tidak lagi terhubung. Ini masih
+**hipotesis** - saya tidak punya bukti penyebabnya - tapi ia konsisten dengan SEMUA data yang
+kita punya, termasuk kenapa posisi live tidak pernah mengalaminya.
+
+Konsekuensi yang saya ambil:
+1. **Probe dihentikan.** Enam order nyata menghasilkan lima angka slippage masuk dan NOL angka
+   slippage keluar; menambah sampel dengan metode yang sama tidak akan pernah menghasilkan sisi
+   keluar, hanya membayar fee (~$0,002 per sampel).
+2. **Pindahkan pengukurannya ke jalur produksi** (tanpa order tambahan): catat `latest_rate`
+   tepat sebelum `execute` di `open_position`, bandingkan dengan harga fill yang dilaporkan
+   bursa; lalu biarkan penutupan alami (monitor/autoClose) yang mengukur sisi keluar. Itu
+   mengukur perilaku yang benar-benar kita jalankan, bukan perilaku sesi diagnostics.
+   Butuh persetujuan Anda karena ini menyentuh jalur live (logging saja, tidak mengubah
+   keputusan apa pun).
+3. Slippage masuk yang terukur tetap sah sebagai angka: lima sampel (−0,0154% / +0,1411% /
+   +0,0031% / −0,0341% / −0,0333%) + XAG (−0,0090%) → median |0,0191%| ≈ **2 bps**. Bersama fee
+   bursa yang terkonfirmasi 0,09%/sisi, dasar round-trip realistis tetap **±0,2%**, BUKAN 1,18%.
+   Sisi keluar masih TIDAK TERUKUR, dan karena itu `COSTS` belum saya ganti.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 
