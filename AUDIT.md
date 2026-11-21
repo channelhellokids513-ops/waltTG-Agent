@@ -1049,6 +1049,75 @@ dan hasil probe tidak boleh dipakai mengubah `COSTS`.
 MAINTENANCE_MODE sudah dikembalikan ke `false` (terverifikasi) segera setelah exit code 4, dan
 alert Telegram terkirim sesuai desain alat. Tidak ada posisi tersisa (`posisi_sisa=0`).
 
+### 3p.6 KOREKSI atas 3p.5 — P1 belum terjawab, dan penyebabnya adalah lubang observabilitas (2026-11-21 07:0xZ)
+
+Di 3p.5 saya memakai "PnL terukur naik 2 → 4" sebagai bukti silang bahwa kedua posisi probe
+benar tertutup. **Itu salah.** Pembacaan langsung tab `Closed_Positions` (gviz, tanpa token)
+menunjukkan dua baris yang membuat angka itu naik adalah **PLTR (05:10:17Z, PnL +0,0183)** dan
+**XAG (05:20:16Z, PnL +0,0293)** — keduanya ditutup monitor dengan alasan `Funding Flip Sign`,
+exit source `snapshot_estimate`. Jadi kenaikan itu tidak ada hubungannya dengan probe BTC.
+
+Lalu saya tambahkan pencetakan 6 baris closed TERBARU menurut `created_at` langsung dari respons
+bursa. Hasilnya justru menunjukkan masalah yang lebih mendasar:
+
+```
+6 baris closed terbaru menurut created_at:
+  AAVE long entry=103.432 ... created=2026-11-19T17:11:19 updated=2026-11-19T18:26:44
+```
+
+**Baris terbaru yang bisa dicapai endpoint ber-`created_at` 2026-11-19.** Dua posisi probe BTC
+(created 2026-11-21 06:20Z dan 06:50Z) TIDAK ADA di riwayat closed yang bisa kita baca, dan tidak
+ada di sheet. Padahal kita MEMANG pernah melihatnya terbuka: `list_positions(statuses=["open"])`
+mengembalikan posisi BTC dengan `avg_entry_price` 57.781,40 pada sampel kedua.
+
+Kesimpulan yang sah saat ini:
+- Posisi probe **terbentuk** (fill terbaca dari bursa) lalu **tidak lagi terbuka** dalam <60 detik.
+- Kita **tidak bisa membuktikan** bagaimana ia berakhir, karena `perps_list_positions(closed)`
+  yang kita pakai tidak memberi akses ke baris terbaru — konsisten dengan verdict alat itu sendiri:
+  `TIDAK BISA DIVERIFIKASI: kemungkinan terpotong — respons tidak memuat total/cursor dan klien
+  tidak punya parameter paginasi`.
+- Jadi akar masalah P1 yang TERBUKTI sekarang adalah **lubang observabilitas di sisi kita**
+  (tidak ada paginasi pada daftar posisi tertutup), BUKAN (belum) kegagalan TP/SL di sisi bursa.
+  Hipotesis "TP/SL terpicu seketika" dan "order ber-margin minimum dibalikkan bursa" masih HIDUP
+  dan belum bisa dibedakan dari data yang kita punya.
+
+Yang saya TIDAK lakukan: menyimpulkan penyebab hilangnya posisi. Itu akan jadi tebakan, dan
+tebakan di jalur perdagangan nyata adalah kelas kesalahan yang persis sedang kita berantas.
+
+Urutan pekerjaan berikutnya (butuh persetujuan/aksi pemilik di langkah 3):
+1. **Pasang paginasi** pada `WaltClient.list_positions` (cursor/offset + total bila ada) supaya
+   riwayat closed terbaru benar-benar tercapai; tegakkan dengan test yang menolak "daftar dianggap
+   lengkap tanpa bukti".
+2. **Audit `autoClose`**: untuk order ber-`preview_order` dengan TP/SL yang dihitung dari
+   `latest_rate` sebelum fill, buktikan apakah trigger price bisa sudah terlampaui oleh harga fill
+   (kasus long dengan TP/SL berbasis harga kuotasi, bukan harga isi).
+3. **Cek riwayat akun di sisi Walt** (dashboard/Telegram pemilik) untuk dua trade BTC
+   06:20Z dan 06:50Z: hanya pemilik yang bisa melihat apakah trade itu muncul, dan dengan PnL apa.
+   Itu satu-satunya cara membedakan hipotesis yang tersisa.
+Sementara 1-3 belum selesai: **jangan tambah sampel probe, dan jangan naikkan ukuran posisi apa pun.**
+
+## 3q. Verifikasi redeploy Apps Script pemilik (2026-11-21 07:0xZ, job read_only #44880581116)
+
+Berhasil sebagian, dan perbedaannya penting:
+
+| Jalur | Sebelum | Sekarang |
+|---|---|---|
+| `doGet` webhook (Research_Read) | text/plain 42 byte (stub) | **masih `html_or_unparsable`** |
+| gviz `Daily_Scans` (fallback) | ok, 39 baris, SEMUA basi, terbaru 2026-11-20T00:17Z | **ok, 44 baris, 5 SEGAR, terbaru 2026-11-21T00:17Z** |
+| verdict riset | SAKIT (perlu tindakan) | **SEHAT (jalur baca riset berfungsi)** |
+
+Artinya pipeline riset sekarang hidup lagi - lewat gviz, dengan 5 tambahan baris scan dan aset
+segar dalam jendela 13 jam. Yang belum: `doGet` masih membalas bukan JSON, sehingga (a) tab
+`Research_Read` tidak bisa dibaca lewat webhook, dan (b) kita belum melihat `"version":
+"2026-11-21.1"`. Kemungkinan yang tersisa: deployment aktif masih versi lama untuk jalur GET,
+atau `doGet` di file yang ter-deploy tidak identik dengan repo. Verifikasi yang menutup ini cuma
+satu baris: buka `<WEBHOOK_URL>/exec?probe=1` dan tempel jawabannya ke saya - kalau JSON berisi
+`version` + header tiap tab, jalur GET pulih dan kolom `mg_*` akan muncul pada tulis berikutnya;
+ kalau masih teks 42 byte, yang ter-deploy bukan kode repo.
+Konsekuensi sementara yang harus diterima: riset crypto yang baru saya sambungkan (3p.2) membaca
+hasil lewat gviz, bukan webhook - itu sudah cukup untuk jalan, tetapi audit "riset per aset per
+hari" jadi bergantung pada satu jalur saja.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 
