@@ -1118,6 +1118,43 @@ Konsekuensi sementara yang harus diterima: riset crypto yang baru saya sambungka
 hasil lewat gviz, bukan webhook - itu sudah cukup untuk jalan, tetapi audit "riset per aset per
 hari" jadi bergantung pada satu jalur saja.
 
+### 3p.7 Riwayat akun pemilik menutup sebagian pertanyaan P1, dan menggugurkan hipotesis saya sendiri
+
+Screenshot riwayat (2026-11-21) memuat, berurutan: `XAG Short opened` → `XAG Take Profit
+executed +0,07` → **`BTC Long opened 6:31` + `BTC Long closed 6:31 −0,001`** (menit yang sama) →
+`PLTR/XAG Long opened 10:46` → `PLTR Long closed 12:10 +0,01` → `XAG Long closed 12:20 +0,02` →
+**`BTC Long opened 1:50` + `BTC Long closed 1:51 +0,0008`** → `COIN Short opened 1:53`.
+
+Dua pasangan BTC itu adalah kedua sampel probe saya. Yang terbukti:
+
+1. Posisi probe **benar-benar terbentuk di bursa** (ada di riwayat akun) dan **ditutup bursa
+   dalam ≤1 menit**, dengan PnL ±0,001 USD = **±0,02% dari notional $5**.
+2. Ini BUKAN penutupan oleh TP/SL kita. Baseline BTC adalah `get_asset_baseline_tpsl_pct('BTC')
+   = (TP 0,020, SL 0,015)`; slippage terukur +0,141% / −0,015% berada jauh di dalam kedua batas
+   itu. Hipotesis "TP/SL terpicu seketika" yang saya ajukan satu paragraf sebelumnya **saya
+   gugurkan sendiri** setelah membaca konstantanya. Riwayat itu juga menampilkannya secara visual:
+   close TP diberi label eksplisit `XAG Take Profit executed +0,07`, sedangkan dua baris BTC
+   hanya `closed` dengan PnL nyaris nol.
+3. Ini juga BUKAN close dari probe: `preview_close` kita ditolak dengan
+   `open_position=False (No open position exists...)` karena posisinya memang sudah tidak ada.
+4. Ukuran saja bukan penjelasnya: PLTR dan XAG berjalan pada notional ~$4,89 dan **bertahan
+   83-93 menit** sampai monitor menutupnya karena `Funding Flip Sign`. Jadi bukan "semua clip
+   kecil langsung ditutup".
+
+Hipotesis yang tersisa (belum teruji, dan saya tidak menyimpulkan salah satunya):
+(a) floor notional/ukuran minimum berlaku per kontrak dan BTC punya ambang lebih tinggi dari
+`min_size_base=7e-05` yang kita hormati; (b) kombinasi `autoClose` yang dipasang dalam request
+`preview_order` yang sama membuat bursa membatalkan posisi baru; (c) aturan khusus produk untuk
+BTC pada margin sangat kecil.
+
+Percobaan pembeda yang sudah siap jalan (alat sudah di-upgrade, commit di bawah):
+- `--margin 5.00` (notional $10 = 2,5x `min_size_base`) dengan pemantauan kelangsungan tiap 20s
+  sampai 120s. Bila bertahan -> mendukung (a). Bila tetap tertutup ≤1 menit -> (a) gugur, dan
+  langkah berikutnya adalah membuka TANPA TP/SL untuk menguji (b).
+Run percobaan ini **tertolak oleh pintunya sendiri** (`DITOLAK: sudah ada 1 posisi terbuka` -
+COIN short Anda), persis perilaku yang diinginkan: probe tidak menumpuk risiko di akun live.
+MAINTENANCE_MODE sudah dikembalikan `false`.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 
