@@ -35,6 +35,7 @@ sys.path.insert(0, str(ROOT))
 CONFIRM_PHRASE = "saya-ersetuju-order-nyata"
 PROBE_ASSETS = ("BTC", "ETH")          # likuiditas terbesar = estimasi slippage TERBAIK
 SETTLE_SECONDS = 6                     # beri bursa waktu menuliskan fill
+MIN_AGE_SECONDS = 60                   # guard umur-minimum bursa sebelum close (pelajaran run 1)
 MAX_ATTEMPTS = 3
 
 
@@ -97,6 +98,22 @@ def exchange_fill_for_contract(client: Any, contract_id: int) -> tuple[Optional[
     return None, 0.0
 
 
+def risk_summary(preview: Any) -> str:
+    """Ringkas penolakan preview TANPA memotong nama risk check - detail 'open_posi…' yang
+    terpotong pada run pertama membuat diagnosisnya tidak mungkin dilakukan."""
+    if not isinstance(preview, dict):
+        return str(preview)[:200]
+    risk = preview.get("risk") or {}
+    checks = risk.get("checks") or []
+    parts = []
+    for check in checks[:6]:
+        if isinstance(check, dict):
+            parts.append(f"{check.get('name')}={check.get('ok')}"
+                         + (f"({check.get('message')})" if check.get("message") else ""))
+    return (f"ok={preview.get('ok')} risk_ok={risk.get('ok')} checks=[{', '.join(parts)}] "
+            f"token={bool(preview.get('confirmationToken'))} expires={preview.get('expiresAt')}")
+
+
 def close_position(client: Any, contract_id: int) -> tuple[bool, Any, str]:
     """Preview + execute close, maksimal MAX_ATTEMPTS. Return (ok, respons, catatan)."""
     last = "tidak dicoba"
@@ -104,7 +121,7 @@ def close_position(client: Any, contract_id: int) -> tuple[bool, Any, str]:
         try:
             preview = client.preview_close(contract_id)
             if not preview or not preview.get("ok"):
-                last = f"attempt {attempt} preview menolak: {str(preview)[:180]}"
+                last = f"attempt {attempt} preview menolak: {risk_summary(preview)}"
             else:
                 result = client.execute(preview["confirmationToken"])
                 if isinstance(result, dict) and result.get("ok") is not False and not result.get("error"):
@@ -168,6 +185,7 @@ def main() -> int:
     if not opened:
         print("GAGAL OPEN - dan tidak ada posisi yang terbentuk (open_position mengembalikan None).")
         return 1
+    opened_at_wall = time.time()
     time.sleep(SETTLE_SECONDS)
 
     fill_in, _margin_seen = exchange_fill_for_contract(client, contract_id)
@@ -182,6 +200,14 @@ def main() -> int:
     slip_in = (fill_in - rate_before) / rate_before * 100.0
     print(f"ENTRY: fill bursa={fill_in:.6f} vs rate sebelum execute={rate_before:.6f} "
           f"-> slippage masuk {slip_in:+.4f}%")
+
+    # Run pertama: preview_close ditolak 3x dengan risk check terpotong. Kandidat terkuat adalah
+    # guard umur-minimum posisi. Tunggu sampai cukup umur SEBELUM mencoba menutup, dan laporkan
+    # nama risk check lengkap bila masih ditolak (lihat risk_summary).
+    wait = max(0.0, MIN_AGE_SECONDS - (time.time() - opened_at_wall))
+    if wait:
+        print(f"Menunggu umur posisi minimum bursa: {wait:.0f}s sebelum mencoba close")
+        time.sleep(wait)
 
     rate_before_close = float(client.latest_rate(f"{asset}-USD-PERP")["rate"])
     ok, close_result, note = close_position(client, contract_id)

@@ -183,6 +183,12 @@ def section_a(client: Any, hold_h: float) -> dict:
     print("   arti: angka 1,18% yang dipakai semua simulasi adalah slippage TERBESAR yang")
     print("   pernah terlihat di log, diterapkan seragam. Bila median sebenarnya jauh lebih")
     print("   kecil, simulasi kita terlalu pesimis; bila lebih besar, terlalu optimis.")
+    # Roster lengkap: dipakai untuk memutuskan universe (mis. apakah BBCA benar ada di Walt).
+    names = sorted({str(row.get("asset") or "").upper() for row in rows if row.get("asset")})
+    if names:
+        print(f"   roster kontrak bursa ({len(names)} aset):")
+        for chunk in range(0, len(names), 20):
+            print("     " + ", ".join(names[chunk:chunk + 20]))
     return {"rows": rows, "stats": stats}
 
 

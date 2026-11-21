@@ -87,3 +87,24 @@ def test_research_eligible_adalah_whitelist_trading_dan_mencakup_cripto():
     assert "NVDA" in walt_bot.RESEARCH_ELIGIBLE
     assert "BBCA" not in walt_bot.RESEARCH_ELIGIBLE, (
         "IDX/bukan whitelist tidak boleh ikut ke jalur riset tanpa keputusan pemilik")
+
+
+def test_cap_riset_crypto_ambil_funding_terbesar_dan_abai_aset_di_bawah_floor():
+    pairs = [("BTC", 0.0021), ("ETH", 0.004), ("SUI", -0.018), ("AAVE", 0.011),
+             ("LINK", 0.009), ("NEAR", 0.007), ("DOGE", 0.0005), ("XAU", 0.02)]
+    picked = walt_bot.crypto_research_set(pairs)
+    # floor MIN_FUNDING_DAILY membuang BTC (0,21%) dan DOGE; saham tidak pernah ikut
+    assert "BTC" not in picked and "DOGE" not in picked
+    assert "XAU" in picked, "komoditas ikut aturan yang sama dengan crypto"
+    assert picked == {"SUI", "XAU", "AAVE", "LINK", "NEAR"}, picked
+    assert "ETH" not in picked, "0,4%/hari di bawah floor 0,5%/hari tidak diteliti"
+    # yang terpilih memang 5 |funding| terbesar di atas floor
+    eligible = sorted(((a, abs(f)) for a, f in pairs if abs(f) >= walt_bot.MIN_FUNDING_DAILY),
+                      key=lambda row: row[1], reverse=True)[:5]
+    assert {a for a, _f in eligible} == picked
+
+
+def test_cap_riset_crypto_bisa_dibatasi_lebih_ketat():
+    pairs = [("SUI", 0.02), ("AAVE", 0.015), ("LINK", 0.012), ("NEAR", 0.011)]
+    assert walt_bot.crypto_research_set(pairs, limit=2) == {"SUI", "AAVE"}
+    assert walt_bot.crypto_research_set([], limit=2) == set()

@@ -966,6 +966,26 @@ def research_stock(
     )
 
 
+# Ronde 8 (keputusan pemilik): riset AI untuk crypto/komoditas dibatasi supaya biaya LLM tidak
+# tumbuh tanpa kendali - hanya kandidat ber-|funding| terbesar, maksimal N ini. Saham TIDAK
+# dibatasi (jalur mereka sudah lama begitu dan E3 menuntut riset).
+CRYPTO_RESEARCH_TOP_N = 5
+
+
+def crypto_research_set(pairs, limit: Optional[int] = None) -> set[str]:
+    """Aset crypto/komoditas yang boleh diteliti AI: |funding| terbesar, dibatasi `limit`.
+
+    `pairs` = iterable (asset, funding_daily). Hanya aset yang sudah melewati floor
+    `MIN_FUNDING_DAILY` yang dipertimbangkan, sama seperti gerbang entry.
+    """
+    rows = [(str(asset).upper(), abs(funding or 0.0)) for asset, funding in pairs
+            if abs(funding or 0.0) >= MIN_FUNDING_DAILY
+            and str(asset).upper() in (ALLOWED_CRYPTO | ALLOWED_COMMODITIES)]
+    rows.sort(key=lambda row: row[1], reverse=True)
+    cap = CRYPTO_RESEARCH_TOP_N if limit is None else limit
+    return {asset for asset, _f in rows[:cap]}
+
+
 def decide_go_nogo(
     opp: Opportunity,
     research: Optional[Research],
@@ -3262,9 +3282,18 @@ def scan_with_research(
     )
     researches: dict[str, Research] = {}
 
+    crypto_research = crypto_research_set(
+        [(o["asset"], o.get("funding_daily")) for o in summary["top_opportunities"]])
+    if crypto_research:
+        log.info(f"  🧠 riset AI crypto/komoditas dibatasi {CRYPTO_RESEARCH_TOP_N} |funding| "
+                 f"terbesar: {', '.join(sorted(crypto_research))}")
+
     for opp in summary["top_opportunities"]:
         asset = opp["asset"]
-        if asset in RESEARCH_ELIGIBLE and (qwen or gemini):
+        # Batas biaya (Ronde 8): saham selalu dinilai; crypto/komoditas hanya yang masuk
+        # prioritas funding tertinggi. Riset yang SUDAH ada di sheet tetap dipakai - gratis.
+        worth_calling = asset in ALLOWED_STOCKS or asset in crypto_research
+        if asset in RESEARCH_ELIGIBLE and worth_calling and (qwen or gemini):
             try:
                 researches[asset] = research_stock(
                     asset,
@@ -3659,13 +3688,15 @@ def market_execute(
         _notify_cold_state_once(cold_reason)
         opps = []
 
+    crypto_research = crypto_research_set([(o.base_asset, o.funding_daily) for o in opps])
     for opp in opps:
         if opp.base_asset in RESEARCH_ELIGIBLE:
             if opp.base_asset in cached_researches:
                 cached = cached_researches[opp.base_asset]
                 log.info(f"  ✓ Pakai riset spreadsheet {opp.base_asset}: skor {cached.final_score:+.2f}, sentimen {cached.news_sentiment}")
                 researches[opp.base_asset] = cached
-            elif (qwen or gemini) and otf_research_calls < max_otf_calls:
+            elif (qwen or gemini) and otf_research_calls < max_otf_calls and (
+                    opp.base_asset in ALLOWED_STOCKS or opp.base_asset in crypto_research):
                 try:
                     otf_research_calls += 1
                     log.info(
