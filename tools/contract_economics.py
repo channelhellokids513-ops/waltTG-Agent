@@ -151,8 +151,13 @@ def section_a(client: Any, hold_h: float) -> dict:
         contracts = payload or []
     contracts = [item for item in contracts if isinstance(item, dict)]
     rows, slips = [], []
+    probe_fields: dict[str, Any] = {}
     for contract in contracts:
         asset = str(contract.get("base_asset") or contract.get("name") or "").upper()
+        if asset in ("BTC", "ETH", "PLTR", "XAG", "COIN") and not probe_fields.get(asset):
+            # Field lengkap bursa untuk aset pembanding: inilah yang menjawab apakah ada
+            # minimum POSISI (bukan minimum ORDER) yang membuat clip kita dibersihkan bursa.
+            probe_fields[asset] = {key: value for key, value in sorted(contract.items())}
         slip = to_float(contract.get("price_slippage"))
         funding_daily_raw = to_float(contract.get("funding_rate_hourly"))
         funding_daily = funding_daily_raw * 24.0 if funding_daily_raw is not None else None
@@ -189,6 +194,13 @@ def section_a(client: Any, hold_h: float) -> dict:
         print(f"   roster kontrak bursa ({len(names)} aset):")
         for chunk in range(0, len(names), 20):
             print("     " + ", ".join(names[chunk:chunk + 20]))
+    # Cetak mentah field kontrak (tanpa nilai sensitif): pencarian kata 'min' di sini yang
+    # membuktikan/menggugurkan hipotesis "clip kita adalah dust dan bursa membersihkannya".
+    for asset, fields in probe_fields.items():
+        mins = {k: v for k, v in fields.items() if "min" in k.lower() or "size" in k.lower()
+                or "step" in k.lower() or "lot" in k.lower()}
+        print(f"   field minimum {asset}: {mins or '(tidak ada field min/size/step/lot)'}")
+        print(f"     semua field {asset}: {sorted(fields.keys())}")
     return {"rows": rows, "stats": stats}
 
 
