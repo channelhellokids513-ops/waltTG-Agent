@@ -53,6 +53,7 @@ jobs:
         env:
           WALT_CLIENT_ID: ${{ secrets.WALT_CLIENT_ID }}
           WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
+          WALT_TOKEN_SYNC: "on"  # eksplisit: default on pernah hampir membakar token tanpa jalur tulis-balik (invarian R8)
           DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
           DASHSCOPE_API_GEMINI_KEY: ${{ secrets.DASHSCOPE_API_GEMINI_KEY || secrets.GEMINI_API_KEY }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-flash-latest' }}

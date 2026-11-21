@@ -244,6 +244,8 @@ jobs:
           STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}
           LOG_REDACT: "true"
           WALT_TOKEN_SYNC: "on"  # refresh OAuth membakar token single-use => wajib ditulis balik
+          GH_PAT: ${{ secrets.GH_PAT || secrets.GH_PATH || secrets.GITHUB_PAT || secrets.PAT }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -o pipefail
           { echo "### 1f. Batas ATAS ukuran order di payload kontrak (pertanyaan #44900424439)"; echo '```text'; python tools/contract_schema_probe.py | tee -a "$GITHUB_STEP_SUMMARY" | tee /dev/stderr; echo '```'; echo; } >> "$GITHUB_STEP_SUMMARY" || echo "(probe kontrak gagal - lewati, jangan merahkan CI)"

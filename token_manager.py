@@ -15,6 +15,38 @@ import threading
 from pathlib import Path
 import httpx
 
+from notifier import md_escape
+
+
+def require_persistable_refresh() -> None:
+    """Fail-closed SEBELUM satu byte pun dikirim ke Walt (#44926211013, 16:44:44Z).
+
+    Refresh token Walt bersifat single-use: setiap POST /oauth/v1/token yang sukses membakar
+    token lama. Kalau proses ini tidak punya tempat menyimpan token baru, kredensial CI mati
+    untuk SEMUA run berikutnya. Ronde ini membuktikannya dua arah:
+      - WALT_TOKEN_SYNC=off  -> allow_refresh() sudah menahan (R6-fix);
+      - WALT_TOKEN_SYNC=on TAPI GH_PAT/GITHUB_REPOSITORY tidak dioper ke langkah itu ->
+        token TETAP terbakar dan alert-nya keluar sesudah kerusakan terjadi.
+    Aturan baru: izin refresh mensyaratkan jalur persistensi yang benar-benar ada.
+    """
+    allow_refresh()  # pertahankan gerbang lama (sync off => tolak)
+    pat = (os.environ.get("GH_PAT") or "").strip()
+    repo = (os.environ.get("GITHUB_REPOSITORY") or "").strip()
+    if pat and repo:
+        return
+    in_ci = os.environ.get("GITHUB_ACTIONS", "").strip().lower() == "true"
+    has_local_env = (Path(__file__).resolve().parent / ".env").exists()
+    if not in_ci and has_local_env:
+        return  # jalur lokal dengan .env: token baru tertulis ke .env, aman
+    why = "berjalan di GitHub Actions" if in_ci else "tidak ada .env lokal"
+    missing = "GH_PAT" if not pat else "GITHUB_REPOSITORY"
+    raise RuntimeError(
+        f"Menolak refresh OAuth SEBELUM memanggil Walt: {missing} kosong padahal {why} dan "
+        "persistensi token baru diizinkan. Refresh akan membakar refresh token single-use "
+        "tanpa tempat menyimpan gantinya. Operkan GH_PAT + GITHUB_REPOSITORY di env langkah "
+        "yang sama, atau set WALT_TOKEN_SYNC=off untuk langkah read-only."
+    )
+
 log = logging.getLogger("token_manager")
 
 AUTH_SERVER = "https://walletbot.me/bot-relay/public-api"
@@ -136,8 +168,10 @@ class TokenManager:
             return self._access_token  # type: ignore
 
     def _refresh(self):
-        # Invarian R6-fix: tidak ada refresh tanpa persistensi (refresh token single-use).
-        allow_refresh()
+        # Invarian R6-fix + R8: tidak ada refresh tanpa persistensi NYATA (token single-use).
+        # Guard ini DIEKSEKUSI SEBELUM httpx.post - kegagalan terjadi di sisi kita, bukan
+        # setelah token di server Walt terbakar.
+        require_persistable_refresh()
         body = {
             "grant_type": "refresh_token",
             "refresh_token": self.refresh_token,
@@ -151,7 +185,8 @@ class TokenManager:
             log.error(f"TokenManager._refresh HTTP {e.response.status_code}: {snippet}")
             if e.response.status_code == 400 and "invalid_grant" in (e.response.text or "").lower():
                 _notify_telegram_safe(
-                    "⚠️ *ALERT OAUTH `invalid_grant`*: refresh token Walt ditolak (HTTP 400). "
+                    f"⚠️ *ALERT OAUTH {md_escape('invalid_grant')}*: refresh token Walt ditolak "
+                    "(HTTP 400). "
                     "Ada DUA kemungkinan dengan tindakan berbeda:\n"
                     "1) *Ras antar-konsumen* (paling sering): workflow lain merotasi token "
                     "single-use tepat sebelum/saat workflow ini start — bisa CI vs CI (mis. "

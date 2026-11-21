@@ -979,6 +979,8 @@ class Opportunity:
     max_leverage: int
     side: Literal["long", "short"]
     min_size_base: float = 0.0
+    max_size_base: float = 0.0   # plafon ATAS ukuran (aset dasar) dari payload kontrak
+    max_size_quote: float = 0.0  # plafon ATAS nilai notional (quote/USD) dari payload kontrak
     price_slippage: float = 0.0
     min_margin_2x: float = 0.0   # minimum margin efektif di lev 2x
 
@@ -1067,6 +1069,8 @@ def rank_opportunities(
             continue
 
         min_base = float(c.get("min_size_base", 0.0))
+        max_base = float(c.get("max_size_base", 0.0) or 0.0)
+        max_quote = float(c.get("max_size_quote", 0.0) or 0.0)
         slip = float(c.get("price_slippage", 0.0))
         min_margin_2x = min_base * 100 * (1 + slip) / MAX_LEVERAGE  # placeholder awal
 
@@ -1079,6 +1083,8 @@ def rank_opportunities(
             max_leverage=c["max_leverage"],
             side=side,
             min_size_base=min_base,
+            max_size_base=max_base,
+            max_size_quote=max_quote,
             price_slippage=slip,
             min_margin_2x=min_margin_2x,
         ))
@@ -1385,7 +1391,52 @@ def resolve_order_margin(
             )
             margin = min_margin_req
 
+    # Plafon ATAS bursa (terverifikasi #44926211013: max_size_base & max_size_quote ada di
+    # 139/139 kontrak). ANTHROPIC ditolak dengan "margin > contract.max_size_quote" padahal
+    # clip kita baru 2,50 USD @ lev 2 (notional 5,00) - artinya ada kontrak yang plafon
+    # atasnya lebih kecil daripada clip minimum kita.
+    #
+    # Keputusan pemilik (§3s): SKIP, jangan pernah menurunkan margin di bawah DEFAULT_MARGIN.
+    # Alasannya bukan estetika: clip remah membuat fee tetap memakan carry, dan floor 2,50 USD
+    # ada justru supaya kita tidak membuka posisi yang secara ekonomi tidak masuk akal.
+    #
+    # Bursa menulis pesannya sebagai "margin > max_size_quote", tetapi nama field-nya `quote`
+    # (= notional). Kami menegakkan bacaan PALING KETAT: notional = margin x leverage.
+    notional = margin * leverage
+    if opp.max_size_quote > 0 and notional > opp.max_size_quote:
+        log.warning(
+            f"{opp.base_asset}: SKIP — notional ${notional:.2f} (margin ${margin:.2f} x lev "
+            f"{leverage}) melewati plafon kontrak max_size_quote=${opp.max_size_quote:.2f}; "
+            f"tidak dibuka di bawah floor ${DEFAULT_MARGIN:.2f}"
+        )
+        return None
+    if opp.max_size_base > 0 and price > 0:
+        derived_size = notional / price
+        if derived_size > opp.max_size_base:
+            log.warning(
+                f"{opp.base_asset}: SKIP — ukuran {derived_size:.6f} melewati plafon kontrak "
+                f"max_size_base={opp.max_size_base} (notional ${notional:.2f} @ ${price:.4f})"
+            )
+            return None
+
     return margin, price
+
+
+def format_monitor_actions_telegram(actions: list[dict]) -> str:
+    """Ringkasan proteksi risk-monitor untuk Telegram (Markdown v1).
+
+    Diekstrak dari cabang CLI `monitor` supaya bisa dites. Bukti produksi #44915963109
+    (14:55:52Z): aset "MARKET_UNIVERSE" + detail "GEAR_2_ACTIVE_60M (60m): 0 opened"
+    menghasilkan `*..._...*..._` - entitas tumpang-tindih yang parser Markdown v1 tolak
+    dengan HTTP 400. Semua teks dinamis karena itu di-escape; hanya penanda bold milik
+    kami yang boleh mentah.
+    """
+    msg = f"*🛡️ Walt Risk Monitor*\n{len(actions)} proteksi risiko diperbarui:\n"
+    for a in actions:
+        info = a.get("detail") or a.get("layer") or a.get("action")
+        asset = md_escape(str(a.get("asset", "?")))
+        msg += f"• *{asset}* — {md_escape(str(info or ''))}\n"
+    return msg
 
 
 _MIN_SIZE_MARKER = "margin < contract.min_size_base"
@@ -5124,15 +5175,7 @@ def main(command: str = "scan"):
         result = risk_monitor_run(client)
         # Send Telegram kalau ada aksi
         if result.get("actions"):
-            msg = f"*🛡️ Walt Risk Monitor*\n{len(result['actions'])} proteksi risiko diperbarui:\n"
-            for a in result["actions"]:
-                info = a.get("detail") or a.get("layer") or a.get("action")
-                # Bukti produksi #44915963109 (14:55:52Z): aset "MARKET_UNIVERSE" + info
-                # "GEAR_2_ACTIVE_60M (60m): 0 opened" menghasilkan entitas tumpang-tindih
-                # *..._...*..._ yang ditolak parser Markdown v1 Telegram (HTTP 400).
-                asset = md_escape(str(a.get("asset", "?")))
-                msg += f"• *{asset}* — {md_escape(str(info or ''))}\n"
-            send_telegram(msg)
+            send_telegram(format_monitor_actions_telegram(result["actions"]))
         _emit_cli_result(command, result)
 
     elif command in ("market_execute", "execute"):
