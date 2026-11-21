@@ -1327,9 +1327,11 @@ sekarang. Kalau Anda setuju, itu satu komit kecil dengan test.
 Status saat ini: 496 test lulus, `sanitize_gate` bersih, YAML 7 valid, `main == origin/main`.
 Yang berubah di dokumen saja pada komit ini.
 
-Catatan format: angka harga/margin di bagian ini sengaja ditulis `524.94 USD`, bukan `$524.94`,
-karena gerbang sanitasi mengenali pola `$<2-4 digit>.<2 digit>` sebagai saldo akun yang tersalin
-dari log run (AUDIT/README tidak mendapat pengecualian kelas itu, dan itu memang disengaja).
+Catatan format: angka harga/margin di bagian ini sengaja ditulis `524.94 USD`, tanpa awalan
+tanda dolar. Gerbang sanitasi mengenali pola "tanda dolar + 2-4 digit + titik + 2 digit" sebagai
+saldo akun yang tersalin dari log run (AUDIT/README tidak mendapat pengecualian kelas itu, dan
+itu memang disengaja), jadi menulis contoh yang cocok dengan pola itu — bahkan di dalam
+penjelasan — akan menggagalkan CI.
 
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
