@@ -133,6 +133,30 @@ def close_position(client: Any, contract_id: int) -> tuple[bool, Any, str]:
     return False, None, last
 
 
+def position_conflict(positions: list[dict], contract_id: int) -> list[str]:
+    """Posisi terbuka pada KONTRAK yang akan diprobe - inilah yang benar-benar berbahaya.
+
+    Penjaga lama menolak bila ada posisi terbuka apa pun. Itu aman tapi terlalu kasar:
+    ia membuat probe tidak bisa dijalankan sama sekali selama akun memegang posisi live
+    yang tidak berhubungan, dan godaannya jadi "tutup dulu posisi pemilik" - yang justru
+    menambah risiko/biaya. Aturan baru: konflik hanya kalau kontrak probe sendiri sudah
+    terbuka; posisi lain dilaporkan supaya bisa diaudit, tidak memblokir.
+    """
+    clash = []
+    others = []
+    for pos in positions:
+        try:
+            cid = int(pos.get("contract_id") or -1)
+        except (TypeError, ValueError):
+            continue
+        label = f"{pos.get('contract_base_asset')}:{pos.get('side')}:margin={pos.get('margin_quote')}"
+        if cid == contract_id:
+            clash.append(label)
+        else:
+            others.append(label)
+    return clash + [f"lain:{o}" for o in others]
+
+
 def main() -> int:
     reasons = check_gates()
     if reasons:
@@ -151,17 +175,14 @@ def main() -> int:
                         help="margin USD per posisi; pakai untuk menguji ambang clip bursa (mis. 3.00)")
     parser.add_argument("--hold-seconds", type=int, default=120,
                         help="berapa lama memantau posisi tetap terbuka sebelum mencoba menutup")
+    parser.add_argument("--allow-other-positions", action="store_true",
+                        help="boleh memprobe selama kontrak yang diprobe sendiri tidak terbuka "
+                             "(posisi live yang tidak berhubungan TIDAK pernah disentuh)")
     args = parser.parse_args()
 
     client = WaltClient()
     print("slippage_probe - SATU order nyata untuk mengukur slippage murni")
     print("=" * 88)
-
-    still_open = open_positions(client)
-    if still_open:
-        print(f"DITOLAK: sudah ada {len(still_open)} posisi terbuka. Probe tidak menumpuk risiko.")
-        print("Tutup dulu posisi itu (atau batalkan probe). Tidak ada order yang dibuat.")
-        return 1
 
     contract = pick_contract(client)
     if not contract:
@@ -170,6 +191,25 @@ def main() -> int:
     asset = str(contract["base_asset"]).upper()
     contract_id = int(contract["contract_id"])
     leverage = min(2, int(contract.get("max_leverage") or 2))
+
+    # Konflik hanya dihitung pada KONTRAK yang akan diprobe. Posisi live pemilik yang tidak
+    # berhubungan dilaporkan (audit) tapi tidak diblokir - dan probe TIDAK PERNAH menutupnya.
+    conflicts = position_conflict(open_positions(client), contract_id)
+    same_contract = [c for c in conflicts if not c.startswith("lain:")]
+    others = [c for c in conflicts if c.startswith("lain:")]
+    if same_contract:
+        print(f"DITOLAK: {asset} sudah terbuka ({', '.join(same_contract)}). "
+              "Probe tidak menumpuk posisi pada kontrak yang sama.")
+        return 1
+    if others:
+        if not args.allow_other_positions:
+            print(f"DITOLAK: {len(others)} posisi lain terbuka dan --allow-other-positions tidak diset:")
+            for item in others:
+                print(f"  - {item}")
+            return 1
+        print(f"Catatan audit: {len(others)} posisi lain sedang terbuka (tidak disentuh probe ini):")
+        for item in others:
+            print(f"  - {item}")
 
     opp = walt_bot.Opportunity(
         contract_id=contract_id, base_asset=asset,

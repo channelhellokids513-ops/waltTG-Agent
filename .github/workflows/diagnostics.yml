@@ -191,7 +191,7 @@ jobs:
         run: |
           set -o pipefail
           { echo "### 3. slippage_probe - satu order nyata (buka lalu tutup)"; echo '```text'; } >> "$GITHUB_STEP_SUMMARY"
-          python tools/slippage_probe.py --margin "${{ github.event.inputs.probe_margin }}" --hold-seconds 120 | tee -a "$GITHUB_STEP_SUMMARY"
+          python tools/slippage_probe.py --margin "${{ github.event.inputs.probe_margin }}" --hold-seconds 90 --allow-other-positions | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Ledger reconciliation dry-run (butuh OAuth; tidak menulis berkas)

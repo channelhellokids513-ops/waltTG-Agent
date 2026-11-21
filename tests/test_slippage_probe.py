@@ -77,6 +77,29 @@ def test_close_berhenti_setelah_percobaan_habis_dan_lapor_gagal():
     assert "attempt 3" in note
 
 
+def test_konflik_hanya_dihitung_pada_kontrak_yang_diprobe():
+    positions = [
+        {"contract_id": 7, "contract_base_asset": "COIN", "side": "short", "margin_quote": "2.4"},
+        {"contract_id": 1, "contract_base_asset": "BTC", "side": "long", "margin_quote": "2.5"},
+    ]
+    conflict = sp.position_conflict(positions, contract_id=1)
+    assert any(c.startswith("BTC") for c in conflict), "posisi BTC sendiri = konflik"
+    assert any(c.startswith("lain:COIN") for c in conflict), "posisi lain harus tetap terlihat"
+    # probe di kontrak yang tidak sedang terbuka -> tidak ada konflik searah
+    only_other = sp.position_conflict(positions, contract_id=99)
+    assert all(c.startswith("lain:") for c in only_other), "posisi tak berhubungan bukan blokir"
+    assert sp.position_conflict([], contract_id=1) == []
+
+
+def test_probe_tidak_permah_menutup_posisi_pemilik():
+    """Alat ini tidak punya jalur apa pun ke close posisi milik orang lain."""
+    src = (ROOT / "tools" / "slippage_probe.py").read_text(encoding="utf-8")
+    assert "close_position(client" in src, "harus ada satu titik close, dan hanya untuk kontrak probe"
+    assert src.count("close_position(client, contract_id)") == 2, "hanya kontrak probe yang ditutup"
+    assert "for pos in" not in src.split("def main")[1].replace("close_position(client, contract_id)", ""), (
+        "tidak boleh ada loop yang menutup posisi lain")
+
+
 def test_close_sukses_mengembalikan_respons_asli_untuk_dibaca_harganya():
     class OkClient:
         def preview_close(self, contract_id):
