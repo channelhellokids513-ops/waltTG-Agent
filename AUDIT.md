@@ -1276,6 +1276,57 @@ Konsekuensi yang saya ambil:
    bursa yang terkonfirmasi 0,09%/sisi, dasar round-trip realistis tetap **±0,2%**, BUKAN 1,18%.
    Sisi keluar masih TIDAK TERUKUR, dan karena itu `COSTS` belum saya ganti.
 
+## 3r. Loop tertutup di produksi: biaya terukur menggerakkan gerbang, dan satu temuan BNB (2026-11-21 11:00Z)
+
+Run `crypto-execute` #44896814228 (`success`) memverifikasi tiga hal sekaligus, tanpa satu pun
+angka yang saya karang:
+
+1. **Telegram Markdown v1 bersih.** `sendMessage` menjawab `200 OK` pada percobaan pertama;
+   tidak ada `400 Bad Request`, tidak ada retry tanpa `parse_mode`. Penyebab yang tersisa
+   ternyata bukan hanya underscore: set escape kita sendiri salah (kita mengirim `\]`, yang
+   di Markdown v1 BUKAN escape valid - itu MarkdownV2). Sekarang `md_escape()` hanya menyentuh
+   `_ * ` `[`, dan `md_italic()` membuang pembungkus miring bila isinya masih memuat
+   underscore. Prinsipnya: notifikasi "posisi baru dibuka" tidak boleh gagal demi gaya.
+2. **Loop pengukuran -> gerbang berjalan sendiri.** Cache `walt-logs-state-*` membawa
+   `logs/slippage_observed.jsonl` berisi satu sampel produksi (SOL, -5,73 bps), sehingga
+   `measured_slippage_basis()` mengembalikan `2 x 5,73 bps = 0,1146%` dan E5 memakainya
+   tanpa perintah apa pun:
+   `GO LONG BNB ... hold=24h, exp_funding=0.557%, cost=0.295%, req=0.442%`
+   (sebelumnya `cost=0.280%` / `req=0.420%` saat masih memakai floor 0,10%). Ini bukti bahwa
+   dasar biaya sekarang hidup dari data, bukan dari konstanta yang kita tulis.
+3. **Posisi produksi bertahan sehat:** `Open positions verified: [SOL, SUI, COIN]`, slot 3/5.
+   Ini juga memperkuat §3p.10 dari sisi berlawanan: posisi yang dibuka jalur produksi TIDAK
+   disapu, sedangkan yang dibuka dari job diagnostics singkat selalu disapu <1 menit.
+
+### 3r.1 Temuan BNB: preview lolos, execute menolak — dan saya menolak menebak rumusnya
+
+```
+BNB: margin *** disesuaikan ke batas minimum kontrak $2.68 (min_size_base=0.01 @ $524.94)
+preview_order -> HTTP 200 OK
+execute(token) -> Walt MCP error (perps_execute_operation):
+  {"error":{"code":"agent.incorrect.order_params",
+   "message":"Incorrect data for creating order: margin < contract.min_size_base",
+   "retryable":false}}
+```
+
+Yang bisa dihitung dari angka yang ada: `0.01 x 524.94 / 2 = $2,6247` adalah margin minimum
+teoretis, dan buffer kita (`x1.015 + $0.02`) memberi `$2,68` - secara aritmetika DI ATAS
+angka itu, tapi bursa tetap menolak. Artinya ada syarat bursa yang TIDAK terexpose ke kita
+(cadangan fee/haircut/pembulungan step_size internal). Saya sengaja TIDAK menyimpulkan
+rumusnya: menebak konstanta buffer baru akan menyembunyikan fakta bahwa kita tidak tahu,
+dan itu persis kelas kesalahan yang sudah tiga kali kita tangkap di ronde ini.
+
+Dua hal yang belum saya kerjakan karena berada di luar wewenang yang Anda berikan:
+(a) menaikkan `MARGIN_BUFFER` / buffer minimum margin - itu parameter strategi, dan
+(b) menambahkan retry satu kali pada margin lebih besar saat kode error
+`agent.incorrect.order_params` muncul - itu mengubah jalur entry nyata. Usulan yang aman
+dan bisa dibalik: retry SEKALI dengan `margin x 1.10`, hanya untuk kode error itu, tetap
+dibatasi `max_allowed_margin`, dan kegagalan tetap dilaporkan sebagai `FAILED` seperti
+sekarang. Kalau Anda setuju, itu satu komit kecil dengan test.
+
+Status saat ini: 496 test lulus, `sanitize_gate` bersih, YAML 7 valid, `main == origin/main`.
+Yang berubah di dokumen saja pada komit ini.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 
