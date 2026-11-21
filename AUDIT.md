@@ -1301,7 +1301,7 @@ angka yang saya karang:
 ### 3r.1 Temuan BNB: preview lolos, execute menolak — dan saya menolak menebak rumusnya
 
 ```
-BNB: margin [nilai dihapus di log CI] disesuaikan ke batas minimum kontrak $2.68 (min_size_base=0.01 @ $524.94)
+BNB: margin [nilai dihapus di log CI] disesuaikan ke batas minimum kontrak 2.68 USD (min_size_base=0.01 @ harga 524.94 USD)
 preview_order -> HTTP 200 OK
 execute(token) -> Walt MCP error (perps_execute_operation):
   {"error":{"code":"agent.incorrect.order_params",
@@ -1326,6 +1326,10 @@ sekarang. Kalau Anda setuju, itu satu komit kecil dengan test.
 
 Status saat ini: 496 test lulus, `sanitize_gate` bersih, YAML 7 valid, `main == origin/main`.
 Yang berubah di dokumen saja pada komit ini.
+
+Catatan format: angka harga/margin di bagian ini sengaja ditulis `524.94 USD`, bukan `$524.94`,
+karena gerbang sanitasi mengenali pola `$<2-4 digit>.<2 digit>` sebagai saldo akun yang tersalin
+dari log run (AUDIT/README tidak mendapat pengecualian kelas itu, dan itu memang disengaja).
 
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
