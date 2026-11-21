@@ -213,6 +213,22 @@ def section_b(client: Any) -> dict:
         per_day_notional.append(abs(funding) / (margin * leverage) / days * 100.0)
         rows.append((str(item.get("contract_base_asset") or "").upper(), funding, margin, days))
     print(f"   posisi tertutup terbaca={len(closed)} terpakai={len(rows)} tidak lengkap={missing}")
+    # Diagnosis P1 (AUDIT 3p.5): daftar closed bisa terurut tertua-dulu, jadi cetak 6 baris
+    # TERBARU berdasarkan created_at apa adanya - inilah yang membuktikan apakah posisi probe
+    # benar-benar tertutup dan dengan PnL berapa.
+    def _created(item: dict) -> str:
+        return str(item.get("created_at") or "")
+
+    newest = sorted(closed, key=_created, reverse=True)[:6]
+    print("   6 baris closed terbaru menurut created_at:")
+    for item in newest:
+        opened, updated = to_time(item.get("created_at")), to_time(item.get("updated_at"))
+        minutes = ((updated - opened).total_seconds() / 60.0) if opened and updated else None
+        hold = f"{minutes:.1f} menit" if minutes is not None else "TIDAK TERHITUNG"
+        print(f"     {str(item.get('contract_base_asset') or '?'):<6} {str(item.get('side') or '?'):<6} "
+              f"entry={item.get('avg_entry_price')} margin={item.get('margin_quote')} "
+              f"funding={item.get('funding_paid_quote')} tahan={hold} "
+              f"created={_created(item)[:19]} updated={str(item.get('updated_at') or '')[:19]}")
     if not rows:
         print("   TIDAK TERUKUR: tidak ada posisi tertutup dengan funding + durasi yang terbaca.")
         return {"measured": False}
