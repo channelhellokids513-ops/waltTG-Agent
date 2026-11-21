@@ -87,9 +87,15 @@ def main() -> int:
     print("URL webhook terbaca dari environment/.env dan sengaja TIDAK ditampilkan.")
 
     probe_url = url + ("&probe=1" if "?" in url else "?probe=1")
-    with httpx.Client(timeout=25.0, follow_redirects=True) as client:
-        probe = describe("GET ?probe=1", client.get(probe_url))
-        plain = describe("GET tanpa probe", client.get(url))
+    try:
+        with httpx.Client(timeout=25.0, follow_redirects=True) as client:
+            probe = describe("GET ?probe=1", client.get(probe_url))
+            plain = describe("GET tanpa probe", client.get(url))
+    except httpx.HTTPError as exc:
+        print(f"GET webhook GAGAL: {type(exc).__name__}: {str(exc)[:180]}")
+        print("Ini masalah jaringan/protokol, BUKAN bukti deployment salah. Ulangi, atau cek")
+        print("URL dari Apps Script -> Deploy -> Manage deployments (harus diakhiri /exec).")
+        return 2
 
     verdict = []
     payload = probe["json"] if isinstance(probe["json"], dict) else None
