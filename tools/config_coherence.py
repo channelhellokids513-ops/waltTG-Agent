@@ -24,8 +24,18 @@ from strategy_config import DAILY_SCAN_CADENCE_HOURS  # noqa: E402
 # Slippage REFERENSI dipakai dari yang TERAMATI, bukan dikira. Log produksi crypto-execute
 # 17:12Z: ETH/BNB/AAVE semuanya `cost=1.180%` -> slippage aset-aset itu ~1.00% (0.18% taker
 # round-trip + 1.00%). Angka 0.03% yang dulu dipakai alat ini menghasilkan "KOHEREN" palsu.
+# Catatan Ronde 8: 1,00% itu ternyata KONSTANTA DEFAULT bursa (p10==p90 di 139 kontrak), dan
+# engine sekarang memakai dasar TERUKUR (2 x p90 sisi masuk, floor 0,10%). Karena itu angka
+# di bawah hanya boleh dipakai sebagai pembanding "dasar venue"; laporan utama alat ini WAJIB
+# memakai basis yang sama dengan engine, atau ia akan berbohong seperti dulu.
 SLIPPAGE_TERAMATI = 0.0100
 SLIPPAGE_OPTIMISTIS = 0.0005
+
+
+def active_slippage_basis() -> float:
+    """Dasar slippage yang benar-benar dipakai gerbang E5 engine hari ini."""
+    from walt_bot import effective_price_slippage
+    return effective_price_slippage(SLIPPAGE_TERAMATI)
 
 
 def _gate():
@@ -84,8 +94,25 @@ def check(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
         return galat, catatan
 
     gate = _gate()
-    lulus, exp_funding, biaya, _note = gate(min_funding, SLIPPAGE_TERAMATI, hold)
-    ambang = e5_ambang(SLIPPAGE_TERAMATI, hold)
+    basis = active_slippage_basis()
+    lulus, exp_funding, biaya, _note = gate(min_funding, basis, hold)
+    ambang = e5_ambang(basis, hold)
+
+    # Dilaporkan TANPA SYARAT. Sebelumnya catatan ini hanya muncul saat ada ketidakcocokan,
+    # sehingga setelah dasar biaya diganti (hibrida terukur) laporan jadi diam dan tidak lagi
+    # menjelaskan angka mana yang sebenarnya sedang menjaga pintu.
+    from walt_bot import E5_SLIPPAGE_BASIS_ENV, measured_slippage_basis
+    _basis_x, basis_note = measured_slippage_basis()
+    sumber = (f"pernyataan venue (kill switch {E5_SLIPPAGE_BASIS_ENV}=venue)"
+              if os.getenv(E5_SLIPPAGE_BASIS_ENV, "measured").strip().lower() == "venue"
+              else f"terukur: {basis_note}")
+    catatan.append(
+        f"E5 memakai dasar slippage AKTIF {basis * 100:.2f}% — sumber: {sumber}. "
+        f"Biaya round-trip {biaya * 100:.2f}% -> req {ambang * 100:.2f}%/hari, "
+        f"floor min_funding_daily={min_funding * 100:.2f}%/hari. "
+        f"Yang menahan entry otomatis adalah gerbang E5 di scan_with_research + "
+        f"market_execute; jalur CLI `open` manual TIDAK melewati E5."
+    )
 
     if exp_funding < biaya:
         # BUKAN galat selama gerbang E5 berdiri di SEMUA jalur entry otomatis: floor ini longgar,
@@ -94,7 +121,7 @@ def check(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
         # catatan ini berubah menjadi lubang rugi nyata.
         catatan.append(
             f"min_funding_daily={min_funding * 100:.2f}%/hari berada DI BAWAH biaya round-trip "
-            f"({biaya * 100:.2f}% @ slippage teramati {SLIPPAGE_TERAMATI * 100:.2f}%): floor ini sendiri "
+            f"({biaya * 100:.2f}% @ slippage aktif {basis * 100:.2f}%): floor ini sendiri "
             f"akan meloloskan expectancy negatif. Yang menahan adalah gerbang E5 "
             f"(req {ambang * 100:.2f}%/hari) di scan_with_research + market_execute. Jalur CLI "
             f"`open` manual TIDAK melewati E5."
@@ -102,9 +129,8 @@ def check(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
     elif not lulus:
         catatan.append(
             f"Yang menyaring entry BUKAN min_funding_daily ({min_funding * 100:.2f}%/hari) melainkan "
-            f"gerbang E5: butuh funding >= {ambang * 100:.2f}%/hari pada slippage teramati "
-            f"{SLIPPAGE_TERAMATI * 100:.2f}%. Selama floor < ambang, floor tidak pernah jadi pembatas "
-            f"(dibuktikan: 17:12Z semua kandidat SKIP pada funding 0.52-0.85%)."
+            f"gerbang E5: butuh funding >= {ambang * 100:.2f}%/hari pada slippage aktif "
+            f"{basis * 100:.2f}%. Selama floor < ambang, floor tidak pernah jadi pembatas."
         )
 
     sl = float(get("default_sl_pct") or 0)

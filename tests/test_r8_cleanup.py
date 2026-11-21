@@ -138,3 +138,62 @@ def test_baris_rusak_dilaporkan_bukan_dihitung_sebagai_nol(tmp_path, capsys):
     records = sr.load(path)
     assert len(records) == 1
     assert "1 baris tidak terbaca" in capsys.readouterr().out
+
+
+# --- dasar biaya E5 hibrida konservatif (keputusan pemilik 2026-11-21) ---------
+
+
+def test_dasar_terukur_pakai_floor_bila_belum_ada_sampel(tmp_path):
+    basis, note = walt_bot.measured_slippage_basis(str(tmp_path / "kosong.jsonl"))
+    assert basis == walt_bot.MIN_MEASURED_SLIPPAGE_BASIS == 0.0010
+    assert "floor" in note
+
+
+def test_dasar_terukur_adalah_dua_kali_p90_sisi_masuk(tmp_path):
+    path = tmp_path / "obs.jsonl"
+    rows = [{"stage": "open", "slippage_pct": 0.01}, {"stage": "open", "slippage_pct": 0.02},
+            {"stage": "open", "slippage_pct": 0.30},   # p90 sisi masuk = 0,30%
+            {"stage": "close", "slippage_pct": 9.99}]  # sisi keluar TIDAK boleh ikut
+    path.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    basis, note = walt_bot.measured_slippage_basis(str(path))
+    assert basis == pytest.approx(2 * 0.30 / 100.0), "2 x p90 |masuk|, dalam pecahan"
+    assert "p90" in note
+
+
+def test_dasar_terukur_naik_di_atas_floor_bila_p90_besar(tmp_path):
+    path = tmp_path / "obs.jsonl"
+    rows = [{"stage": "open", "slippage_pct": v} for v in (0.05, 0.10, 0.20, 1.50, 2.00)]
+    path.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+    basis, _note = walt_bot.measured_slippage_basis(str(path))
+    assert basis == pytest.approx(2 * 2.00 / 100.0), "2 x p90 |masuk|"
+
+
+def test_kill_switch_memakai_pernyataan_venue(monkeypatch):
+    monkeypatch.setenv("E5_SLIPPAGE_BASIS", "venue")
+    assert walt_bot.effective_price_slippage(0.0100) == 0.0100
+    monkeypatch.setenv("E5_SLIPPAGE_BASIS", "measured")
+    assert walt_bot.effective_price_slippage(0.0100) == walt_bot.MIN_MEASURED_SLIPPAGE_BASIS
+
+
+def test_deadlock_e5_terbuka_dasar_hibrida():
+    """Inti keputusan: dengan dasar venue req=1,77%/hari (SOL/SUI diblokir selamanya,
+    termasuk pengukuran itu sendiri). Dengan dasar hibrida req turun ke ~0,42%/hari."""
+    basis = walt_bot.MIN_MEASURED_SLIPPAGE_BASIS
+    cost_hybrid = 2 * walt_bot.TAKER_FEE_PER_SIDE + basis
+    req_hybrid = cost_hybrid * 1.5
+    assert req_hybrid == pytest.approx(0.0042)
+    lulus_sol, *_ = walt_bot.check_funding_vs_fee_gate(0.00691, basis, 24.0)
+    lulus_sui, *_ = walt_bot.check_funding_vs_fee_gate(0.00614, basis, 24.0)
+    assert lulus_sol is True and lulus_sui is True
+    blokir_sol, *_ = walt_bot.check_funding_vs_fee_gate(0.00691, 0.0100, 24.0)
+    assert blokir_sol is False, "dasar venue lama memang masih memblokir - itu yang diganti"
+    # floor funding harian TIDAK berubah: gerbang ekonomi tidak sendirian menjaga pintu
+    assert walt_bot.MIN_FUNDING_DAILY == 0.005
+
+
+def test_config_coherence_memakai_basis_engine_yang_sama(monkeypatch):
+    import tools.config_coherence as cc
+    monkeypatch.setenv("E5_SLIPPAGE_BASIS", "measured")
+    assert cc.active_slippage_basis() == walt_bot.effective_price_slippage(cc.SLIPPAGE_TERAMATI)
+    monkeypatch.setenv("E5_SLIPPAGE_BASIS", "venue")
+    assert cc.active_slippage_basis() == cc.SLIPPAGE_TERAMATI

@@ -565,6 +565,46 @@ def _append_slippage_log(record: dict) -> None:
         raise
 
 
+# --- Dasar biaya E5 (Ronde 8, keputusan pemilik: hibrida konservatif) ----------
+# Konstanta slippage seragam 1,00% yang bursa nyatakan terbukti konstanta default
+# (p10==p90 di 139 kontrak), dan memakainya membuat E5 menuntut 1,77%/hari sehingga
+# 100% order produksi diblokir - termasuk pengukuran itu sendiri tidak pernah terjadi.
+# Mulai sekarang E5 memakai 2 x p90 |slippage sisi masuk| dari fill NYATA, dengan floor
+# konservatif 0,10% (= 2 x 5 bps). Kill switch: E5_SLIPPAGE_BASIS=venue mengembalikan
+# perilaku lama tanpa mengubah kode.
+E5_SLIPPAGE_BASIS_ENV = "E5_SLIPPAGE_BASIS"
+MIN_MEASURED_SLIPPAGE_BASIS = 0.0010
+
+
+def measured_slippage_basis(path: Optional[str] = None) -> tuple[float, str]:
+    """2 x p90 slippage sisi masuk terukur, dengan floor konservatif."""
+    target = path or SLIPPAGE_OBSERVED_PATH
+    try:
+        with open(target, encoding="utf-8") as handle:
+            rows = [json.loads(line) for line in handle if line.strip()]
+    except FileNotFoundError:
+        return MIN_MEASURED_SLIPPAGE_BASIS, "belum ada sampel -> floor 0,10%"
+    except (OSError, json.JSONDecodeError) as exc:
+        return MIN_MEASURED_SLIPPAGE_BASIS, f"log tidak terbaca ({type(exc).__name__}) -> floor"
+    values = sorted(abs(float(row["slippage_pct"])) for row in rows
+                    if isinstance(row, dict) and row.get("stage") == "open"
+                    and isinstance(row.get("slippage_pct"), (int, float)))
+    if not values:
+        return MIN_MEASURED_SLIPPAGE_BASIS, "belum ada sisi masuk -> floor 0,10%"
+    index = min(len(values) - 1, max(0, int(round(0.90 * (len(values) - 1)))))
+    basis = 2.0 * values[index] / 100.0
+    return max(MIN_MEASURED_SLIPPAGE_BASIS, basis), (
+        f"2 x p90 sisi masuk = {values[index]:.2f} bps x2 dari {len(values)} sampel")
+
+
+def effective_price_slippage(venue_slippage: float) -> float:
+    """Slippage yang dipakai gerbang E5: terukur (default) atau pernyataan venue."""
+    if os.getenv(E5_SLIPPAGE_BASIS_ENV, "measured").strip().lower() == "venue":
+        return float(venue_slippage or 0.0)
+    basis, _note = measured_slippage_basis()
+    return basis
+
+
 class WaltClient:
     """MCP client untuk Walt Perps dengan auto-refresh OAuth token."""
 
@@ -3540,7 +3580,8 @@ def scan_with_research(
                     })
                     continue
 
-                econ_ok, _exp_fr, _cost, econ_note = check_funding_vs_fee_gate(opp.funding_daily, opp.price_slippage)
+                econ_ok, _exp_fr, _cost, econ_note = check_funding_vs_fee_gate(
+                    opp.funding_daily, effective_price_slippage(opp.price_slippage))
                 if not econ_ok:
                     skip_msg = f"gerbang ekonomi funding vs fee gagal ({econ_note})"
                     log.info(f"  SKIP {asset}: {skip_msg}")
@@ -3925,7 +3966,8 @@ def market_execute(
             })
             continue
 
-        econ_ok, _exp_fr, _cost, econ_note = check_funding_vs_fee_gate(opp.funding_daily, opp.price_slippage)
+        econ_ok, _exp_fr, _cost, econ_note = check_funding_vs_fee_gate(
+            opp.funding_daily, effective_price_slippage(opp.price_slippage))
         if not econ_ok:
             skip_msg = f"gerbang ekonomi funding vs fee gagal ({econ_note})"
             log.info(f"  SKIP {opp.base_asset}: {skip_msg}")

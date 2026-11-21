@@ -34,6 +34,8 @@ import httpx
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+import sheet_logger  # noqa: E402  (memakai _normalize_webhook_url yang sama dengan jalur produksi)
+
 STUB_GREETING = "walt perps sheet logger webhook is active!"
 
 
@@ -79,12 +81,17 @@ def main() -> int:
     args = parser.parse_args()
 
     load_env()
-    url = (os.environ.get("GOOGLE_SHEET_WEBHOOK_URL") or "").strip().strip('"')
+    raw_url = (os.environ.get("GOOGLE_SHEET_WEBHOOK_URL") or "").strip().strip('"')
+    # Normalisasi lewat sheet_logger: secret kadang berisi ID `AKfycb...` atau URL tanpa
+    # skema. Membaca mentah membuat httpx melempar UnsupportedProtocol dalam ~125ms dan
+    # hasilnya tidak terbaca sama sekali - itu yang terjadi pada run #44888952461.
+    url = sheet_logger._normalize_webhook_url(raw_url) if raw_url else ""
     if not url:
         print("GOOGLE_SHEET_WEBHOOK_URL tidak ada di environment maupun .env - tidak ada yang dicek.")
         print("Set dulu (jangan di-commit): GOOGLE_SHEET_WEBHOOK_URL=<URL /exec dari Apps Script deployment>")
         return 1
-    print("URL webhook terbaca dari environment/.env dan sengaja TIDAK ditampilkan.")
+    print("URL webhook terbaca dari environment/.env (disamakan dengan normalisasi jalur produksi)")
+    print(f"host yang dipakai = {httpx.URL(url).host}")
 
     probe_url = url + ("&probe=1" if "?" in url else "?probe=1")
     try:
