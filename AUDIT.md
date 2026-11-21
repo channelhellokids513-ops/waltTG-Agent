@@ -1155,6 +1155,46 @@ Run percobaan ini **tertolak oleh pintunya sendiri** (`DITOLAK: sudah ada 1 posi
 COIN short Anda), persis perilaku yang diinginkan: probe tidak menumpuk risiko di akun live.
 MAINTENANCE_MODE sudah dikembalikan `false`.
 
+### 3p.8 Sampel ke-3 pada margin $5,00: bertahan ≥80 detik, lalu tetap hilang — dan kesalahan desain saya
+
+Probe ketiga (`--margin 5.00`, `--allow-other-positions`, MAINTENANCE_MODE=true):
+
+```
+Catatan audit: 1 posisi lain sedang terbuka (tidak disentuh probe ini):
+  - lain:COIN:short:margin=2.45551400
+Clip PRODUKSI: BTC long lev 2 margin $5.00 (diminta $5.00, min_size_base=7e-05,
+               rate sebelum open=57724.700000)
+ENTRY: fill bursa=57726.500000 vs rate sebelum execute=57724.700000 -> slippage masuk +0.0031%
++20s: MASIH TERBUKA   +40s: MASIH TERBUKA   +60s: MASIH TERBUKA   +80s: MASIH TERBUKA
+close_ok=False posisi_sisa=0  checks=[open_position=False(No open position exists...)]
+```
+
+Tiga hal yang kini terbukti:
+1. **Slippage masuk terkecil yang pernah kita ukur: +0,0031% (0,3 bps)** pada clip $10 notional.
+   Tiga sampel sekarang: −0,0154% / +0,1411% / +0,0031%. Dua dari tiga di bawah 2 bps.
+2. **Ukuran clip memang menentukan kelangsungan**: $2,50 margin tertutup ≤1 menit (dua kali),
+   $5,00 margin bertahan ≥80 detik. Hipotesis (a) di 3p.7 karena itu TIDAK gugur - ia justru
+   menguat, tapi tidak cukup sebagai penjelasan penuh.
+3. **Tetap ada penutupan yang tidak kita lihat**: antara +80s dan upaya close (~+95s) posisi
+   sudah hilang, dengan `posisi_sisa=0`. Monitor tidak mungkin pelakunya (jadwalnya 08:20Z,
+   jendela kita 08:15:20-08:16:45Z). Jadi pelaku ketiga masih belum terbukti.
+
+Kesalahan desain saya sendiri, dan mengapa penting: saya menambahkan pemantauan kelangsungan
+90 detik SEBELUM close - dan justru itu yang membuat kita **kalah balapan dengan si penutup
+tak terlihat**, sehingga slippage keluar kembali TIDAK TERUKUR. Urutan yang benar adalah
+**close dulu, baru observasi** (dua mode terpisah). Ini saya perbaiki sebelum sampel berikutnya;
+tanpa perbaikan itu, sebanyak apa pun sampel tidak akan pernah menghasilkan angka sisi keluar.
+
+Status akun setelah run: `posisi_sisa=0` (terverifikasi oleh alat), MAINTENANCE_MODE dikembalikan
+`false`, alert Telegram terkirim (percobaan pertama HTTP 400 karena parse_mode, retry tanpa
+parse_mode berhasil). Posisi COIN short Anda tidak disentuh - dan kini ada test yang mengunci
+bahwa probe tidak punya jalur menutup posisi milik orang lain.
+
+Yang dibutuhkan untuk menutup pertanyaan "siapa yang menutup": satu baris dari riwayat akun Anda
+untuk BTC long 08:15Z (15:15 WIB) - apakah berlabel `Take Profit executed`, `Stop Loss`,
+`Liquidated`, atau hanya `closed`. Label itu membedakan hipotesis (b) dan (c) tanpa perlu order
+baru apa pun.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 

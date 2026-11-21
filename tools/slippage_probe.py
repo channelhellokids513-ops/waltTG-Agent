@@ -178,6 +178,9 @@ def main() -> int:
     parser.add_argument("--allow-other-positions", action="store_true",
                         help="boleh memprobe selama kontrak yang diprobe sendiri tidak terbuka "
                              "(posisi live yang tidak berhubungan TIDAK pernah disentuh)")
+    parser.add_argument("--observe-survival", action="store_true",
+                        help="pantau kelangsungan posisi sampai --hold-seconds lalu berhenti "
+                             "(tidak mengukur slippage keluar; default = langsung close)")
     args = parser.parse_args()
 
     client = WaltClient()
@@ -257,23 +260,24 @@ def main() -> int:
     # (≈0,02% notional). Hipotesis yang diuji di bawah: clip $2,50 (notional $5) terlalu kecil
     # untuk dipertahankan bursa. Karena itu kita lacak kelangsungan hidup posisi per detik,
     # baru mencoba menutup sendiri.
-    survived = True
-    for elapsed in range(20, max(60, int(args.hold_seconds)) + 1, 20):
-        time.sleep(20)
-        still = [p for p in open_positions(client) if int(p.get("contract_id") or -1) == contract_id]
-        print(f"   +{elapsed}s: {'MASIH TERBUKA' if still else 'SUDAH TIDAK ADA (ditutup bursa)'}")
-        if not still:
-            survived = False
-            break
-
-    if survived:
-        wait = max(0.0, MIN_AGE_SECONDS - (time.time() - opened_at_wall))
-        if wait:
-            print(f"Posisi bertahan; menunggu sisa umur minimum {wait:.0f}s sebelum close")
-            time.sleep(wait)
+    if args.observe_survival:
+        survived = True
+        for elapsed in range(20, max(60, int(args.hold_seconds)) + 1, 20):
+            time.sleep(20)
+            still = [p for p in open_positions(client) if int(p.get("contract_id") or -1) == contract_id]
+            print(f"   +{elapsed}s: {'MASIH TERBUKA' if still else 'SUDAH TIDAK ADA (ditutup pihak lain)'}")
+            if not still:
+                survived = False
+                break
+        if not survived:
+            print("Posisi hilang sebelum kita sempat menutup sendiri -> slippage keluar TIDAK TERUKUR.")
+            print("Mode ini menjawab 'berapa lama clip bertahan', BUKAN 'berapa slippage keluar'.")
+            return 5
     else:
-        print("Posisi hilang sebelum kita sempat menutup sendiri -> slippage keluar TIDAK TERUKUR,")
-        print("dan ini temuan P1: clip ini tidak bisa dipertahankan bursa.")
+        # Default: LANGSUNG close. Run 08:15Z membuktikan bahwa menunggu 90 detik membuat kita
+        # kalah balapan dengan penutup tak terlihat, sehingga sisi keluar tidak pernah terukur.
+        print("Langsung mencoba close (mode default; pakai --observe-survival untuk menguji "
+              "kelangsungan posisi tanpa mengukur slippage keluar).")
 
     rate_before_close = float(client.latest_rate(f"{asset}-USD-PERP")["rate"])
     ok, close_result, note = close_position(client, contract_id)
