@@ -22,6 +22,7 @@ import time
 import json
 import random
 import logging
+import re  # Ronde 8: probe struktur respons close (belum pernah diimpor di berkas ini)
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal, Optional
@@ -411,7 +412,7 @@ def _notify_cold_state_once(reason: str) -> None:
     log.warning(f"🧊 [STATE DINGIN] {reason} — entry baru dilewati untuk siklus ini")
     try:
         send_telegram(
-            f"🧊 *STATE DINGIN TERDETEKSI*\n{reason}\n"
+            f"🧊 *STATE DINGIN TERDETEKSI*\n{md_escape(reason)}\n"
             "Entry baru *dilewati* sampai cache state pulih (aturan: kehilangan memori risiko "
             "mengurangi eksposur).\n"
             "Bila ini memang disengaja, set variable `WALT_ALLOW_COLD_ENTRY=true`."
@@ -1795,6 +1796,19 @@ CLOSE_FILL_MISSING_COUNT = 0
 
 def _response_shape(res: Any) -> dict[str, str]:
     """Nama kunci + tipe respons execute (TIDAK PERNAH memuat nilai/harga/order_id/token)."""
+    if isinstance(res, str):
+        # Ronde 8 (#44910823095): execute() untuk close ternyata mengembalikan STR, bukan dict,
+        # jadi level 1-3 rantai _extract_close_exit_price tidak mungkin pernah terpicu.
+        # Yang dijawab di sini hanya satu hal: apakah string itu MEMUAT angka desimal yang
+        # layak disebut harga. Kita tidak pernah log kontennya - hanya struktur & hitungannya.
+        decimals = re.findall(r"\d+\.\d+", res)
+        return {
+            "__type__": "str",
+            "__len__": str(len(res)),
+            "__decimal_tokens__": str(len(decimals)),
+            "__has_plausible_price__": str(
+                any(_parse_positive_finite_float(d) is not None for d in decimals)),
+        }
     if not isinstance(res, dict):
         return {"__type__": type(res).__name__}
     shape: dict[str, str] = {}
