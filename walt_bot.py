@@ -572,6 +572,11 @@ class WaltClient:
         self.base_url = base_url
         self.tokens = token_manager or TokenManager()
         self.client = httpx.Client(timeout=30.0)
+        # Status pengukuran dibuat eksplisit di sini (bukan lahir lewat getattr di tengah
+        # jalan) supaya tidak ada state tersembunyi yang sulit dilacak saat insiden.
+        # _contract_assets sengaja None, bukan {}: dict kosong berarti "sudah di-cache".
+        self._quotes: dict[tuple[str, int], tuple[float, float]] = {}
+        self._contract_assets: dict[int, str] | None = None
 
     def _headers(self, force_refresh: bool = False) -> dict:
         return {

@@ -9,6 +9,8 @@ venv/
 *.log
 logs/*.csv
 logs/*.csv.bak-*
+logs/*.jsonl
+logs/*.jsonl.bak-*
 logs/*.json.bak-*
 logs/*.json
 logs/*.py

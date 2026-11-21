@@ -110,6 +110,12 @@ jobs:
           set -o pipefail
           { echo "### 1d. Sensus identitas baris Closed_Positions (penahan duplikat backfill)"; echo '```text'; python tools/ledger_census.py | tee -a "$GITHUB_STEP_SUMMARY" | tee /dev/stderr; echo '```'; echo; } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Slippage report (baca logs/ dari cache; read-only)
+        if: always()
+        run: |
+          set -o pipefail
+          { echo "### 1e. Slippage terukur dari jalur produksi"; echo '```text'; python tools/slippage_report.py | tee -a "$GITHUB_STEP_SUMMARY"; echo '```'; echo; } >> "$GITHUB_STEP_SUMMARY" || echo "(belum ada pengukuran: file logs/slippage_observed.jsonl kosong atau cache logs tidak dipulihkan di job ini)"
+
       - name: Webhook deployment probe (verifikasi redeploy Apps Script; tanpa kredensial Walt)
         if: always()
         env:

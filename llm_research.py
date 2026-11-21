@@ -80,6 +80,16 @@ MODEL_V2 = os.getenv("DASHSCOPE_MODEL", "qwen-plus")
 MODEL_V3 = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 MODEL_V4 = os.getenv("GEMINI_MODEL_V4", "gemini-pro-latest")
 MODEL_AGGREGATOR = os.getenv("DASHSCOPE_MODEL_AGG", "qwen-max")
+# Rantai fallback aggregator. Pada 2026-11-21 `qwen-max` terbukti menjawab
+# 403 "The free quota has been exhausted" - itu KUOTA, bukan bug kode - sedangkan
+# `qwen-plus` dan `qwen-flash` menjawab 200. Tanpa rantai ini, setiap riset aset
+# mencetak warning dan seluruh sintesis diam-diam berjalan di jalur rule-based.
+AGGREGATOR_MODEL_CHAIN: list[str] = []
+for _candidate in [MODEL_AGGREGATOR] + [
+    m.strip() for m in os.getenv("DASHSCOPE_MODEL_AGG_FALLBACK", "qwen-plus,qwen-flash").split(",")
+]:
+    if _candidate and _candidate not in AGGREGATOR_MODEL_CHAIN:
+        AGGREGATOR_MODEL_CHAIN.append(_candidate)
 
 # P1-P7 Weights
 PARAM_WEIGHTS: dict[str, float] = {
@@ -757,16 +767,32 @@ def run_meta_aggregator(
                 .replace("{pre_analysis_json}", json.dumps(pre_analysis, indent=2))
                 .replace("{raw_voters_json}", json.dumps(voter_verdicts, indent=2))
             )
-            agg_res = qwen.chat_json(
-                [{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}],
-                model=MODEL_AGGREGATOR,
-            )
-            if "final_score" in agg_res and "per_parameter_final" in agg_res:
-                # Enforce rumus arah murni agar tidak ada bias positif dari P2/P3/P5/P6
-                agg_res["final_score"] = compute_directional_final_score(agg_res["per_parameter_final"])
-                return agg_res
+            # Coba rantai model (bukan satu model saja): kegagalan akses/kuota pada satu
+            # model tidak boleh membuat seluruh swarm kehilangan sintesis LLM.
+            last_error = ""
+            for candidate in AGGREGATOR_MODEL_CHAIN:
+                try:
+                    agg_res = qwen.chat_json(
+                        [{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}],
+                        model=candidate,
+                    )
+                except Exception as exc:
+                    last_error = f"{type(exc).__name__}: {exc}"
+                    log.warning(f"Meta-Aggregator {candidate} gagal untuk {ticker}: {last_error[:170]}")
+                    continue
+                if "final_score" in agg_res and "per_parameter_final" in agg_res:
+                    # Enforce rumus arah murni agar tidak ada bias positif dari P2/P3/P5/P6
+                    agg_res["final_score"] = compute_directional_final_score(agg_res["per_parameter_final"])
+                    agg_res["aggregator_model"] = candidate
+                    return agg_res
+                last_error = f"respons {candidate} tidak lengkap: {sorted(agg_res)[:6]}"
+                log.warning(f"Meta-Aggregator {candidate} untuk {ticker}: {last_error}")
+                break
+            log.warning(f"Meta-Aggregator {ticker} -> fallback rule-based "
+                        f"(percobaan terakhir: {last_error[:180]})")
         except Exception as e:
-            log.warning(f"Meta-Aggregator (Qwen-Max) call failed for {ticker}: {e}. Fallback to rule-based.")
+            log.warning(f"Meta-Aggregator {ticker} error tak terduga, fallback rule-based: "
+                        f"{type(e).__name__}: {str(e)[:160]}")
 
     # --- DETERMINISTIC RULE-BASED FALLBACK SYNTHESIS ---
     per_param_final = {}
