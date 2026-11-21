@@ -58,11 +58,12 @@ def open_positions(client: Any) -> list[dict]:
     return walt_bot._extract_positions(client.list_positions(statuses=["open"]))
 
 
-def pick_contract(client: Any) -> Optional[dict]:
+def pick_contract(client: Any, asset_hint: str = "") -> Optional[dict]:
     payload = client.list_contracts()
     contracts = payload.get("contracts") if isinstance(payload, dict) else payload
     by_asset = {str(c.get("base_asset", "")).upper(): c for c in (contracts or []) if isinstance(c, dict)}
-    for asset in PROBE_ASSETS:
+    wanted = [asset_hint.strip().upper()] if asset_hint.strip() else list(PROBE_ASSETS)
+    for asset in wanted:
         contract = by_asset.get(asset)
         if contract:
             return contract
@@ -178,6 +179,10 @@ def main() -> int:
     parser.add_argument("--allow-other-positions", action="store_true",
                         help="boleh memprobe selama kontrak yang diprobe sendiri tidak terbuka "
                              "(posisi live yang tidak berhubungan TIDAK pernah disentuh)")
+    parser.add_argument("--asset", default=os.environ.get("PROBE_ASSET", ""),
+                        help="kontrak yang diprobe (mis. XAG/ETH). "
+                             "Default kosong = daftar PROBE_ASSETS. Pilih aset yang BERTAHAN di live "
+                             "kalau tujuan utamanya mengukur slippage keluar.")
     parser.add_argument("--no-tpsl", action="store_true",
                         default=os.environ.get("PROBE_NO_TP_SL", "").strip() == "1",
                         help="buka posisi TANPA TP/SL (isolasi efek autoClose); bisa lewat "
@@ -191,9 +196,9 @@ def main() -> int:
     print("slippage_probe - SATU order nyata untuk mengukur slippage murni")
     print("=" * 88)
 
-    contract = pick_contract(client)
+    contract = pick_contract(client, args.asset)
     if not contract:
-        print("DITOLAK: kontrak BTC/ETH tidak ditemukan di daftar bursa.")
+        print(f"DITOLAK: kontrak {args.asset or 'BTC/ETH'} tidak ditemukan di daftar bursa.")
         return 1
     asset = str(contract["base_asset"]).upper()
     contract_id = int(contract["contract_id"])

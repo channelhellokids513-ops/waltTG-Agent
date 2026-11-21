@@ -35,6 +35,16 @@ on:
           - '2.50'
           - '3.00'
           - '5.00'
+      probe_asset:
+        description: 'Kontrak yang diprobe. Kosong=BTC lalu ETH. Untuk mengukur slippage keluar, pilih aset yang posisinya bertahan di live (mis. XAG).'
+        required: false
+        default: 'XAG'
+        type: choice
+        options:
+          - XAG
+          - ETH
+          - BTC
+          - PLTR
       probe_no_tpsl:
         description: 'Isolasi autoClose: 1 = buka TANPA TP/SL (menguji apakah pemasangan TP/SL yang membuat posisi tertutup seketika).'
         required: false
@@ -197,6 +207,7 @@ jobs:
           SLIPPAGE_PROBE_CONFIRM: "saya-ersetuju-order-nyata"
           SLIPPAGE_PROBE_REAL_ORDER: ${{ github.event.inputs.real_order }}
           PROBE_NO_TP_SL: ${{ github.event.inputs.probe_no_tpsl }}
+          PROBE_ASSET: ${{ github.event.inputs.probe_asset }}
         run: |
           set -o pipefail
           { echo "### 3. slippage_probe - satu order nyata (buka lalu tutup)"; echo '```text'; } >> "$GITHUB_STEP_SUMMARY"
