@@ -35,6 +35,14 @@ on:
           - '2.50'
           - '3.00'
           - '5.00'
+      probe_no_tpsl:
+        description: 'Isolasi autoClose: 1 = buka TANPA TP/SL (menguji apakah pemasangan TP/SL yang membuat posisi tertutup seketika).'
+        required: false
+        default: '0'
+        type: choice
+        options:
+          - '0'
+          - '1'
 
 concurrency:
   group: walt-diagnostics
@@ -188,6 +196,7 @@ jobs:
           WALT_TOKEN_SYNC: "on"
           SLIPPAGE_PROBE_CONFIRM: "saya-ersetuju-order-nyata"
           SLIPPAGE_PROBE_REAL_ORDER: ${{ github.event.inputs.real_order }}
+          PROBE_NO_TP_SL: ${{ github.event.inputs.probe_no_tpsl }}
         run: |
           set -o pipefail
           { echo "### 3. slippage_probe - satu order nyata (buka lalu tutup)"; echo '```text'; } >> "$GITHUB_STEP_SUMMARY"

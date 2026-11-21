@@ -178,6 +178,10 @@ def main() -> int:
     parser.add_argument("--allow-other-positions", action="store_true",
                         help="boleh memprobe selama kontrak yang diprobe sendiri tidak terbuka "
                              "(posisi live yang tidak berhubungan TIDAK pernah disentuh)")
+    parser.add_argument("--no-tpsl", action="store_true",
+                        default=os.environ.get("PROBE_NO_TP_SL", "").strip() == "1",
+                        help="buka posisi TANPA TP/SL (isolasi efek autoClose); bisa lewat "
+                             "env PROBE_NO_TP_SL=1 untuk CI")
     parser.add_argument("--observe-survival", action="store_true",
                         help="pantau kelangsungan posisi sampai --hold-seconds lalu berhenti "
                              "(tidak mengukur slippage keluar; default = langsung close)")
@@ -234,13 +238,26 @@ def main() -> int:
           f"(diminta ${args.margin:.2f}, min_size_base={opp.min_size_base}, "
           f"rate sebelum open={rate_before:.6f})")
 
-    opened = walt_bot.open_position(client, opp, margin, leverage, resolved=resolved)
+    if args.no_tpsl:
+        # Pembeda terakhir: posisi dibuka TANPA autoClose. Kalau yang ini bertahan sementara
+        # yang dengan TP/SL tertutup dalam <1 menit, maka pemasangan autoClose-lah pemicunya -
+        # dan itu bug produksi yang menimpa SEMUA entry, bukan sekadar soal probe.
+        print("Mode --no-tpsl: order dibuka TANPA TP/SL untuk mengisolasi efek autoClose.")
+        preview = client.preview_order(contract_id, "long", leverage, margin, rate_before)
+        if not preview or not preview.get("ok"):
+            print(f"DITOLAK bursa sebelum execute: {risk_summary(preview)}")
+            return 1
+        if not walt_bot.has_enough_job_time(2.0):
+            print("Sisa waktu job tidak cukup aman untuk execute - berhenti sebelum order.")
+            return 1
+        opened = client.execute(preview["confirmationToken"])
+    else:
+        opened = walt_bot.open_position(client, opp, margin, leverage, resolved=resolved)
     if not opened:
         print("GAGAL OPEN - dan tidak ada posisi yang terbentuk (open_position mengembalikan None).")
         return 1
     opened_at_wall = time.time()
     time.sleep(SETTLE_SECONDS)
-
     fill_in, _margin_seen = exchange_fill_for_contract(client, contract_id)
     if fill_in is None:
         fill_in = fill_price_from(opened)
