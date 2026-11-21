@@ -1387,13 +1387,22 @@ def resolve_order_margin(
     return margin, price
 
 
-_MIN_SIZE_REJECT_MARKERS = ("agent.incorrect.order_params", "margin < contract.min_size_base")
+_MIN_SIZE_MARKER = "margin < contract.min_size_base"
 
 
 def is_min_size_rejection(exc: BaseException) -> bool:
-    """Hanya penolakan min-size internal bursa yang boleh memicu retry margin."""
+    """Hanya penolakan min-size bursa yang boleh memicu retry margin.
+
+    `agent.incorrect.order_params` adalah kode GENERIK untuk semua pelanggaran parameter
+    order, jadi ia tidak pernah cocok berdiri sendiri. Produksi #44900424439 membuktikannya:
+    penolakan "margin > contract.max_size_quote" (margin TERLALU BESAR) ikut dicocokkan oleh
+    aturan lama dan di-retry dengan margin yang lebih besar lagi - arah yang salah.
+    Aturan baru: wajib menyebut `min_size_base`, dan `max_size` berapa pun membatalkannya.
+    """
     text = str(exc).lower()
-    return any(marker.lower() in text for marker in _MIN_SIZE_REJECT_MARKERS)
+    if "max_size" in text:
+        return False
+    return _MIN_SIZE_MARKER in text
 
 
 def open_position(

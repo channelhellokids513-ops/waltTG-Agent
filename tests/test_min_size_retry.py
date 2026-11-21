@@ -16,6 +16,13 @@ MIN_SIZE_MSG = ('Walt MCP error (perps_execute_operation): {"error":{"code":'
                 '"agent.incorrect.order_params","message":"Incorrect data for creating '
                 'order: margin < contract.min_size_base","retryable":false}}')
 
+# Persis seperti yang muncul di produksi #44900424439 (SHORT ANTHROPIC): kode error sama,
+# arahnya berlawanan - margin kita yang TERLALU BESAR. Tidak boleh pernah di-retry naik.
+MAX_SIZE_MSG = ('Walt MCP error (perps_execute_operation): {"error":'
+                '{"code":"agent.incorrect.order_params","message":"Incorrect data for '
+                'creating order: margin > contract.max_size_quote","retryable":false,'
+                '"details":[]}}')
+
 
 def make_opp(asset="BNB"):
     return Opportunity(contract_id=17, base_asset=asset, funding_daily=0.0056,
@@ -105,9 +112,20 @@ def test_error_lain_tidak_pernah_di_retry():
 
 def test_pengenalan_penolakan_min_size():
     assert walt_bot.is_min_size_rejection(RuntimeError(MIN_SIZE_MSG))
-    assert walt_bot.is_min_size_rejection(RuntimeError("AGENT.INCORRECT.ORDER_PARAMS"))
     assert not walt_bot.is_min_size_rejection(RuntimeError("timeout"))
     assert not walt_bot.is_min_size_rejection(ValueError(""))
+
+
+def test_max_size_quote_tidak_boleh_di_retry_naik_regresi_44900424439():
+    """Kode error generik yang sama + arah pelanggaran berlawanan = BUKAN min-size."""
+    assert not walt_bot.is_min_size_rejection(RuntimeError(MAX_SIZE_MSG))
+    client = RetryClient(error_text=MAX_SIZE_MSG)
+    assert walt_bot.open_position(client, make_opp(asset="ANTHROPIC"), margin=2.50,
+                                  leverage=50, resolved=(2.50, 100.0)) is None
+    assert len(client.execute_tokens) == 1, "retry naik justru memperbesar pelanggaran"
+    assert client.preview_margins == [2.50]
+    # kedua pesan dalam satu string (mis./details) tetap tidak boleh memicu retry naik
+    assert not walt_bot.is_min_size_rejection(RuntimeError(MIN_SIZE_MSG + MAX_SIZE_MSG))
 
 
 def test_pengukuran_slippage_hanya_untuk_percobaan_yang_terisi(monkeypatch):
