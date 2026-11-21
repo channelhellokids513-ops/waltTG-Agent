@@ -165,3 +165,51 @@ def test_opportunity_menyimpan_plafon_atas_dari_payload():
     assert {"max_size_base", "max_size_quote"} <= set(fields)
     assert re.search(r'c\.get\("max_size_quote"', open("walt_bot.py", encoding="utf-8").read()), \
         "payload kontrak harus benar-benar dibaca, bukan hanya didefinisikan"
+
+
+def test_guard_tidak_ditentukan_oleh_env_di_disk(monkeypatch, tmp_path):
+    """Inti perbaikan: nasib refresh diputuskan oleh INPUT, bukan oleh keadaan mesin.
+
+    Dulu: mesin lokal (punya .env) bilang "boleh", runner CI (tanpa .env) bilang "tolak"
+    untuk test yang sama. Sekarang kedua cabang harus dapat direproduksi tanpa menyentuh disk.
+    """
+    monkeypatch.setattr(tm, "env_file_path", lambda: tmp_path / "tidak-ada.env")
+    _clear(monkeypatch)
+    with pytest.raises(RuntimeError) as exc:
+        tm.require_persistable_refresh()
+    assert "tidak ada .env lokal" in str(exc.value)
+
+    monkeypatch.setenv("GH_PAT", "pat-test")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    tm.require_persistable_refresh()  # PAT + repo tersedia => tidak peduli isi disk
+
+
+def test_lokal_dengan_env_file_boleh_tanpa_pat(monkeypatch, tmp_path):
+    real = tmp_path / ".env"
+    real.write_text("WALT_REFRESH_TOKEN=placeholder\n", encoding="utf-8")
+    monkeypatch.setattr(tm, "env_file_path", lambda: real)
+    _clear(monkeypatch)
+    tm.require_persistable_refresh()  # token baru tertulis ke .env => persistensi terjamin
+
+
+def test_refresh_tetap_bekerja_di_runner_ci_sehat(monkeypatch):
+    """Simulasi runner CI: GITHUB_ACTIONS=true + PAT + repo (kondisi jalur trading)."""
+    calls = []
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"access_token": "a", "expires_in": 3600}
+
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("WALT_TOKEN_SYNC", "on")
+    monkeypatch.setenv("GH_PAT", "pat-test")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    monkeypatch.setattr(tm.httpx, "post", lambda *a, **k: calls.append("POST") or _Resp())
+    mgr = tm.TokenManager(client_id="cid", refresh_token="rt")
+    mgr._refresh()
+    assert calls == ["POST"], "jalur sehat harus benar-benar memanggil Walt"

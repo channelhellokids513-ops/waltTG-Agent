@@ -18,6 +18,11 @@ import httpx
 from notifier import md_escape
 
 
+def env_file_path() -> Path:
+    """Satu-satunya tempat `.env` ditentukan, supaya test bisa mem-pin tanpa menyentuh disk."""
+    return Path(__file__).resolve().parent / ".env"
+
+
 def require_persistable_refresh() -> None:
     """Fail-closed SEBELUM satu byte pun dikirim ke Walt (#44926211013, 16:44:44Z).
 
@@ -35,7 +40,7 @@ def require_persistable_refresh() -> None:
     if pat and repo:
         return
     in_ci = os.environ.get("GITHUB_ACTIONS", "").strip().lower() == "true"
-    has_local_env = (Path(__file__).resolve().parent / ".env").exists()
+    has_local_env = env_file_path().exists()
     if not in_ci and has_local_env:
         return  # jalur lokal dengan .env: token baru tertulis ke .env, aman
     why = "berjalan di GitHub Actions" if in_ci else "tidak ada .env lokal"
@@ -244,7 +249,7 @@ class TokenManager:
                 )
 
     def _update_local_env(self, new_token: str):
-        env_path = Path(__file__).resolve().parent / ".env"
+        env_path = env_file_path()
         if os.environ.get("GITHUB_ACTIONS", "").strip().lower() == "true" and not env_path.exists():
             log.info(
                 "TokenManager._update_local_env: berjalan di GitHub Actions tanpa .env lokal (normal — sinkronisasi via GitHub Secret)."

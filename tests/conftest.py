@@ -193,3 +193,28 @@ def isolate_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, captured_clo
             )
 
     return iso_logs
+
+
+# Ronde 8: `require_persistable_refresh()` (guard OAuth) membaca GH_PAT, GITHUB_REPOSITORY,
+# GITHUB_ACTIONS, dan keberadaan `.env` di disk. Dibiarkan apa adanya, itu membuat hasil
+# pytest BERBEDA antara mesin lokal (`.env` ada, GITHUB_ACTIONS kosong) dan runner CI
+# (`GITHUB_ACTIONS=true`, tanpa `.env`) - pelanggaran langsung terhadap invarian Ronde 3
+# ("hasil test tidak boleh bergantung pada ada/tidaknya .env lokal atau env runner").
+# Terbukti nyata: CI Unit Tests #44930642952 merah 4 test yang hijau di lokal.
+#
+# Fixture ini mem-pin lingkungan ke keadaan "jalur trading CI yang sehat" (PAT + repo
+# tersedia, bukan runner) sehingga SEMUA test mulai dari titik yang sama di mesin mana pun.
+# Test yang memang ingin menguji mode gagal memanggil monkeypatch sendiri di badan test,
+# dan karena fixture autouse berjalan lebih dulu, nilai test selalu menang.
+_OAUTH_PERSIST_ENV = {
+    "GH_PAT": "fixture-pat-not-a-real-token",
+    "GITHUB_REPOSITORY": "fixture/waltTG-Agent",
+}
+
+
+@pytest.fixture(autouse=True)
+def pin_oauth_persistence_env(monkeypatch):
+    """Pin kunci persistensi OAuth supaya hasil test tidak bergantung pada mesin/disk."""
+    for key, value in _OAUTH_PERSIST_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
