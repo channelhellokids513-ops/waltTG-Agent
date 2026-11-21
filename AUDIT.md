@@ -1333,6 +1333,30 @@ saldo akun yang tersalin dari log run (AUDIT/README tidak mendapat pengecualian 
 itu memang disengaja), jadi menulis contoh yang cocok dengan pola itu — bahkan di dalam
 penjelasan — akan menggagalkan CI.
 
+### 3r.2 Retry min-size diimplementasikan (keputusan pemilik, `ee1656f`)
+
+`open_position` kini mencoba SEKALI lagi dengan `round(margin x 1,10, 2)` bila bursa menolak
+dengan `agent.incorrect.order_params` / "margin < contract.min_size_base". Empat pengaman,
+masing-masing punya test (`tests/test_min_size_retry.py`, 7 test):
+
+1. hanya kode error itu yang memicu retry — `is_min_size_rejection()` menolak semua error lain
+   (test parametrik: timeout, insufficient_balance, agent.not_logged_in, bahkan string
+   "margin < contract.min_size but fine" yang mirip tapi bukan marker);
+2. maksimal SATU retry — kalau percobaan kedua ditolak juga, hasilnya `FAILED`, tidak ada
+   retry ketiga;
+3. retry tetap terikat `max_allowed_margin = max(requested x 1.5, DEFAULT_MARGIN x 1.5)` dan
+   `has_enough_job_time(AUTO_CLOSE_RETRY_BUDGET_MIN)` — lewat plafon berarti tidak ada order;
+4. `result["actual_margin"]` = margin yang benar-benar terisi, jadi `deployed`, buffer kas,
+   dan `Executions_Log` di `market_execute`/`scan_with_research` tetap presisi (caller sudah
+   membaca `actual_margin` sejak lama — tidak ada jalur baru yang perlu diubah).
+
+Yang juga dipastikan test: `record_open_slippage` hanya dipanggil untuk percobaan yang terisi,
+sehingga `logs/slippage_observed.jsonl` tidak pernah mencatat slippage dari order yang ditolak.
+
+Belum terverifikasi di produksi pada saat komit ini dibuat: run `crypto-execute` #44898584165
+masih berjalan. Yang dicari di log-nya: `bursa menolak margin … retry SEKALI dengan …` diikuti
+`✅ … opened: margin $…` dengan nilai retry, dan tanpa `FAILED BNB`.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 
