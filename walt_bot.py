@@ -545,6 +545,26 @@ def flush_input_health() -> dict[str, Any]:
 # CLIENT — thin wrapper for Walt MCP over HTTP
 # =============================================================================
 
+SLIPPAGE_OBSERVED_PATH = "logs/slippage_observed.jsonl"
+
+
+def _append_slippage_log(record: dict) -> None:
+    """Satu baris JSON per pengukuran - bahan perhitungan berkelanjutan, bukan log hiasan.
+
+    Sengaja memakai os.path (Path tidak diimpor modul ini). Bila penulisannya gagal,
+    itu HARUS terdengar: pemanggil menelan exception hanya untuk melindungi order, jadi
+    kita catat sebagai warning di sini, bukan debug.
+    """
+    directory = os.path.dirname(SLIPPAGE_OBSERVED_PATH) or "."
+    os.makedirs(directory, exist_ok=True)
+    try:
+        with open(SLIPPAGE_OBSERVED_PATH, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    except OSError as exc:
+        log.warning(f"_append_slippage_log: pengukuran TIDAK tersimpan ({type(exc).__name__}): {exc}")
+        raise
+
+
 class WaltClient:
     """MCP client untuk Walt Perps dengan auto-refresh OAuth token."""
 
@@ -708,6 +728,7 @@ class WaltClient:
             auto_close["stopLoss"] = {"priceQuote": f"{sl:.6g}"}
         if auto_close:
             args["autoClose"] = auto_close
+        self.note_quote("open", contract_id, price)
         return self._call("perps_prepare_order_place", args)
 
     def preview_auto_close(
@@ -730,10 +751,121 @@ class WaltClient:
         return self._call("perps_prepare_auto_close_set", args)
 
     def preview_close(self, contract_id: int):
-        return self._call("perps_prepare_position_close", {"contractId": contract_id})
+        result = self._call("perps_prepare_position_close", {"contractId": contract_id})
+        # Kuotasi pra-close: inilah pembanding fill penutupan. Kegagalan mengambilnya tidak
+        # boleh menghentikan penutupan - posisi tanpa SL jauh lebih berbahaya daripada satu
+        # baris pengukuran yang hilang.
+        try:
+            asset = self._asset_for_contract(contract_id)
+            if asset:
+                self.note_quote("close", contract_id, self.latest_rate(f"{asset}-USD-PERP")["rate"])
+        except Exception as exc:
+            log.debug(f"preview_close: kuotasi pra-close tidak tercatat ({type(exc).__name__})")
+        return result
+
+    def _asset_for_contract(self, contract_id: int) -> Optional[str]:
+        if not isinstance(getattr(self, "_contract_assets", None), dict):
+            try:
+                payload = self.list_contracts()
+                items = payload.get("contracts") if isinstance(payload, dict) else payload
+                self._contract_assets = {
+                    int(c.get("contract_id")): str(c.get("base_asset") or "").upper()
+                    for c in (items or []) if isinstance(c, dict) and c.get("contract_id") is not None
+                }
+            except Exception as exc:
+                log.debug(f"_asset_for_contract: daftar kontrak gagal ({type(exc).__name__})")
+                self._contract_assets = {}
+        return self._contract_assets.get(int(contract_id))
+
+    # --- Pengukuran slippage nyata (Ronde 8) -------------------------------------
+    # Kuotasi dicatat saat preview, fill dibaca saat execute. Semua jalur produksi
+    # (open_position, keempat jalur close monitor) melewati dua titik ini, jadi tidak
+    # ada keputusan trading yang disentuh - hanya pengukuran. Kegagalan pengukuran harus
+    # selalu diabaikan diam-diam (log.debug), TIDAK PERNAH menjatuhkan order.
+    _FILL_PRICE_KEYS = ("avg_fill_price", "fill_price", "execution_price",
+                        "avg_entry_price", "avg_close_price", "close_price", "exit_price")
+
+    def note_quote(self, kind: str, contract_id: int, price: Any) -> None:
+        try:
+            value = float(price)
+        except (TypeError, ValueError):
+            return
+        if value > 0:
+            if not isinstance(getattr(self, "_quotes", None), dict):
+                self._quotes = {}
+            self._quotes[(kind, int(contract_id))] = (value, time.time())
+
+    def _walk_fill(self, node: Any, depth: int = 0) -> tuple[Optional[int], Optional[float]]:
+        """Cari (contract_id, harga fill) di dalam respons execute."""
+        if depth > 4 or not isinstance(node, dict):
+            return None, None
+        cid = node.get("contract_id")
+        try:
+            cid = int(cid) if cid is not None else None
+        except (TypeError, ValueError):
+            cid = None
+        for key in self._FILL_PRICE_KEYS:
+            if key in node:
+                try:
+                    price = float(str(node[key]))
+                except (TypeError, ValueError):
+                    continue
+                if price > 0:
+                    return cid, price
+        for value in node.values():
+            found_cid, found_price = self._walk_fill(value, depth + 1)
+            if found_price is not None:
+                return found_cid if found_cid is not None else cid, found_price
+        return cid, None
+
+    def record_execution_slippage(self, result: Any) -> Optional[dict]:
+        """Bandingkan fill bursa dengan kuotasi terakhir untuk kontrak yang sama."""
+        try:
+            cid, fill = self._walk_fill(result)
+            if fill is None or cid is None:
+                return None
+            pending = getattr(self, "_quotes", {}) or {}
+            kind = None
+            for candidate in ("open", "close"):
+                if (candidate, cid) in pending:
+                    kind = candidate
+                    break
+            if kind is None:
+                return None
+            quote, quoted_at = pending.pop((kind, cid))
+            side_hint = str((result or {}).get("side") or "").lower()
+            # positif = lebih buruk dari kuotasi (long terisi lebih mahal / short lebih murah)
+            if side_hint == "short":
+                signed = (quote - fill) / quote
+            elif side_hint == "long":
+                signed = (fill - quote) / quote
+            else:
+                signed = abs(fill - quote) / quote
+            record = {
+                "stage": kind, "contract_id": cid, "quote": quote, "fill": fill,
+                "slippage_pct": signed * 100.0, "quote_age_s": round(time.time() - quoted_at, 3),
+                "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            log.info(f"📐 SLIPPAGE {kind} contract={cid} quote={quote:.6f} fill={fill:.6f} "
+                     f"-> {signed * 10000:+.2f} bps (umur kuotasi {record['quote_age_s']}s)")
+            try:
+                _append_slippage_log(record)
+            except Exception as exc:
+                log.debug(f"record_execution_slippage: simpan log gagal ({type(exc).__name__})")
+            return record
+        except Exception as exc:
+            log.debug(f"record_execution_slippage diabaikan ({type(exc).__name__})")
+            return None
 
     def execute(self, token: str):
-        return self._call("perps_execute_operation", {"confirmationToken": token})
+        result = self._call("perps_execute_operation", {"confirmationToken": token})
+        try:
+            self.record_execution_slippage(result)
+        except Exception as exc:
+            # Janji desain: pengukuran tidak boleh menjatuhkan order/penutupan, bahkan bila
+            # sensor-nya sendiri rusak. Ini ditegakkan di sini, bukan hanya di dalam helper.
+            log.warning(f"pengukuran slippage gagal (order tetap diproses): {type(exc).__name__}: {exc}")
+        return result
 
 
 # =============================================================================
