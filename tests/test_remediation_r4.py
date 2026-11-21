@@ -292,7 +292,7 @@ def test_r4_4_invalid_grant_sends_one_actionable_alert_then_raises(monkeypatch):
 
     assert len(tg_calls) == 1
     alert = tg_calls[0]
-    assert "invalid_grant" in alert.lower()
+    assert "invalid_grant" in alert.replace("\\_", "_").lower()
     assert "Jendela Pemeliharaan" in alert or "README" in alert
     assert secret_rt not in alert
 
