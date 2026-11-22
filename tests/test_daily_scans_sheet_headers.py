@@ -105,3 +105,55 @@ def test_normalisasi_tetap_kompatibel_dengan_key_internal_lama():
     old = {"timestamp": "2026-11-22T00:00:00Z", "swarm_score": "+0.30", "sentiment": "neutral"}
     assert sl._normalize_research_item(old) == old
     assert sl._normalize_research_item("bukan dict") == {}
+
+
+
+def _kirim(rows, monkeypatch):
+    """Panggil jalur tulis dengan _post_webhook tambalan: kembalikan (payload, jumlah POST)."""
+    calls = []
+
+    def _capture(payload, url):
+        calls.append(payload)
+        return True
+
+    monkeypatch.setattr(sl, "_post_webhook", _capture)
+    ok = sl.log_scan_via_webhook(rows, "https://example.com/exec")
+    assert ok is True
+    return calls[0], len(calls)
+
+
+def test_funding_percent_dikirim_sebagai_desimal_sheet(monkeypatch):
+    row = _fake_row()
+    row[5] = "-0.979%"
+    payload, n_post = _kirim([row], monkeypatch)
+    rec = payload["records"][0]
+    assert rec[sl.FUNDING_SHEET_COLUMN] == pytest.approx(-0.00979)
+    assert not isinstance(rec[sl.FUNDING_SHEET_COLUMN], str)
+    assert n_post == 1, "satu tulis, nol retry: read-back v2 harus cocok pada percobaan pertama"
+    # `rows` positional untuk deployment lama TIDAK diubah: kita tidak menyentuh tampilan lokal.
+    assert payload["rows"][0][5] == "-0.979%"
+
+
+@pytest.mark.parametrize("raw,expect", [
+    ("-0.979%", -0.00979), ("+0.050%", 0.0005), ("0.153%", 0.00153), ("15%", 0.15),
+    # Nilai produksi ditulis dengan 3 angka desimal persen (f"{funding:+.3f}%"), jadi hasil
+    # pembulatan 6 desimal di bawah adalah EXACT - tidak ada digit yang hilang untuk input nyata.
+])
+def test_konversi_persen_sesuai_satuan_sheet(raw, expect):
+    assert sl._funding_to_decimal(raw) == pytest.approx(expect)
+
+
+@pytest.mark.parametrize("raw", ["-0.00979", "—", "-", "", None, "n/a", "+0.050%%"])
+def test_bukan_persen_dikirim_apa_adanya_dan_never_nol(raw):
+    """Yang tidak bisa diurai tidak pernah jadi 0.0: nol berarti funding netral."""
+    assert sl._funding_to_decimal(raw) == raw
+
+
+def test_semua_kolom_lain_tidak_terubah_formatnya(monkeypatch):
+    row = _fake_row()
+    row[5] = "-0.979%"
+    payload, _ = _kirim([row], monkeypatch)
+    rec = payload["records"][0]
+    assert rec["Live Price ($)"] == row[6]
+    assert rec["Alokasi Margin ($)"] == row[16]
+    assert rec["mg_status"] == "ok"

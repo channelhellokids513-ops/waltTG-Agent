@@ -252,6 +252,9 @@ DAILY_SCANS_SHEET_HEADERS = [
 _SHEET_LABEL_TO_INTERNAL = dict(zip(DAILY_SCANS_SHEET_HEADERS, DAILY_SCANS_HEADERS))
 _INTERNAL_TO_SHEET_LABEL = {v: k for k, v in _SHEET_LABEL_TO_INTERNAL.items()}
 
+# Kolom persen: satu-satunya nilai yang format teksnya berbeda dari satuan di sheet.
+FUNDING_SHEET_COLUMN = "Funding/Hari ()"
+
 
 def _normalize_research_item(item: Any) -> dict[str, Any]:
     """Petakan key label-sheet (v2 `doGet`) kembali ke nama internal yang dipakai pembaca.
@@ -533,6 +536,27 @@ def _post_webhook(payload: dict, url: str) -> bool:
     return False
 
 
+def _funding_to_decimal(value: Any) -> Any:
+    """`"-0.979%"` -> `-0.00979`, satuan yang SEBENARNYA tersimpan di Google Sheets.
+
+    Sheets mengonversi string persen menjadi angka desimal saat menulis, jadi read-back v2
+    (`sameValue_()`) selalu menemukan selisih tipe untuk kolom ini: write dilaporkan
+    `not_verified`, `_post_webhook` retry, dan setiap retry MENAMBAH BARIS di ledger
+    (terukur di #44998198762: 6 baris ditulis untuk 2 baris yang seharusnya). Mengirim nilai
+    dalam satuan sheet membuat verifikasi lulus pada percobaan pertama.
+
+    Nilai yang tidak berbentuk persen atau tidak bisa diurai dikirim APA ADANYA - tidak pernah
+    diubah menjadi 0, karena nol di kolom ini bermakna "funding netral", bukan "tidak terukur".
+    """
+    text = str(value if value is not None else "").strip()
+    if not text.endswith("%"):
+        return value
+    try:
+        return round(float(text[:-1].replace("+", "").replace(",", "")) / 100.0, 6)
+    except ValueError:
+        return value
+
+
 def log_scan_via_webhook(rows: list[list[Any]], webhook_url: str) -> bool:
     """Kirim data scan ke Google Sheets melalui Google Apps Script Web App.
 
@@ -547,6 +571,10 @@ def log_scan_via_webhook(rows: list[list[Any]], webhook_url: str) -> bool:
     # `record[header[c]]` (exact key). Urutan kolom tetap sama, jadi `rows` tetap valid
     # untuk deployment lama yang hanya menerima angka-angka posisi.
     records = [dict(zip(DAILY_SCANS_SHEET_HEADERS, row)) for row in rows]
+    for rec in records:
+        # Kolom ini satu-satunya yang dikirim dengan format %: sheet menyimpan desimal,
+        # jadi membandingkan format yang salah = menulis baris ganda lewat retry.
+        rec[FUNDING_SHEET_COLUMN] = _funding_to_decimal(rec.get(FUNDING_SHEET_COLUMN))
     payload = {
         "action": "log_scan",
         "sheet": "Daily_Scans",

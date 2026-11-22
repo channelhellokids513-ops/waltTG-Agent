@@ -114,7 +114,7 @@ function doPost(e) {
       message: String(err && err.stack ? err.stack : err)
     });
   } finally {
-    try { lock.releaseLock(); } catch (ignored) {}
+    try { lock.releaseLock(); } catch (ignored) { }
   }
 }
 
@@ -314,6 +314,14 @@ function sameValue_(expected, actual) {
   if (e === a) return true;
   var ne = Number(e), na = Number(a);
   if (e !== "" && a !== "" && !isNaN(ne) && !isNaN(na)) return Math.abs(ne - na) <= 1e-9;
+  // "X%" dibaca Sheets sebagai desimal X/100. Bandingkan dalam satuan yang sama supaya
+  // perbedaan FORMAT saja tidak pernah terbaca sebagai kegagalan tulis (ronde 9, Bug C).
+  var pe = /^([-+]?\d+(?:\.\d+)?)%$/.exec(e), pa = /^([-+]?\d+(?:\.\d+)?)%$/.exec(a);
+  if (pe || pa) {
+    var ve = pe ? Number(pe[1]) / 100 : ne;
+    var va = pa ? Number(pa[1]) / 100 : na;
+    if (!isNaN(ve) && !isNaN(va) && Math.abs(ve - va) <= 1e-9) return true;
+  }
   if (actual instanceof Date) return true;  // Sheets menormalkan tanggal ke Date; bentuk teks tidak dibandingkan
   return e === "" && (a === "" || a === "0");
 }
