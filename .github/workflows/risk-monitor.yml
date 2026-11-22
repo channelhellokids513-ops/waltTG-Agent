@@ -1,4 +1,4 @@
-﻿name: Walt Risk Monitor (10-Min Smart Guard)
+name: Walt Risk Monitor (10-Min Smart Guard)
 
 # Trigger resmi berasal dari Google Cloud Scheduler (memanggil workflow_dispatch).
 # Cron GitHub Actions dihapus untuk mencegah eksekusi dobel / terlambat berjam-jam.
@@ -60,11 +60,17 @@ jobs:
           WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
           WALT_TOKEN_SYNC: "on"  # eksplisit: default on pernah hampir membakar token tanpa jalur tulis-balik (invarian R8)
           DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+          DASHSCOPE_MODEL: ${{ vars.DASHSCOPE_MODEL || 'glm-5.3-prime' }}
+          DASHSCOPE_MODEL_V1: ${{ vars.DASHSCOPE_MODEL_V1 || 'glm-5.2-fast-preview' }}
           DASHSCOPE_API_GEMINI_KEY: ${{ secrets.DASHSCOPE_API_GEMINI_KEY || secrets.GEMINI_API_KEY }}
           GEMINI_BASE_URL: ${{ vars.GEMINI_BASE_URL || 'https://router.classai.id/v1' }}
-          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-4-argon' }}
-          GEMINI_MODEL_V4: ${{ vars.GEMINI_MODEL_V4 || 'gemini-4-argon' }}
-          DASHSCOPE_MODEL_V1: ${{ vars.DASHSCOPE_MODEL_V1 || 'qwen-flash' }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gpt-6.1-sol' }}
+          GEMINI_MODEL_V4: ${{ vars.GEMINI_MODEL_V4 || 'claude-opus-5.5' }}
+          CLASSAI_MODEL_AGG: ${{ vars.CLASSAI_MODEL_AGG || 'gpt-6.1-sol' }}
+          OAK_MCP_ENABLED: ${{ vars.OAK_MCP_ENABLED || 'on' }}
+          OAK_MCP_CLIENT_ID: ${{ secrets.OAK_MCP_CLIENT_ID }}
+          OAK_MCP_REFRESH_TOKEN: ${{ secrets.OAK_MCP_REFRESH_TOKEN }}
+          OAK_MCP_ACCESS_TOKEN: ${{ secrets.OAK_MCP_ACCESS_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || secrets.GOOGLE_SHEET_ID }}

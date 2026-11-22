@@ -30,26 +30,31 @@ def _dummy_extracted_voter_payload(score: float = -0.5) -> dict:
     }
 
 
+def _dummy_aggregator_payload() -> dict:
+    return {
+        "per_parameter_final": {
+            p: {"final_score": -0.5 if p in ("P1_sentiment_polarity", "P4_momentum_direction", "P7_historical_pattern") else 0.7, "trusted_voter": "CONSENSUS", "rationale": "ok"}
+            for p in llm_research.PARAM_WEIGHTS
+        },
+        "final_score": -0.5,
+        "overall_confidence": 0.82,
+        "overall_consensus_level": "strong",
+        "vendor_alignment": "both_agree",
+        "most_influential_parameter": "P1_sentiment_polarity",
+        "justification": "Sintesis GLM + ClassAI solid.",
+        "disagreement_summary": [],
+    }
+
+
 class _FakeQwenClient:
     def __init__(self):
         self.called_models: list[str] = []
 
     def chat_json(self, messages, model=None):
         self.called_models.append(model or "default")
-        if model in llm_research.AGGREGATOR_MODEL_CHAIN:
-            return {
-                "per_parameter_final": {
-                    p: {"final_score": -0.5 if p in ("P1_sentiment_polarity", "P4_momentum_direction", "P7_historical_pattern") else 0.7, "trusted_voter": "CONSENSUS", "rationale": "ok"}
-                    for p in llm_research.PARAM_WEIGHTS
-                },
-                "final_score": -0.5,
-                "overall_confidence": 0.82,
-                "overall_consensus_level": "strong",
-                "vendor_alignment": "both_agree",
-                "most_influential_parameter": "P1_sentiment_polarity",
-                "justification": "Sintesis GLM + Qwen solid.",
-                "disagreement_summary": [],
-            }
+        joined = " ".join(str(m.get("content", "")) for m in (messages or []))
+        if "per_parameter_final" in joined:
+            return _dummy_aggregator_payload()
         return _dummy_raw_voter_payload(-0.5)
 
 
@@ -59,15 +64,24 @@ class _FakeGeminiClient:
 
     def chat_json(self, prompt, system_instruction=None, model=None):
         self.called_models.append(model or "default")
+        if "per_parameter_final" in str(prompt or ""):
+            return _dummy_aggregator_payload()
         return _dummy_raw_voter_payload(-0.4)
 
 
-def test_ai_routing_policy_helper():
+def test_ai_routing_policy_helper(monkeypatch):
+    # Default Opsi A (MULTI_OPP_GLM_FALLBACK=false): V3 (gpt-6.1-sol) & V4 (claude-opus-5.5) selalu aktif
+    monkeypatch.delenv("MULTI_OPP_GLM_FALLBACK", raising=False)
+    assert llm_research.should_use_glm_for_secondary_voters(opportunity_count=0) is False
+    assert llm_research.should_use_glm_for_secondary_voters(opportunity_count=5) is False
+
+    # Mode hemat burst (MULTI_OPP_GLM_FALLBACK=true): > 1 peluang alihkan V3/V4 ke GLM DashScope
+    monkeypatch.setenv("MULTI_OPP_GLM_FALLBACK", "true")
     assert llm_research.should_use_glm_for_secondary_voters(opportunity_count=0) is False
     assert llm_research.should_use_glm_for_secondary_voters(opportunity_count=1) is False
     assert llm_research.should_use_glm_for_secondary_voters(opportunity_count=2) is True
     assert llm_research.should_use_glm_for_secondary_voters(opportunity_count=5) is True
-    # Eksplisit is_idle=True selalu memaksa Gemini (bukan GLM)
+    # Eksplisit is_idle=True selalu mempertahankan ClassAI V3/V4
     assert llm_research.should_use_glm_for_secondary_voters(opportunity_count=5, is_idle=True) is False
 
 
@@ -89,21 +103,20 @@ def test_research_stock_uses_gemini_when_idle(monkeypatch):
     assert res.secondary_provider == "gemini"
     assert llm_research.MODEL_V3 in gemini.called_models
     assert llm_research.MODEL_V4 in gemini.called_models
-    assert llm_research.MODEL_V3_GLM not in qwen.called_models
-    assert llm_research.MODEL_V4_GLM not in qwen.called_models
     assert "V3_gemini_flash" in res.voter_verdicts
     assert "V4_gemini_pro" in res.voter_verdicts
     assert res.voters_count == 4
 
 
 def test_research_stock_switches_to_glm_when_many_opportunities(monkeypatch):
+    monkeypatch.setenv("MULTI_OPP_GLM_FALLBACK", "true")
     monkeypatch.setattr(llm_research, "fetch_earnings_days_with_status", lambda t: (25, "ok"))
     monkeypatch.setattr(llm_research, "fetch_headlines", lambda t, limit=10: ["Headline 1", "Headline 2"])
-    # Pastikan GeminiClient TIDAK dipanggil / diinisialisasi saat banyak peluang (> 1)
+    # Pastikan GeminiClient TIDAK dipanggil / diinisialisasi saat MULTI_OPP_GLM_FALLBACK=true & peluang > 1
     monkeypatch.setattr(
         llm_research,
         "GeminiClient",
-        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("GeminiClient tidak boleh dipakai saat peluang > 1!")),
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("GeminiClient tidak boleh dipakai saat burst GLM aktif!")),
     )
 
     qwen = _FakeQwenClient()
@@ -280,4 +293,4 @@ def test_gemini_client_uses_classai_router_and_falls_back_on_404(monkeypatch):
     assert calls[0]["url"] == "https://router.classai.id/v1/chat/completions"
     assert calls[0]["headers"]["Authorization"] == "Bearer classai-test-key"
     assert calls[0]["payload"]["model"] == "gemini-flash-latest"
-    assert calls[1]["payload"]["model"] == "gemini-4-argon"
+    assert calls[1]["payload"]["model"] == "gpt-6.1-sol"

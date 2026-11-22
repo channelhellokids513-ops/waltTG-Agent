@@ -3813,8 +3813,19 @@ def scan_with_research(
             o for o in summary["top_opportunities"] if o["asset"] not in ALLOWED_STOCKS
         ]
 
-    # Evaluasi Gear & kebijakan routing AI (Idle -> Gemini, banyak peluang > 1 -> GLM via DASHSCOPE_API_KEY)
+    # Evaluasi Gear & kebijakan routing AI (Opsi A: GLM DashScope + GPT-6.1 Sol & Claude Opus 5.5 ClassAI)
     import llm_research as _lr
+
+    # Prefetch konteks makro & kalender OAK Research MCP 1x per siklus (non-blocking)
+    try:
+        import oak_mcp_client
+
+        if oak_mcp_client.is_oak_mcp_configured():
+            oak_brief = oak_mcp_client.fetch_oak_global_brief()
+            summary["oak_mcp_connected"] = bool(oak_brief.get("available"))
+            log.info(f"🌳 [OAK MCP] Global brief connected={summary['oak_mcp_connected']}")
+    except Exception as exc:
+        log.warning(f"OAK MCP global prefetch dilewati: {exc}")
 
     active_top_opps = [
         o for o in summary["top_opportunities"]
@@ -4304,6 +4315,16 @@ def market_execute(
         record_input_failure("input.riset_webhook", research_read)
 
     import llm_research as _lr
+
+    # Prefetch konteks makro & kalender OAK Research MCP 1x sebelum keputusan trading (non-blocking)
+    try:
+        import oak_mcp_client
+
+        if oak_mcp_client.is_oak_mcp_configured():
+            oak_brief = oak_mcp_client.fetch_oak_global_brief()
+            log.info(f"🌳 [OAK MCP - {category_key.upper()}] Global brief connected={bool(oak_brief.get('available'))}")
+    except Exception as exc:
+        log.warning(f"OAK MCP global prefetch dilewati: {exc}")
 
     # Evaluasi jumlah peluang 'GO' (dengan cache riset) untuk Gear 3 & kebijakan routing AI (Gemini vs GLM)
     eligible_now = [

@@ -68,25 +68,28 @@ _install_crumb_redaction()
 
 DASHSCOPE_BASE = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 GEMINI_BASE = os.getenv("GEMINI_BASE_URL", "https://router.classai.id/v1").rstrip("/")
-GEMINI_CLASSAI_FALLBACK_MODEL = "gemini-4-argon"
+GEMINI_CLASSAI_FALLBACK_MODEL = "gpt-6.1-sol"
 
-# Default Model Specifications
-# Ronde 7: `qwen-turbo` TERBUKTI mati di hulu — probe langsung ke dashscope-intl pada
-# 2026-11-20 menjawab 404 {"code":"model_not_found"}, sedangkan `qwen-flash` (penerusnya),
-# `qwen-plus` (V2) dan `qwen-max` (aggregator) menjawab 200. Varian *-latest menjawab 403
-# (akun ini tidak punya akses), jadi TIDAK dipakai sebagai default. Setiap voter bisa
-# dioverride lewat variable GitHub tanpa mengubah kode.
-MODEL_V1 = os.getenv("DASHSCOPE_MODEL_V1", "qwen-flash")
-MODEL_V2 = os.getenv("DASHSCOPE_MODEL", "qwen-plus")
-# Voter 3 & Voter 4 (kondisi Idle): diarahkan ke ClassAI Router (https://router.classai.id/v1)
-# memakai secret DASHSCOPE_API_GEMINI_KEY dengan model default `gemini-4-argon`.
-MODEL_V3 = os.getenv("GEMINI_MODEL", "gemini-4-argon")
-MODEL_V4 = os.getenv("GEMINI_MODEL_V4", "gemini-4-argon")
-# Kebijakan Routing Multi-Peluang: saat banyak peluang (> 1), Voter 3 & Voter 4 dialihkan
-# dari Google Gemini (Flash/Pro) ke GLM via DashScope memakai DASHSCOPE_API_KEY.
+# Default Model Specifications — Opsi A (Top-4 OAK AI Trading Benchmark, semua 0 likuidasi):
+#   V1: glm-5.2-fast-preview (DashScope — cepat & hemat)
+#   V2: glm-5.3-prime        (DashScope — #1 OAK +29.4%, 0 likuidasi)
+#   V3: gpt-6.1-sol          (ClassAI Router — #4 OAK +15.3%, varians terendah, 0 likuidasi)
+#   V4: claude-opus-5.5      (ClassAI Router — #3 OAK Best Risk-Adjusted, Sharpe 1.73, Max DD -8.7%, 0 likuidasi)
+#   Aggregator (CRO): gpt-6.1-sol (ClassAI) -> fallback claude-opus-5.5 -> DashScope GLM/Qwen -> rule-based.
+MODEL_V1 = os.getenv("DASHSCOPE_MODEL_V1", "glm-5.2-fast-preview")
+MODEL_V2 = os.getenv("DASHSCOPE_MODEL", "glm-5.3-prime")
+MODEL_V3 = os.getenv("GEMINI_MODEL", "gpt-6.1-sol")
+MODEL_V4 = os.getenv("GEMINI_MODEL_V4", "claude-opus-5.5")
+# Model GLM via DashScope untuk mode hemat burst (bila MULTI_OPP_GLM_FALLBACK=true).
 MODEL_V3_GLM = os.getenv("DASHSCOPE_MODEL_V3_GLM", "glm-5.2-fast-preview")
 MODEL_V4_GLM = os.getenv("DASHSCOPE_MODEL_V4_GLM", "glm-5.3-prime")
-MODEL_AGGREGATOR = os.getenv("DASHSCOPE_MODEL_AGG", "qwen-max")
+MODEL_AGG_CLASSAI = os.getenv("CLASSAI_MODEL_AGG", "gpt-6.1-sol")
+MODEL_AGGREGATOR = os.getenv("DASHSCOPE_MODEL_AGG", "glm-5.3-prime")
+
+CLASSAI_AGGREGATOR_CHAIN: list[str] = []
+for _c in (MODEL_AGG_CLASSAI, MODEL_V4):
+    if _c and _c not in CLASSAI_AGGREGATOR_CHAIN:
+        CLASSAI_AGGREGATOR_CHAIN.append(_c)
 
 
 def should_use_glm_for_secondary_voters(
@@ -94,22 +97,24 @@ def should_use_glm_for_secondary_voters(
     is_idle: Optional[bool] = None,
 ) -> bool:
     """
-    Tentukan provider untuk Voter 3 & Voter 4 (pengganti Gemini Flash & Pro):
-    - Kondisi Idle (is_idle=True atau opportunity_count <= 1): gunakan Gemini API
-      (gemini-flash-latest & gemini-pro-latest).
-    - Kondisi banyak peluang (opportunity_count > 1 dan tidak Idle): alihkan ke GLM
-      via DashScope (glm-5.2-fast-preview & glm-5.3-prime) menggunakan DASHSCOPE_API_KEY.
+    Tentukan apakah Voter 3 & Voter 4 dialihkan ke GLM DashScope:
+    - Default Opsi A (`MULTI_OPP_GLM_FALLBACK=false`): V3 (`gpt-6.1-sol`) & V4 (`claude-opus-5.5`)
+      via ClassAI Router selalu aktif agar konsensus 3-vendor Top-4 OAK tetap terjaga.
+    - Jika `MULTI_OPP_GLM_FALLBACK=true`: saat banyak peluang (`opportunity_count > 1` & tidak Idle),
+      alihkan V3 & V4 ke GLM via DashScope (`glm-5.2-fast-preview` & `glm-5.3-prime`).
     """
+    burst_fallback = os.getenv("MULTI_OPP_GLM_FALLBACK", "false").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+    if not burst_fallback:
+        return False
     if is_idle is True:
         return False
     return int(opportunity_count or 0) > 1
-# Rantai fallback aggregator. Pada 2026-11-21 `qwen-max` terbukti menjawab
-# 403 "The free quota has been exhausted" - itu KUOTA, bukan bug kode - sedangkan
-# `qwen-plus` dan `qwen-flash` menjawab 200. Tanpa rantai ini, setiap riset aset
-# mencetak warning dan seluruh sintesis diam-diam berjalan di jalur rule-based.
+# Rantai fallback aggregator DashScope (dipakai bila ClassAI Aggregator tidak tersedia/gagal).
 AGGREGATOR_MODEL_CHAIN: list[str] = []
 for _candidate in [MODEL_AGGREGATOR] + [
-    m.strip() for m in os.getenv("DASHSCOPE_MODEL_AGG_FALLBACK", "qwen-plus,qwen-flash").split(",")
+    m.strip() for m in os.getenv("DASHSCOPE_MODEL_AGG_FALLBACK", "glm-5.2-fast-preview,qwen-plus,qwen-flash").split(",")
 ]:
     if _candidate and _candidate not in AGGREGATOR_MODEL_CHAIN:
         AGGREGATOR_MODEL_CHAIN.append(_candidate)
@@ -893,12 +898,16 @@ def run_meta_aggregator(
     ticker: str,
     voter_verdicts: dict[str, dict],
     pre_analysis: dict[str, Any],
+    gemini: Optional[GeminiClient] = None,
 ) -> dict[str, Any]:
     """
-    Jalankan Meta-Aggregator Qwen-Max untuk sintesis keputusan.
-    Jika Qwen-Max tidak tersedia atau gagal, gunakan deterministic rule-based synthesis.
+    Jalankan Meta-Aggregator Chief Risk Officer untuk sintesis keputusan P1-P7.
+    Prioritas Opsi A:
+      1. ClassAI Router (`gpt-6.1-sol` -> `claude-opus-5.5`, Top-4 OAK & 0 likuidasi)
+      2. DashScope (`glm-5.3-prime` -> `glm-5.2-fast-preview` -> `qwen-plus` -> `qwen-flash`)
+      3. Deterministic rule-based synthesis bila semua LLM gagal.
     """
-    if qwen and len(voter_verdicts) > 0:
+    if (gemini or qwen) and len(voter_verdicts) > 0:
         try:
             sys_msg = (
                 "Kamu adalah Chief Risk Officer dan Meta-Analyst portofolio finansial independen. "
@@ -910,27 +919,44 @@ def run_meta_aggregator(
                 .replace("{pre_analysis_json}", json.dumps(pre_analysis, indent=2))
                 .replace("{raw_voters_json}", json.dumps(voter_verdicts, indent=2))
             )
-            # Coba rantai model (bukan satu model saja): kegagalan akses/kuota pada satu
-            # model tidak boleh membuat seluruh swarm kehilangan sintesis LLM.
             last_error = ""
-            for candidate in AGGREGATOR_MODEL_CHAIN:
-                try:
-                    agg_res = qwen.chat_json(
-                        [{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}],
-                        model=candidate,
-                    )
-                except Exception as exc:
-                    last_error = f"{type(exc).__name__}: {exc}"
-                    log.warning(f"Meta-Aggregator {candidate} gagal untuk {ticker}: {last_error[:170]}")
-                    continue
-                if "final_score" in agg_res and "per_parameter_final" in agg_res:
-                    # Enforce rumus arah murni agar tidak ada bias positif dari P2/P3/P5/P6
-                    agg_res["final_score"] = compute_directional_final_score(agg_res["per_parameter_final"])
-                    agg_res["aggregator_model"] = candidate
-                    return agg_res
-                last_error = f"respons {candidate} tidak lengkap: {sorted(agg_res)[:6]}"
-                log.warning(f"Meta-Aggregator {candidate} untuk {ticker}: {last_error}")
-                break
+
+            # 1. Coba ClassAI Aggregator (gpt-6.1-sol -> claude-opus-5.5) terlebih dahulu
+            if gemini is not None:
+                for candidate in CLASSAI_AGGREGATOR_CHAIN:
+                    try:
+                        agg_res = gemini.chat_json(prompt, system_instruction=sys_msg, model=candidate)
+                    except Exception as exc:
+                        last_error = f"{type(exc).__name__}: {exc}"
+                        log.warning(f"Meta-Aggregator ClassAI {candidate} gagal untuk {ticker}: {last_error[:170]}")
+                        continue
+                    if isinstance(agg_res, dict) and "final_score" in agg_res and "per_parameter_final" in agg_res:
+                        agg_res["final_score"] = compute_directional_final_score(agg_res["per_parameter_final"])
+                        agg_res["aggregator_model"] = candidate
+                        return agg_res
+                    last_error = f"respons {candidate} tidak lengkap: {sorted(agg_res)[:6] if isinstance(agg_res, dict) else type(agg_res).__name__}"
+                    log.warning(f"Meta-Aggregator ClassAI {candidate} untuk {ticker}: {last_error}")
+
+            # 2. Fallback ke rantai DashScope (glm-5.3-prime -> glm-5.2-fast-preview -> qwen-plus/flash)
+            if qwen is not None:
+                for candidate in AGGREGATOR_MODEL_CHAIN:
+                    try:
+                        agg_res = qwen.chat_json(
+                            [{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}],
+                            model=candidate,
+                        )
+                    except Exception as exc:
+                        last_error = f"{type(exc).__name__}: {exc}"
+                        log.warning(f"Meta-Aggregator {candidate} gagal untuk {ticker}: {last_error[:170]}")
+                        continue
+                    if isinstance(agg_res, dict) and "final_score" in agg_res and "per_parameter_final" in agg_res:
+                        agg_res["final_score"] = compute_directional_final_score(agg_res["per_parameter_final"])
+                        agg_res["aggregator_model"] = candidate
+                        return agg_res
+                    last_error = f"respons {candidate} tidak lengkap: {sorted(agg_res)[:6] if isinstance(agg_res, dict) else type(agg_res).__name__}"
+                    log.warning(f"Meta-Aggregator {candidate} untuk {ticker}: {last_error}")
+                    break
+
             log.warning(f"Meta-Aggregator {ticker} -> fallback rule-based "
                         f"(percobaan terakhir: {last_error[:180]})")
         except Exception as e:
@@ -1087,6 +1113,28 @@ def research_stock(
     days_earnings, earnings_status = fetch_earnings_days_with_status(ticker)
     headlines = fetch_headlines(ticker)
 
+    # Perkaya konteks riset & berita dari OAK Research MCP Server (fail-safe bila belum dikonfigurasi)
+    try:
+        import oak_mcp_client
+
+        if oak_mcp_client.is_oak_mcp_configured():
+            oak_ctx = oak_mcp_client.fetch_oak_market_context(ticker)
+            oak_block = oak_mcp_client.format_oak_context_for_prompt(oak_ctx)
+            if oak_block:
+                strategy_context = f"{strategy_context}\n\n{oak_block}"
+            oak_news = list(oak_ctx.get("headlines") or [])
+            if oak_news:
+                merged_h: list[str] = []
+                seen_h: set[str] = set()
+                for h in oak_news + list(headlines or []):
+                    k = str(h).strip().lower()
+                    if k and k not in seen_h:
+                        seen_h.add(k)
+                        merged_h.append(str(h).strip())
+                headlines = merged_h[:12]
+    except Exception as exc:
+        log.warning(f"OAK MCP enrichment dilewati untuk {ticker}: {exc}")
+
     if not headlines:
         return Research(
             ticker=ticker,
@@ -1157,8 +1205,14 @@ def research_stock(
     # 2. Pre-processing Varians & Konsensus P1-P7
     pre_analysis = analyze_voter_variance(voter_verdicts)
 
-    # 3. Meta-Aggregator Sintesis
-    agg_result = run_meta_aggregator(qwen, ticker, voter_verdicts, pre_analysis)
+    # 3. Meta-Aggregator Sintesis (prioritas ClassAI gpt-6.1-sol/claude-opus-5.5 -> DashScope GLM/Qwen)
+    agg_result = run_meta_aggregator(
+        qwen,
+        ticker,
+        voter_verdicts,
+        pre_analysis,
+        gemini=gemini if active_secondary != "glm" else None,
+    )
 
     final_score = float(agg_result.get("final_score", 0.0))
     overall_conf = float(agg_result.get("overall_confidence", 0.5))
