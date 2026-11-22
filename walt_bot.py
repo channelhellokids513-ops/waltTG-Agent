@@ -2365,23 +2365,35 @@ def decide_dynamic_monitor_cadence(
     return False, 0, "Kategori GO stabil (interval normal 10 menit)"
 
 
+GEAR_0_INTERVAL_MIN = 720  # 12 jam (2x sehari) saat 0 peluang / idle
+
+
 def evaluate_execution_gear(
     opps: list[Opportunity],
     recent_tp_closed: bool = False,
     rng: Optional[Any] = None,
 ) -> tuple[str, int, str]:
     """
-    Tentukan Gigi Kecepatan (Gear) dan interval eksekusi (60 atau 120 menit)
+    Tentukan Gigi Kecepatan (Gear) dan interval eksekusi (60, 120, atau 720 menit)
     untuk Market Execute & Crypto Execute agar tidak over-trading / boros fee:
     - GEAR 2 (Aktif Normal 60 Menit / 1 Jam):
       * Terdapat >= 3 aset dengan |funding_daily| >= 0.5%/hari, ATAU
       * Terdapat >= 2 aset dengan funding ekstrem (|funding_daily| >= 0.8%/hari).
     - GEAR 1 (Konservatif 120 Menit / 2 Jam):
-      * Peluang funding moderat/tipis (<= 2 aset yang memenuhi >= 0.5%/hari).
+      * Peluang funding moderat/tipis (1-2 aset yang memenuhi >= 0.5%/hari).
+    - GEAR 0 (Idle 720 Menit / 12 Jam = 2x Sehari):
+      * Tidak ada peluang yang memenuhi >= 0.5%/hari (0 aset).
     Return (gear_label, interval_minutes, reason).
     """
     qualifying = [o for o in opps if abs(o.funding_daily) >= MIN_FUNDING_DAILY]
     extreme = [o for o in qualifying if abs(o.funding_daily) >= 0.008]
+
+    if not qualifying:
+        return (
+            "GEAR_0_IDLE_720M",
+            GEAR_0_INTERVAL_MIN,
+            f"Idle (0 peluang >=0.5%/hari) → interval {GEAR_0_INTERVAL_MIN} menit (12 jam / 2x sehari)",
+        )
 
     if len(qualifying) >= 3 or len(extreme) >= 2:
         return (
@@ -2395,6 +2407,24 @@ def evaluate_execution_gear(
         120,
         f"Konservatif ({len(qualifying)} peluang >=0.5%/hari) → interval 120 menit (2 jam)",
     )
+
+
+def _should_run_gear0_cycle(
+    category: Literal["market", "crypto"],
+    now_ts: Optional[float] = None,
+    regime_path: str = "logs/market_regime.json",
+) -> tuple[bool, float]:
+    """Izinkan siklus penuh Gear 0 maksimal 2x sehari (setiap 720 menit / 12 jam)."""
+    now = time.time() if now_ts is None else float(now_ts)
+    state = _load_execution_regime(regime_path)
+    key = f"last_{category}_gear0_ts"
+    last_ts = float(state.get(key, 0.0) or 0.0)
+    elapsed_min = (now - last_ts) / 60.0 if last_ts > 0 else float("inf")
+    if last_ts > 0 and elapsed_min < (GEAR_0_INTERVAL_MIN - 2.0):
+        return False, elapsed_min
+    state[key] = now
+    _save_execution_regime(state, regime_path=regime_path)
+    return True, elapsed_min
 
 
 def _set_asset_cooldown(
@@ -4026,6 +4056,23 @@ def market_execute(
         category_key, opps, mark_executed=True
     )
     log.info(f"⚙️ [ADAPTIVE GEAR - {category_key.upper()}] {gear_label} ({gear_interval_min}m): {gear_reason}")
+
+    # GEAR 0 Idle Cap: saat 0 peluang qualifying, cukup jalan/lapor maksimal 2x sehari (tiap 12 jam)
+    if gear_label == "GEAR_0_IDLE_720M":
+        allow_g0, g0_elapsed_min = _should_run_gear0_cycle(category_key)
+        if not allow_g0:
+            log.info(
+                f"💤 [GEAR 0 IDLE] 0 peluang >=0.5%/hari dan siklus Gear 0 sudah berjalan "
+                f"{g0_elapsed_min/60.0:.1f}j lalu (< 12j / 2x sehari). Fast-exit tanpa spam."
+            )
+            return {
+                "status": "gear_0_idle",
+                "gear": gear_label,
+                "interval_minutes": gear_interval_min,
+                "executions": [],
+                "deployed": 0.0,
+                "available": available,
+            }
 
     # Verifikasi posisi yang benar-benar aktif (statuses=["open"]) secara defensif
     open_contract_ids = set()

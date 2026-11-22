@@ -466,11 +466,27 @@ def test_evaluate_execution_gear_and_cooldown(tmp_path):
     assert gear_ex == "GEAR_2_ACTIVE_60M"
     assert interval_ex == 60
 
-    # 2. Gear 1 Konservatif (120m / 2 jam): <= 2 peluang >= 0.5%/hari dan < 2 ekstrem
+    # 2. Gear 1 Konservatif (120m / 2 jam): 1-2 peluang >= 0.5%/hari dan < 2 ekstrem
     opps_quiet = [_opp("AAPL", 0.0051), _opp("BTC", 0.0052)]
     gear_120, interval_120, _ = evaluate_execution_gear(opps_quiet)
     assert gear_120 == "GEAR_1_CONSERVATIVE_120M"
     assert interval_120 == 120
+
+    # 2b. Gear 0 Idle (720m / 12 jam = 2x sehari): 0 peluang >= 0.5%/hari
+    gear_0, interval_0, _ = evaluate_execution_gear([])
+    assert gear_0 == "GEAR_0_IDLE_720M"
+    assert interval_0 == 720
+    gear_0_low, interval_0_low, _ = evaluate_execution_gear([_opp("AAPL", 0.001)])
+    assert gear_0_low == "GEAR_0_IDLE_720M"
+    assert interval_0_low == 720
+
+    # Gear 0 throttle: maksimal 2x sehari (720m)
+    from walt_bot import _should_run_gear0_cycle
+    regime_g0 = str(tmp_path / "gear0_regime.json")
+    t_g0 = 1_700_000_000.0
+    assert _should_run_gear0_cycle("market", now_ts=t_g0, regime_path=regime_g0)[0] is True
+    assert _should_run_gear0_cycle("market", now_ts=t_g0 + 6 * 3600, regime_path=regime_g0)[0] is False
+    assert _should_run_gear0_cycle("market", now_ts=t_g0 + 12 * 3600, regime_path=regime_g0)[0] is True
 
     # 3. Cooldown Re-Entry 3 Jam
     regime_file = str(tmp_path / "market_regime.json")
