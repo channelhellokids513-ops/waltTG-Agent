@@ -293,4 +293,4 @@ def test_gemini_client_uses_classai_router_and_falls_back_on_404(monkeypatch):
     assert calls[0]["url"] == "https://router.classai.id/v1/chat/completions"
     assert calls[0]["headers"]["Authorization"] == "Bearer classai-test-key"
     assert calls[0]["payload"]["model"] == "gemini-flash-latest"
-    assert calls[1]["payload"]["model"] == "gpt-6.1-sol"
+    assert calls[1]["payload"]["model"] == "claude-haiku-5.5"
