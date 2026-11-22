@@ -72,12 +72,38 @@ def describe(label: str, response: httpx.Response) -> dict:
     return {"json": parsed, "text": body, "status": response.status_code}
 
 
+MG_COLUMNS = ("mg_status", "mg_net_gravity", "mg_regime", "mg_trend_bias", "mg_bull_pressure")
+
+
+def mg_fill_report(payload: dict | None) -> tuple[int, dict[str, int]]:
+    """Berapa aset terbaru yang benar-benar PUNYA nilai di kolom diagnostik Market Gravity.
+
+    Dipisah dari main() supaya teruji tanpa jaringan: masukannya persis bentuk respons
+    doGet(sheet=Daily_Scans), keluarannya (jumlah_aset, {kolom: jumlah_terisi}). Ini menjawab
+    pertanyaan yang TIDAK bisa dijawab oleh cek versi: deployment v2 bisa hijau sambil kolom
+    mg_* kosong, dan kolom kosong membuat P8 menjadi ornamen yang diam (AUDIT 3p.4).
+    """
+    data = (payload or {}).get("data") or {}
+    filled = {col: 0 for col in MG_COLUMNS}
+    for record in data.values():
+        if not isinstance(record, dict):
+            continue
+        for col in MG_COLUMNS:
+            text = str(record.get(col) if record.get(col) is not None else "").strip()
+            if text and text.lower() not in ("-", "nan", "none", "null"):
+                filled[col] += 1
+    return len(data), filled
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verifikasi deployment Apps Script (read-only).")
     parser.add_argument("--expect-version", default="", help="mis. 2026-11-21.1")
     parser.add_argument("--post-probe", action="store_true",
                         help="TULIS satu baris penanda ke tab uji (default: tidak menulis apa pun)")
     parser.add_argument("--sheet", default="Webhook_Probe", help="tab tujuan untuk --post-probe")
+    parser.add_argument("--require-mg", action="store_true",
+                        help="vonis BELUM BERSIH jika kolom mg_* ada tetapi kosong di semua aset "
+                             "(default: hanya info, karena P8 sengaja belum dinyalakan)")
     args = parser.parse_args()
 
     load_env()
@@ -118,6 +144,21 @@ def main() -> int:
     if plain["json"] is None:
         verdict.append("doGet(normal) juga non-JSON -> jalur baca riset webhook tetap tidak bisa dipakai "
                        "(gviz fallback yang menyelamatkan)")
+
+    # Bukti yang BUKAN berasal dari cek versi: kolom diagnostik harus berisi, bukan sekadar ada.
+    n_assets, filled = mg_fill_report(plain["json"] if isinstance(plain["json"], dict) else None)
+    if n_assets:
+        detail = ", ".join(f"{col}={filled[col]}/{n_assets}" for col in MG_COLUMNS)
+        print(f"    isi mg_* pada {n_assets} aset terbaru: {detail}")
+        if all(filled[col] == 0 for col in MG_COLUMNS):
+            if args.require_mg:
+                verdict.append("kolom mg_* ADA tetapi KOSONG di semua aset terbaru -> siklus tulis "
+                               "belum menulis Market Gravity; prasyarat P8 (a) belum terpenuhi")
+            else:
+                print("    (info, tidak memvonis) mg_* masih kosong -> P8 tetap ornamen; "
+                      "tambahkan --require-mg bila ingin menegakkannya")
+    elif isinstance(plain["json"], dict):
+        print("    (info) respons tidak memuat field data -> fill-rate mg_* TIDAK TERUKUR")
 
     if args.post_probe:
         body = {"sheet": args.sheet, "header": ["timestamp_utc", "marker"],

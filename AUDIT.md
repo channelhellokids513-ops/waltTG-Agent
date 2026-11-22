@@ -1010,6 +1010,10 @@ Bentuk P8 yang saya usulkan (**berdasarkan yang terukur, bukan yang diklaim**):
   `Market Regime` TERISI, (b) satu siklus tercatat untuk mengaudit nilai P8 per hari, baru
   (c) P8 boleh menurunkan ukuran. Tanpa (a), P8 akan selalu 0 dan diam-diam jadi ornamen —
   persis kelas kegagalan yang sudah kita tangani dua kali di ronde ini.
+  **Status (a) per 2026-11-22: DEPLOYMENT TERBUKTI, NILAI MASIH BELUM TERBUKTI.** Lihat 3t —
+  probe CI mengonfirmasi deployment aktif = kode repo `2026-11-21.1` dan header terbaca, tetapi
+  yang membunyikan P8 adalah ISI kolom, dan itu baru bisa diklaim setelah satu siklus tulis
+  menghasilkan baris `mg_*` non-kosong di `Daily_Scans`. P8 tetap belum dinyalakan.
 
 ### 3p.5 Sampel ke-2 probe + satu temuan yang lebih penting dari slippage (P1, 2026-11-21 06:50Z)
 
@@ -1418,6 +1422,39 @@ alami berikutnya; selama belum ada, `slippage_report` berhak menolak rumus dua s
 (c) gerbang `max_size` yang SKIP sebelum execute - akan terbukti saat ANTHROPIC (atau
 kontrak ber-plafon-kecil lain) kembali menjadi kandidat; yang dicari di log:
 `SKIP — notional ... melewati plafon kontrak max_size_quote`.
+
+### 3t. Utang terakhir Ronde 8 ditutup: redeploy Apps Script v2 TERBUKTI di runner (2026-11-22)
+
+Satu-satunya run yang di ronde sebelumnya saya tinggalkan dalam keadaan merah karena sebab yang
+belum dikenal adalah `Walt Read-Only Diagnostics` #44926211013, langkah **probe webhook**.
+Penyebabnya bukan kode dan bukan kredensial: URL `GOOGLE_SHEET_WEBHOOK_URL` masih menunjuk
+deployment lama yang membalas stub 42 byte, sehingga `?probe=1` tidak mungkin JSON. Pemilik
+melakukan redeploy (Apps Script -> Manage deployments -> New version, kode = `google_apps_script.js`
+repo) dan memperbarui secret. Verifikasi: run **#44991590222** (`oauth_step=read_only`) **success
+seluruh langkah**.
+
+| Bukti | Isi |
+|---|---|
+| 1d `GET ?probe=1` | HTTP 200, `application/json`, `version = 2026-11-21.1`, 4 tab terbaca: `Daily_Scans` 54 baris, `Closed_Positions` 60, `Executions_Log` 565, `PnL_Tracker` 6 |
+| 1d `GET` tanpa probe | HTTP 200, `application/json`, `count = 15` aset, versi terdeteksi cocok |
+| 1d verdi | `BERSIH - doGet probe JSON, versi cocok, deployment = kode repo` |
+| 1b baca riset | `SEHAT (jalur baca riset berfungsi)` |
+
+**Apa yang dibuktikan dan apa yang TIDAK.** Terbukti: deployment aktif = kode repo, jadi rekonsiliasi
+header berbasis nama + read-back verification akan aktif pada siklus tulis berikutnya, dan kelas
+kegagalan "stub lama" mati. Belum terbukti: bahwa kolom `mg_*` **berisi nilai**. Cek versi tidak bisa
+membedakan kolom-kosong dari kolom-terisi, padahal prasyarat P8 di 3p.4 adalah yang kedua - dan
+kolom kosong membuat P8 menjadi ornamen yang diam, kelas kegagalan yang sudah dua kali kita tangani.
+
+**Penutup berbentuk alat, bukan catatan.** `tools/webhook_probe.py` kini membaca `data` dari respons
+GET yang SUDAH ada (nol panggilan tambahan, nol efek ke biaya/kecepatan CI) dan melaporkan
+`isi mg_* pada N aset terbaru: mg_status=x/N, ...`. Secara **default hanya info** dan tidak memvonis,
+karena P8 memang sengaja belum dinyalakan dan diagnostics hijau tidak boleh berubah merah karena
+fitur yang dimatikan atas keputusan pemilik. `--require-mg` menegakkannya ketika P8 siap. Test
+`tests/test_webhook_probe_mg_fill.py` mengunci tiga hal: penghitung per aset, penanda kosong bursa data
+(`-`, `nan`, `null`, spasi) tidak dihitung sebagai bukti, dan - yang paling penting - setiap nama kolom
+probe harus tetap ada di `sheet_logger.MG_COLUMNS`: kalau jalur tulis mengganti nama, pengukuran harus
+merah, bukan melaporkan nol selamanya.
 
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
