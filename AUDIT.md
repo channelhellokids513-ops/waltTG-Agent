@@ -1498,11 +1498,16 @@ kode, melainkan read-back verification yang memaksa perbedaan satuan terlihat - 
 dua assertion test lama justru MENGKODEKAN bug-nya (`sent["header"] == DAILY_SCANS_HEADERS`,
 `records[0]["asset"]`), bukan menemukannya.
 
-**Keadaan akhir:** `580` test lulus dengan `GITHUB_ACTIONS=true`, `sanitize_gate` 0, HEAD `869c936`.
-Satu hal yang masih menunggu siklus alami: `'webhook_logged': True` + `'webhook_write_status': 'ok'`
-(1x tulis, `verified=true`) pada `daily-scan` berikutnya setelah Bug C. Sebelum itu terbaca, status
-"production-ready" berlaku untuk jalur tulis-baca sheet yang sudah terverifikasi, bukan untuk klaim
-"nol baris dobel" - baris dobel yang TERLAMPAU (rows 54-60) tetap ada di ledger dan tidak dihapus.
+**Keadaan akhir (RONDE 9 SELESAI - terverifikasi produksi).** `daily-scan` #44998864306
+(2026-11-22 07:37:29Z, `success`) melaporkan: `Google Sheet Webhook (Daily_Scans) terbukti: 3 baris
+ditulis dan terbaca kembali (versi webhook 2026-11-21.1)` dan `{'rows_count': 3, 'webhook_logged':
+True, 'webhook_write_status': 'ok', 'gravity_diag': {'ok': 3}}` - yaitu SATU tulis, `verified=true`,
+dan diagnostik Market Gravity terisi `ok` untuk semua baris. `CI Unit Tests` 580 test, `Market
+Execute` #44999490046, `Risk Monitor` #45000727083, dan `Watchdog` semuanya hijau. HEAD `869c936`.
+
+Catatan yang tetap berlaku: baris dobel dari sebelum Bug C diperbaiki (rows 54-60) TIDAK dihapus -
+itu jejak historis, bukan kerusakan yang sedang berjalan. Klaim "nol baris dobel" sekarang hanya
+berlaku sejak siklus ini, bukan untuk seluruh isi ledger.
 
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
