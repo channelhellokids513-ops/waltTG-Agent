@@ -364,6 +364,18 @@ def build_training_sample(
         funding_dec = round(funding_dec, 6)
     price_f = _safe_float(price, default=None)
 
+    if mg_context is None:
+        # Ambil dari cache diagnostik sheet_logger bila sudah tersedia (tanpa memicu panggilan
+        # jaringan ekstra dan tanpa melibatkan modul keputusan walt_bot.py).
+        try:
+            import sheet_logger
+
+            cached_mg = getattr(sheet_logger, "_gravity_cache", {}).get(ticker)
+            if isinstance(cached_mg, dict):
+                mg_context = cached_mg
+        except Exception:
+            mg_context = None
+
     user_prompt = _build_user_prompt(
         asset=ticker,
         side=side_u,

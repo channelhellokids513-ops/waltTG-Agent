@@ -4133,7 +4133,6 @@ def scan_with_research(
     # Logging otomatis sampel riset ke tab 'Data Training' & logs/training_dataset.jsonl (non-blocking)
     try:
         from training_data import build_training_sample, log_training_samples
-        from sheet_logger import gravity_diagnostics
         from types import SimpleNamespace
 
         ts_scan = summary.get("ts") or datetime.now(timezone.utc).isoformat()
@@ -4155,7 +4154,6 @@ def scan_with_research(
                 verdict=v_str,
                 decision_reason=r_str,
                 research=res_obj,
-                mg_context=gravity_diagnostics(asset),
             )
             if sample:
                 train_samples.append(sample)
