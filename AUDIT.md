@@ -1456,6 +1456,16 @@ fitur yang dimatikan atas keputusan pemilik. `--require-mg` menegakkannya ketika
 probe harus tetap ada di `sheet_logger.MG_COLUMNS`: kalau jalur tulis mengganti nama, pengukuran harus
 merah, bukan melaporkan nol selamanya.
 
+**Hasil pengukuran pertama (diagnostics #44994074044, 2026-11-22 06:31Z, `oauth_step=read_only`,
+`success`):** `isi mg_* pada 15 aset terbaru: mg_status=0/15, mg_net_gravity=0/15, ...` dan
+`VERDIK: BERSIH`. Kedua baris itu bukan kontradiksi: yang BERSIH adalah deployment, yang 0/15 adalah
+isinya. Kesimpulan yang sah: **prasyarat P8 (a) BELUM terpenuhi** meskipun redeploy v2 benar, dan
+"kolom ada" memang selalu bukti yang lebih lemah daripada "kolom terisi". Yang perlu dipisahkan di
+Ronde 9: (i) belum ada siklus tulis `daily-scan` sejak port `market_gravity.py` (komit `dfd19ab`,
+2026-11-21T04:43+07) yang menulis baris baru, atau (ii) jalur penulisnya memang belum tersambung ke
+`MG_BLANK` yang sebenarnya. `MG_DIAGNOSTICS` bukan penjelasannya: default-nya `on` dan hanya
+mati bila disetel eksplisit. Sampai salah satu terukur, P8 tetap tertutup.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 
