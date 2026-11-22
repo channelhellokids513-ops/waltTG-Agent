@@ -1466,6 +1466,44 @@ Ronde 9: (i) belum ada siklus tulis `daily-scan` sejak port `market_gravity.py` 
 `MG_BLANK` yang sebenarnya. `MG_DIAGNOSTICS` bukan penjelasannya: default-nya `on` dan hanya
 mati bila disetel eksplisit. Sampai salah satu terukur, P8 tetap tertutup.
 
+### 3u. Ronde 9 ditutup: tiga bug header/units `Daily_Scans` dan keadaan FINAL-nya
+
+Tiga bug nyata, semua di sisi Python (tidak ada yang menuntut redeploy Apps Script):
+
+- **Bug A - key record vs label live.** `log_scan_via_webhook` mengirim nama internal
+  snake_case, padahal `doPost` v2 membaca `record[header[c]]` secara PERSIS. Kalau itu
+  dibiarkan jalan: 4 kolom yang kebetulan namanya sama tertulis KOSONG dan 15 kolom
+  Indonesia dianggap kolom baru lalu DOBEL oleh `ensureHeader_()` - kerusakan header yang
+  permanen. Perbaikan: `DAILY_SCANS_SHEET_HEADERS` = 19 label live + 11 `mg_*`; CSV lokal tetap
+  memakai `DAILY_SCANS_HEADERS`.
+- **Bug B - jalur baca selalu basi.** v2 `doGet` mengembalikan key berlabel sheet, sementara
+  pembaca mencari `"timestamp"`/`"swarm_score"`. Akibatnya semua aset terbaca basi dan jalur
+  baca diam-diam jatuh ke gviz meskipun deployment sudah benar. Perbaikan:
+  `_normalize_research_item()` (+ alias `timestamp_utc` -> `timestamp`), kompatibel ke belakang.
+- **Bug C - format persen vs satuan sheet.** Sheets menyimpan `-0.979%` sebagai desimal
+  `-0.00979`, sehingga read-back v2 selalu berbeda untuk kolom `Funding/Hari ()`:
+  `not_verified` -> retry 3x -> **6 baris ditulis untuk 2 baris** (#44998198762, rows 54->60).
+  Perbaikan: kirim desimal (`_funding_to_decimal`), dan `sameValue_()` di repo turut menerima
+  `X% == X/100` untuk masa depan. `WALT_WEBHOOK_VERSION` sengaja TIDAK dinaikkan: deployment aktif
+  masih `2026-11-21.1`, dan menaikkan versi di repo akan membuat probe CI merah secara keliru.
+
+**Bukti lulus (dikonfirmasi pemilik, #44998472430 `read_only`):** `HEADER mg_* di sheet: ADA (5/5),
+total kolom sheet 30` (0 duplikat), `mg_status=2/15` dst., `VERDIK: BERSIH`, `sumber_terpakai =
+webhook` dengan `5 aset segar dari webhook`, `verdict = SEHAT`, Telegram 200 percobaan pertama,
+OAuth auto-sync hijau.
+
+**Pelajaran yang berulang untuk keempat kalinya di proyek ini:** "kolom ada" bukan bukti "kolom
+terisi", dan "HTTP 200" bukan bukti "nilai cocok". Yang menutup ketiga bug ini bukan pembacaan
+kode, melainkan read-back verification yang memaksa perbedaan satuan terlihat - dan sekali lagi
+dua assertion test lama justru MENGKODEKAN bug-nya (`sent["header"] == DAILY_SCANS_HEADERS`,
+`records[0]["asset"]`), bukan menemukannya.
+
+**Keadaan akhir:** `580` test lulus dengan `GITHUB_ACTIONS=true`, `sanitize_gate` 0, HEAD `869c936`.
+Satu hal yang masih menunggu siklus alami: `'webhook_logged': True` + `'webhook_write_status': 'ok'`
+(1x tulis, `verified=true`) pada `daily-scan` berikutnya setelah Bug C. Sebelum itu terbaca, status
+"production-ready" berlaku untuk jalur tulis-baca sheet yang sudah terverifikasi, bukan untuk klaim
+"nol baris dobel" - baris dobel yang TERLAMPAU (rows 54-60) tetap ada di ledger dan tidak dihapus.
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 
