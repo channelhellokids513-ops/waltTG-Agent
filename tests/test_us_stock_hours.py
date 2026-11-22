@@ -72,7 +72,7 @@ def test_market_execute_skips_us_stocks_outside_hours_but_runs_commodities(monke
     monkeypatch.setattr(sheet_logger, "log_execution", lambda *a, **kw: {"executions_count": 1})
 
     client = MagicMock()
-    client.balance.return_value = {"accounts": [{"balance_available": "20.0"}]}
+    client.balance.return_value = {"accounts": [{"balance_available": "20.0", "currency": "USDC"}]}
     client.list_positions.return_value = {"positions": []}
     client.list_contracts.return_value = {
         "contracts": [
@@ -141,7 +141,7 @@ def test_scan_with_research_skips_us_stocks_outside_hours_keeps_crypto(monkeypat
 
     client = MagicMock()
     client.readiness.return_value = {"ok": True}
-    client.balance.return_value = {"accounts": [{"balance_available": "20.0"}]}
+    client.balance.return_value = {"accounts": [{"balance_available": "20.0", "currency": "USDC"}]}
     client.list_positions.return_value = {"positions": []}
     client.latest_rate.return_value = {"rate": "100.0"}
     client.list_contracts.return_value = {
