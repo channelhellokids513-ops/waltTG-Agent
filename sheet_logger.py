@@ -234,6 +234,47 @@ MG_COLUMNS = [
 ]
 MG_BLANK = dict.fromkeys(MG_COLUMNS, "")
 
+# Label kolom `Daily_Scans` yang SEBENARNYA ada di sheet live (19 kolom lama, ditulis
+# Apps Script dengan label cantik berbahasa Indonesia). Webhook v2 membaca record dengan
+# `record[header[c]]` - pencarian KEY PERSIS, bukan ternormalisasi - jadi mengirim nama
+# internal snake_case membuat 4 kolom tertulis KOSONG dan 15 kolom lain dianggap baru lalu
+# DITAMBAHKAN DOBEL di kanan sheet (kerusakan permanen pada header sheet).
+DAILY_SCANS_SHEET_HEADERS = [
+    "Timestamp (UTC)", "Saldo (USDC)", "Posisi Terbuka", "Asset", "Sisi",
+    "Funding/Hari ()", "Live Price ($)", "Swarm Score", "Sentimen", "Konsensus",
+    "Vendor Alignment", "P1 (Polaritas)", "P4 (Momentum)", "P5 (Katalis)",
+    "P6 (Crowded)", "Vonis", "Alokasi Margin ($)", "Alasan Keputusan",
+    "Narasi Swarm AI",
+    *MG_COLUMNS,
+]
+
+# Nama internal -> label sheet, untuk satu-satunya jalur tulis ke `Daily_Scans`.
+_SHEET_LABEL_TO_INTERNAL = dict(zip(DAILY_SCANS_SHEET_HEADERS, DAILY_SCANS_HEADERS))
+_INTERNAL_TO_SHEET_LABEL = {v: k for k, v in _SHEET_LABEL_TO_INTERNAL.items()}
+
+
+def _normalize_research_item(item: Any) -> dict[str, Any]:
+    """Petakan key label-sheet (v2 `doGet`) kembali ke nama internal yang dipakai pembaca.
+
+    v2 mengembalikan record dengan key header sheet ("Timestamp (UTC)", "Swarm Score",
+    "Sentimen", ...), sementara pembaca lama mencari "timestamp"/"swarm_score"/"sentiment".
+    Sebelum ada pemetaan ini, SEMUA aset terbaca basi dan jalur baca selalu jatuh ke gviz
+    meskipun deployment webhook sudah benar. Key internal yang sudah benar (payload lama)
+    dibiarkan apa adanya, jadi fungsi ini tetap kompatibel ke belakang.
+    """
+    if not isinstance(item, dict):
+        return {}
+    out = dict(item)
+    for key, value in item.items():
+        internal = _SHEET_LABEL_TO_INTERNAL.get(str(key))
+        if internal is not None and out.get(internal) in (None, ""):
+            out[internal] = value
+    if out.get("timestamp") in (None, "") and out.get("timestamp_utc") not in (None, ""):
+        # Pembaca riset memakai nama kanonik "timestamp" (sama seperti jalur gviz).
+        out["timestamp"] = out["timestamp_utc"]
+    return out
+
+
 _ledger_write_status: dict[str, tuple[str, str]] = {}
 
 
@@ -502,11 +543,14 @@ def log_scan_via_webhook(rows: list[list[Any]], webhook_url: str) -> bool:
     url = _normalize_webhook_url(webhook_url)
     if not url:
         return False
-    records = [dict(zip(DAILY_SCANS_HEADERS, row)) for row in rows]
+    # Kunci record HARUS label sheet live, bukan nama internal: doPost v2 memakai
+    # `record[header[c]]` (exact key). Urutan kolom tetap sama, jadi `rows` tetap valid
+    # untuk deployment lama yang hanya menerima angka-angka posisi.
+    records = [dict(zip(DAILY_SCANS_SHEET_HEADERS, row)) for row in rows]
     payload = {
         "action": "log_scan",
         "sheet": "Daily_Scans",
-        "header": DAILY_SCANS_HEADERS,
+        "header": DAILY_SCANS_SHEET_HEADERS,
         "records": records,
         "rows": rows,  # kompatibilitas deployment v1 yang belum menerima `records`
     }
@@ -1313,6 +1357,7 @@ def fetch_latest_research_from_sheet(
                     researches: dict[str, Research] = {}
                     stale_skipped = 0
                     for asset, item in data.items():
+                        item = _normalize_research_item(item)
                         if not _is_research_fresh(item.get("timestamp"), max_age_hours, now_utc=now_utc):
                             stale_skipped += 1
                             continue

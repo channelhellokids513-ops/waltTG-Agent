@@ -388,9 +388,11 @@ def test_scan_payload_is_name_keyed_for_header_reconciliation():
     finally:
         sheet_logger._post_webhook = original
 
-    assert sent["header"] == sheet_logger.DAILY_SCANS_HEADERS
+    # v2 doPost membaca `record[header[c]]` secara PERSIS terhadap label sheet live, jadi
+    # header payload = nama kolom di sheet (bukan nama internal) - lihat Ronde 9 Bug A.
+    assert sent["header"] == sheet_logger.DAILY_SCANS_SHEET_HEADERS
     assert len(sent["records"]) == 1
-    assert sent["records"][0]["asset"] == "BTC"
+    assert sent["records"][0]["Asset"] == "BTC"  # key = label sheet live, bukan "asset"
     assert "mg_status" in sent["records"][0]
     assert all(name in sent["header"] for name in sheet_logger.MG_COLUMNS)
 

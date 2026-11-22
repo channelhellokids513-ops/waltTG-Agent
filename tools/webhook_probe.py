@@ -145,6 +145,19 @@ def main() -> int:
         verdict.append("doGet(normal) juga non-JSON -> jalur baca riset webhook tetap tidak bisa dipakai "
                        "(gviz fallback yang menyelamatkan)")
 
+    # Bedakan tiga keadaan yang dulu terbaca sama: header tidak ada / header ada tapi kosong / terisi.
+    inv = (payload or {}).get("sheets") or []
+    live_header = next((s.get("header") or [] for s in inv
+                        if isinstance(s, dict) and s.get("name") == "Daily_Scans"), None)
+    if live_header is None:
+        print("    header kolom mg_* di sheet Daily_Scans: TIDAK TERBACA (probe tidak memuat inventori)")
+    else:
+        ada = [c for c in MG_COLUMNS if c in live_header]
+        print(f"    HEADER mg_* di sheet: {'ADA' if ada else 'TIDAK ADA'} "
+              f"({len(ada)}/{len(MG_COLUMNS)}), total kolom sheet {len(live_header)}")
+        if args.require_mg and not ada:
+            verdict.append("header mg_* tidak ada di sheet -> doPost tidak pernah menerima kolom itu")
+
     # Bukti yang BUKAN berasal dari cek versi: kolom diagnostik harus berisi, bukan sekadar ada.
     n_assets, filled = mg_fill_report(plain["json"] if isinstance(plain["json"], dict) else None)
     if n_assets:
