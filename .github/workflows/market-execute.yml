@@ -70,6 +70,7 @@ jobs:
           LOG_REDACT: "true"
           STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}
           E5_SLIPPAGE_BASIS: ${{ vars.E5_SLIPPAGE_BASIS }}
+          US_STOCK_HOURS_ONLY: ${{ vars.US_STOCK_HOURS_ONLY }}
           WALT_STATE_WARM: ${{ steps.state_probe.outputs.warm }}
         run: |
           mkdir -p logs

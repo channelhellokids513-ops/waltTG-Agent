@@ -579,8 +579,39 @@ MIN_MEASURED_SLIPPAGE_BASIS = 0.0010
 # Knob yang WAJIB tersambung ke blok env workflow entry. Daftarnya lahir dari lubang
 # nyata: E5_SLIPPAGE_BASIS sempat hanya terbaca dari os.getenv sehingga `gh variable
 # set` tidak ada efeknya di CI - knob yang hidup di kode tapi mati di produksi.
-CI_ENV_KNOBS: tuple[str, ...] = ("E5_SLIPPAGE_BASIS",)
+US_STOCK_HOURS_ONLY_ENV = "US_STOCK_HOURS_ONLY"
+US_STOCK_MARKET_OPEN_UTC = (13, 30)   # Senin-Jumat 13:30 UTC (EDT open)
+US_STOCK_MARKET_CLOSE_UTC = (21, 0)   # sampai 21:00 UTC (EST close)
+
+CI_ENV_KNOBS: tuple[str, ...] = ("E5_SLIPPAGE_BASIS", "US_STOCK_HOURS_ONLY")
 ENTRY_WORKFLOWS: tuple[str, ...] = ("crypto-execute.yml", "market-execute.yml", "daily-scan.yml")
+
+
+def is_us_stock_market_open_utc(now_utc: Optional[datetime] = None) -> tuple[bool, str]:
+    """Cek apakah jendela reguler pasar Saham AS sedang buka (Senin-Jumat 13:30-21:00 UTC).
+
+    Mencakup pembukaan EDT (13:30 UTC) hingga penutupan EST (21:00 UTC).
+    Di luar jendela ini (termasuk Sabtu-Minggu UTC), riset & entry baru Saham AS
+    (ALLOWED_STOCKS) dilewati; Crypto & Komoditas tetap 24/7, dan risk-monitor
+    tetap mengawasi posisi terbuka 24/7.
+    Kill switch: US_STOCK_HOURS_ONLY=false menonaktifkan filter tanpa ubah kode.
+    """
+    if os.getenv(US_STOCK_HOURS_ONLY_ENV, "true").strip().lower() in ("false", "0", "no", "off"):
+        return True, "filter jam pasar Saham AS dimatikan (US_STOCK_HOURS_ONLY=false)"
+    now = now_utc or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    else:
+        now = now.astimezone(timezone.utc)
+    if now.weekday() >= 5:
+        day_name = "Sabtu" if now.weekday() == 5 else "Minggu"
+        return False, f"pasar Saham AS tutup ({day_name} {now.strftime('%H:%M')} UTC; aktif Sen-Jum 13:30-21:00 UTC)"
+    cur_min = now.hour * 60 + now.minute
+    open_min = US_STOCK_MARKET_OPEN_UTC[0] * 60 + US_STOCK_MARKET_OPEN_UTC[1]
+    close_min = US_STOCK_MARKET_CLOSE_UTC[0] * 60 + US_STOCK_MARKET_CLOSE_UTC[1]
+    if open_min <= cur_min < close_min:
+        return True, f"pasar Saham AS buka ({now.strftime('%H:%M')} UTC)"
+    return False, f"di luar jam pasar Saham AS ({now.strftime('%H:%M')} UTC; aktif Sen-Jum 13:30-21:00 UTC)"
 
 
 def measured_slippage_basis(path: Optional[str] = None) -> tuple[float, str]:
@@ -3624,6 +3655,7 @@ def scan_with_research(
     client: WaltClient,
     auto_execute: Optional[bool] = None,
     dry_run: Optional[bool] = None,
+    now_utc: Optional[datetime] = None,
 ) -> dict:
     """Daily scan + Dual-AI research (Qwen + Gemini) + Instant Auto-Execution pada sinyal GO/HALF + Telegram notif."""
     if auto_execute is None:
@@ -3633,6 +3665,18 @@ def scan_with_research(
 
     log.info(f"📊 Running daily scan + research (auto_execute={auto_execute}, dry_run={dry_run})...")
     summary = daily_scan(client)
+
+    us_stocks_open, us_stocks_note = is_us_stock_market_open_utc(now_utc=now_utc)
+    summary["us_stock_market_open"] = us_stocks_open
+    summary["us_stock_market_note"] = us_stocks_note
+    if not us_stocks_open:
+        log.info(
+            f"🕒 [US STOCK HOURS] {us_stocks_note} — Saham AS dilewati pada daily-scan ini; "
+            "Crypto & Komoditas tetap 24/7."
+        )
+        summary["top_opportunities"] = [
+            o for o in summary["top_opportunities"] if o["asset"] not in ALLOWED_STOCKS
+        ]
 
     # Research tiap stock candidate
     qwen = QwenClient() if os.getenv("DASHSCOPE_API_KEY") else None
@@ -3721,6 +3765,13 @@ def scan_with_research(
                 log.info(f"  Buffer saldo tercapai (${deployed:.2f}/${target_deploy:.2f}), hentikan alokasi.")
                 break
             asset = opp.base_asset
+            if asset in ALLOWED_STOCKS and not us_stocks_open:
+                log.info(f"  SKIP {asset}: {us_stocks_note}")
+                executions.append({
+                    "asset": asset, "side": opp.side, "leverage": MAX_LEVERAGE, "verdict": "SKIP",
+                    "reason": us_stocks_note,
+                })
+                continue
             if asset in RESEARCH_ELIGIBLE and asset not in researches and (qwen or gemini):
                 try:
                     researches[asset] = research_stock(
@@ -3936,6 +3987,7 @@ def market_execute(
     dry_run: bool = False,
     universe: Optional[set[str]] = None,
     title: str = "🚀 Walt Market Execute",
+    now_utc: Optional[datetime] = None,
 ) -> dict:
     """Eksekusi posisi baru dengan Dynamic TP/SL.
     
@@ -3947,6 +3999,11 @@ def market_execute(
       5. Report via Telegram
     """
     target_universe = universe or (ALLOWED_STOCKS | ALLOWED_COMMODITIES)
+    us_stocks_open, us_stocks_note = is_us_stock_market_open_utc(now_utc=now_utc)
+    if not us_stocks_open and (target_universe & ALLOWED_STOCKS):
+        log.info(
+            f"🕒 [US STOCK HOURS] {us_stocks_note} — Saham AS dilewati; Komoditas/Crypto tetap 24/7."
+        )
     log.info(f"{title} (Target Universe: {len(target_universe)} aset)...")
     balance_data = client.balance()
     accounts = balance_data.get("accounts", [])
@@ -4052,6 +4109,8 @@ def market_execute(
 
     crypto_research = crypto_research_set([(o.base_asset, o.funding_daily) for o in opps])
     for opp in opps:
+        if opp.base_asset in ALLOWED_STOCKS and not us_stocks_open:
+            continue
         if opp.base_asset in RESEARCH_ELIGIBLE:
             if opp.base_asset in cached_researches:
                 cached = cached_researches[opp.base_asset]
@@ -4089,6 +4148,13 @@ def market_execute(
     )
 
     for opp_idx, opp in enumerate(opps):
+        if opp.base_asset in ALLOWED_STOCKS and not us_stocks_open:
+            log.info(f"  SKIP {opp.base_asset}: {us_stocks_note}")
+            executions.append({
+                "asset": opp.base_asset, "side": opp.side, "leverage": MAX_LEVERAGE,
+                "verdict": "SKIP", "reason": us_stocks_note,
+            })
+            continue
         if active_slot_count >= max_slots:
             log.info(f"  Slot maksimal tercapai ({active_slot_count}/{max_slots}), hentikan pembukaan posisi baru.")
             break
