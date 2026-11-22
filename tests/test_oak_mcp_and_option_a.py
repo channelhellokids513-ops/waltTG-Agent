@@ -8,19 +8,20 @@ import oak_mcp_client
 
 
 def test_option_a_default_models_and_classai_aggregator(monkeypatch):
-    # Voter hemat (GLM + MiniMax M3 + Claude Haiku 5.5) + Meta-Aggregator pemenang #1 OAK (glm-5.3 -> claude-opus-5.5)
+    # Voter hemat + Meta-Aggregator pemenang #1 OAK (`glm-5.3`) via DASHSCOPE_API_KEY (fallback ClassAI claude-opus-5.5)
     assert llm_research.MODEL_V1 == "glm-5.2-fast-preview"
     assert llm_research.MODEL_V2 == "glm-5.3-prime"
     assert llm_research.MODEL_V3 == "minimax-m3"
     assert llm_research.MODEL_V4 == "claude-haiku-5.5"
-    assert llm_research.MODEL_AGG_CLASSAI == "glm-5.3"
-    assert llm_research.CLASSAI_AGGREGATOR_CHAIN == ["glm-5.3", "claude-opus-5.5"]
+    assert llm_research.MODEL_AGGREGATOR == "glm-5.3"
+    assert llm_research.AGGREGATOR_MODEL_CHAIN[0] == "glm-5.3"
+    assert llm_research.CLASSAI_AGGREGATOR_CHAIN == ["claude-opus-5.5", "gpt-6.1-sol"]
 
-    class _FakeClassAI:
+    class _FakeDashScope:
         def __init__(self):
             self.called = []
 
-        def chat_json(self, prompt, system_instruction=None, model=None):
+        def chat_json(self, messages, model=None):
             self.called.append(model)
             return {
                 "per_parameter_final": {
@@ -32,22 +33,22 @@ def test_option_a_default_models_and_classai_aggregator(monkeypatch):
                 "overall_consensus_level": "strong",
                 "vendor_alignment": "both_agree",
                 "most_influential_parameter": "P1_sentiment_polarity",
-                "justification": "Sintesis CRO GLM-5.3 solid.",
+                "justification": "Sintesis CRO GLM-5.3 (DashScope) solid.",
                 "disagreement_summary": [],
             }
 
-    class _FailIfCalledDashScope:
+    class _FailIfCalledClassAI:
         def chat_json(self, *a, **kw):
-            raise AssertionError("DashScope aggregator tidak boleh dipanggil jika ClassAI glm-5.3 sukses!")
+            raise AssertionError("ClassAI fallback tidak boleh dipanggil jika DashScope glm-5.3 sukses!")
 
     verdicts = {
         "V1_qwen_turbo": {"params": {"P1_sentiment_polarity": {"score": 0.6}}, "overall_voter_confidence": 0.8},
         "V3_gemini_flash": {"params": {"P1_sentiment_polarity": {"score": 0.6}}, "overall_voter_confidence": 0.8},
     }
     pre = llm_research.analyze_voter_variance(verdicts)
-    fake_ca = _FakeClassAI()
-    agg = llm_research.run_meta_aggregator(_FailIfCalledDashScope(), "BTC", verdicts, pre, gemini=fake_ca)
-    assert fake_ca.called == ["glm-5.3"]
+    fake_ds = _FakeDashScope()
+    agg = llm_research.run_meta_aggregator(fake_ds, "BTC", verdicts, pre, gemini=_FailIfCalledClassAI())
+    assert fake_ds.called == ["glm-5.3"]
     assert agg["aggregator_model"] == "glm-5.3"
 
 
