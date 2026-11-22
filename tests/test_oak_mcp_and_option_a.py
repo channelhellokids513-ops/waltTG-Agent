@@ -114,13 +114,69 @@ def test_oak_mcp_client_oauth_refresh_sse_and_tool_call(monkeypatch):
     )
     monkeypatch.setattr(cli.client, "post", _fake_post)
 
-    out = cli.call_tool("get_crypto", {"query": "BTC"})
+    out = cli.call_tool("get_crypto", {"id": "bitcoin", "locale": "en"})
     assert "BTC TVL $66B" in out
     assert cli.session_id == "sess-oak-1"
     # Urutan panggilan: token refresh -> initialize -> notifications/initialized -> tools/call
     assert calls[0]["url"] == oak_mcp_client.OAK_TOKEN_URL
     assert calls[1]["headers"]["Authorization"] == "Bearer oak-fresh-tok"
     assert calls[3]["headers"]["Mcp-Session-Id"] == "sess-oak-1"
+    assert calls[3]["json"]["params"]["arguments"] == {"id": "bitcoin", "locale": "en"}
+
+
+def test_oak_mcp_fetch_global_and_asset_uses_verified_schemas(monkeypatch):
+    oak_mcp_client.reset_oak_cache()
+    tool_calls = []
+
+    class _FakeCli:
+        def call_tool(self, name, arguments=None):
+            tool_calls.append((name, dict(arguments or {})))
+            if name == "get_market_overview":
+                return json.dumps({
+                    "totalMarketCapUsd": {"value": 2.1e12, "change30dPct": -12.5},
+                    "defiTvlUsd": {"value": 66.6e9, "change30dPct": -10.0},
+                    "stablecoinSupplyUsd": {"value": 284.2e9},
+                })
+            if name == "get_calendar":
+                assert "from" in arguments and "to" in arguments
+                return json.dumps({
+                    "events": [
+                        {"startsAt": "2026-11-24T19:00:00Z", "kind": "macro", "importance": "high", "name": "FOMC Minutes"},
+                        {"startsAt": "2026-11-25T21:00:00Z", "kind": "earnings", "importance": "high", "name": "NVIDIA Q3", "symbol": "NVDA"},
+                    ]
+                })
+            if name == "get_news":
+                return json.dumps({
+                    "items": [
+                        {"title": "Bitcoin returns above $60,000 after steep selloff", "summary": "BTC rebounds"},
+                        {"title": "NVIDIA launches new AI cluster", "summary": "NVDA demand stays high"},
+                    ]
+                })
+            if name == "get_crypto":
+                assert arguments == {"id": "bitcoin", "locale": "en"}
+                return json.dumps({"name": "Bitcoin", "symbol": "BTC", "current_price": 60943, "price_change_percentage_24h_in_currency": 4.5, "market_cap": 1.22e12})
+            if name == "get_tradfi":
+                assert arguments == {"ticker": "NVDA"}
+                return json.dumps({"name": "NVIDIA Corporation", "symbol": "NVDA", "current_price": 125.53, "price_change_percentage_24h": -2.1, "market_cap": 3.03e12})
+            raise AssertionError(f"Unexpected tool: {name} {arguments}")
+
+    cli = _FakeCli()
+    ctx_btc = oak_mcp_client.fetch_oak_market_context("BTC", is_crypto=True, client=cli)
+    ctx_nvda = oak_mcp_client.fetch_oak_market_context("NVDA", is_crypto=False, client=cli)
+
+    assert ctx_btc["available"] is True and ctx_btc["errors"] == []
+    assert "Bitcoin" in ctx_btc["asset_data"]
+    assert "Bitcoin returns above $60,000" in ctx_btc["headlines"][0]
+    assert "FOMC Minutes" in ctx_btc["calendar"]
+
+    assert ctx_nvda["available"] is True and ctx_nvda["errors"] == []
+    assert "NVIDIA Corporation" in ctx_nvda["asset_data"]
+    assert "NVIDIA launches new AI cluster" in ctx_nvda["headlines"][0]
+    assert "NVIDIA Q3" in ctx_nvda["calendar"]
+
+    # Global brief hanya ditarik 1x walau 2 aset diteliti (cache bekerja)
+    assert sum(1 for n, _ in tool_calls if n == "get_market_overview") == 1
+    assert sum(1 for n, _ in tool_calls if n == "get_calendar") == 1
 
 
 def test_research_stock_enriches_context_and_headlines_from_oak_mcp(monkeypatch):
