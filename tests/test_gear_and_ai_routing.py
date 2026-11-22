@@ -244,3 +244,40 @@ def test_gear_four_tiers_and_gear3_lifts_research_caps(monkeypatch, tmp_path):
     assert len(researched_calls) == len(assets)
     # Karena ada 8 peluang (> 1), semua panggilan riset membawa opportunity_count=8 & is_idle=False (-> GLM)
     assert all(cnt == len(assets) and idle is False for _, cnt, idle in researched_calls)
+
+
+def test_gemini_client_uses_classai_router_and_falls_back_on_404(monkeypatch):
+    calls = []
+
+    class _Resp:
+        def __init__(self, code, data):
+            self.status_code = code
+            self._data = data
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}")
+
+        def json(self):
+            return self._data
+
+    responses = [
+        _Resp(404, {"error": {"code": "model_not_found"}}),
+        _Resp(200, {"choices": [{"message": {"content": '{"status": "ok"}'}}]}),
+    ]
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        calls.append({"url": url, "headers": dict(headers or {}), "payload": dict(json or {})})
+        return responses.pop(0)
+
+    monkeypatch.delenv("GEMINI_BASE_URL", raising=False)
+    client = llm_research.GeminiClient(api_key="classai-test-key", model="gemini-flash-latest")
+    monkeypatch.setattr(client.client, "post", _fake_post)
+
+    out = client.chat_json("hello", system_instruction="sys")
+    assert out == {"status": "ok"}
+    assert len(calls) == 2
+    assert calls[0]["url"] == "https://router.classai.id/v1/chat/completions"
+    assert calls[0]["headers"]["Authorization"] == "Bearer classai-test-key"
+    assert calls[0]["payload"]["model"] == "gemini-flash-latest"
+    assert calls[1]["payload"]["model"] == "gemini-4-argon"

@@ -21,9 +21,12 @@ from typing import Optional
 # Nilai yang DIHARAMKAN muncul apa adanya di berkas terlacak. Nilainya diambil dari .env saat run,
 # sehingga rotasi kredensial tidak membutuhkan perubahan kode.
 BENIGN_ENV = {
-    "DASHSCOPE_MODEL", "DASHSCOPE_MODEL_V1", "DASHSCOPE_MODEL_AGG", "GEMINI_MODEL", "GEMINI_MODEL_V4",
+    "DASHSCOPE_MODEL", "DASHSCOPE_MODEL_V1", "DASHSCOPE_MODEL_AGG",
+    "DASHSCOPE_MODEL_V3_GLM", "DASHSCOPE_MODEL_V4_GLM",
+    "GEMINI_MODEL", "GEMINI_MODEL_V4", "GEMINI_BASE_URL",
     "DRY_RUN", "AUTO_EXECUTE_ON_SCAN", "LOG_REDACT", "MAINTENANCE_MODE", "WALT_COLD_REHYDRATE",
     "WALT_TOKEN_SYNC", "WALT_WATCHDOG_DISPATCH_ENTRY", "STRATEGY_CONFIG_JSON", "PYTHON_VERSION",
+    "US_STOCK_HOURS_ONLY", "GEAR_3_FULL_RESEARCH", "TRAINING_DATA_LOGGING",
 }
 KEY_RX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PLACEHOLDER_VALUES = {"dummy", "false", "true", "none", "changeme", "xxx", "-"}

@@ -67,7 +67,8 @@ def _install_crumb_redaction() -> None:
 _install_crumb_redaction()
 
 DASHSCOPE_BASE = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_BASE = os.getenv("GEMINI_BASE_URL", "https://router.classai.id/v1").rstrip("/")
+GEMINI_CLASSAI_FALLBACK_MODEL = "gemini-4-argon"
 
 # Default Model Specifications
 # Ronde 7: `qwen-turbo` TERBUKTI mati di hulu — probe langsung ke dashscope-intl pada
@@ -77,8 +78,10 @@ GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 # dioverride lewat variable GitHub tanpa mengubah kode.
 MODEL_V1 = os.getenv("DASHSCOPE_MODEL_V1", "qwen-flash")
 MODEL_V2 = os.getenv("DASHSCOPE_MODEL", "qwen-plus")
-MODEL_V3 = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
-MODEL_V4 = os.getenv("GEMINI_MODEL_V4", "gemini-pro-latest")
+# Voter 3 & Voter 4 (kondisi Idle): diarahkan ke ClassAI Router (https://router.classai.id/v1)
+# memakai secret DASHSCOPE_API_GEMINI_KEY dengan model default `gemini-4-argon`.
+MODEL_V3 = os.getenv("GEMINI_MODEL", "gemini-4-argon")
+MODEL_V4 = os.getenv("GEMINI_MODEL_V4", "gemini-4-argon")
 # Kebijakan Routing Multi-Peluang: saat banyak peluang (> 1), Voter 3 & Voter 4 dialihkan
 # dari Google Gemini (Flash/Pro) ke GLM via DashScope memakai DASHSCOPE_API_KEY.
 MODEL_V3_GLM = os.getenv("DASHSCOPE_MODEL_V3_GLM", "glm-5.2-fast-preview")
@@ -217,9 +220,16 @@ class QwenClient:
 
 
 class GeminiClient:
-    """Client untuk Google Gemini via endpoint resmi generateContent."""
+    """Client untuk Voter Gemini via OpenAI-compatible router (default: https://router.classai.id/v1)
+    dengan dukungan fallback otomatis untuk endpoint Google native generateContent bila base_url
+    diarahkan ke `generativelanguage.googleapis.com`."""
 
-    def __init__(self, api_key: Optional[str] = None, model: str = MODEL_V3):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = MODEL_V3,
+        base_url: Optional[str] = None,
+    ):
         self.api_key = (
             api_key
             or os.environ.get("DASHSCOPE_API_GEMINI_KEY")
@@ -228,8 +238,13 @@ class GeminiClient:
         if not self.api_key:
             raise ValueError("DASHSCOPE_API_GEMINI_KEY / GEMINI_API_KEY belum di-set!")
 
+        self.base_url = (
+            base_url
+            or os.environ.get("GEMINI_BASE_URL")
+            or GEMINI_BASE
+        ).strip().rstrip("/")
         self.model = self._clean_model_name(model or MODEL_V3)
-        self.client = httpx.Client(timeout=45.0)
+        self.client = httpx.Client(timeout=60.0)
 
     @staticmethod
     def _clean_model_name(model_name: str) -> str:
@@ -240,45 +255,91 @@ class GeminiClient:
             name = name[:-16]
         return name
 
+    def _is_google_native(self) -> bool:
+        return "generativelanguage.googleapis.com" in self.base_url.lower()
+
     def chat_json(self, prompt: str, system_instruction: Optional[str] = None, model: Optional[str] = None) -> dict:
-        """Kirim prompt ke Gemini generateContent API."""
+        """Kirim prompt ke ClassAI Router OpenAI-compatible (`/chat/completions`) atau Google native."""
         target_model = self._clean_model_name(model or self.model)
-        url = f"{GEMINI_BASE}/models/{target_model}:generateContent"
+
+        if self._is_google_native():
+            url = f"{self.base_url}/models/{target_model}:generateContent"
+            headers = {
+                "Content-Type": "application/json",
+                "x-goog-api-key": self.api_key,
+            }
+            contents_text = prompt
+            if system_instruction:
+                contents_text = f"[SYSTEM INSTRUCTION]\n{system_instruction}\n\n[USER REQUEST]\n{prompt}"
+            payload = {
+                "contents": [
+                    {
+                        "parts": [
+                            {"text": f"{contents_text}\n\nOUTPUT HANYA JSON VALID SESUAI SKEMA."}
+                        ]
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": 0.2,
+                    "responseMimeType": "application/json",
+                },
+            }
+            r = self.client.post(url, headers=headers, json=payload, timeout=60.0)
+            r.raise_for_status()
+            return self._parse_response(r.json())
+
+        # Default: OpenAI-compatible endpoint (https://router.classai.id/v1/chat/completions)
+        url = f"{self.base_url}/chat/completions"
         headers = {
             "Content-Type": "application/json",
-            "x-goog-api-key": self.api_key,
+            "Authorization": f"Bearer {self.api_key}",
+            "User-Agent": "WaltBot/1.0",
         }
-        
-        contents_text = prompt
+        messages = []
         if system_instruction:
-            contents_text = f"[SYSTEM INSTRUCTION]\n{system_instruction}\n\n[USER REQUEST]\n{prompt}"
-
+            messages.append({"role": "system", "content": system_instruction})
+        messages.append({
+            "role": "user",
+            "content": f"{prompt}\n\nOUTPUT HANYA JSON VALID SESUAI SKEMA.",
+        })
         payload = {
-            "contents": [
-                {
-                    "parts": [
-                        {"text": f"{contents_text}\n\nOUTPUT HANYA JSON VALID SESUAI SKEMA."}
-                    ]
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.2,
-                "responseMimeType": "application/json",
-            },
+            "model": target_model,
+            "messages": messages,
+            "temperature": 0.2,
+            "response_format": {"type": "json_object"},
         }
+        r = self.client.post(url, headers=headers, json=payload, timeout=60.0)
 
-        r = self.client.post(url, headers=headers, json=payload, timeout=45.0)
+        # Pengaman anti-404: bila env/variable lama masih memakai nama model Google native
+        # (mis. gemini-flash-latest / gemini-pro-latest), otomatis fallback ke gemini-4-argon.
+        if getattr(r, "status_code", 200) == 404 and target_model != GEMINI_CLASSAI_FALLBACK_MODEL:
+            log.warning(
+                f"Gemini router model '{target_model}' tidak ditemukan (404) di {self.base_url}. "
+                f"Fallback ke {GEMINI_CLASSAI_FALLBACK_MODEL}..."
+            )
+            payload["model"] = GEMINI_CLASSAI_FALLBACK_MODEL
+            r = self.client.post(url, headers=headers, json=payload, timeout=60.0)
+
         r.raise_for_status()
         return self._parse_response(r.json())
 
     def _parse_response(self, res_data: dict) -> dict:
-        candidates = res_data.get("candidates", [])
-        if not candidates:
-            raise RuntimeError(f"Gemini API empty response: {res_data}")
-        parts = candidates[0].get("content", {}).get("parts", [])
-        if not parts:
-            raise RuntimeError(f"Gemini API empty parts: {res_data}")
-        text = parts[0].get("text", "").strip()
+        text = ""
+        choices = res_data.get("choices")
+        if isinstance(choices, list) and choices:
+            msg = choices[0].get("message") or {}
+            text = str(msg.get("content") or "").strip()
+        else:
+            candidates = res_data.get("candidates", [])
+            if not candidates:
+                raise RuntimeError(f"Gemini API empty response: {res_data}")
+            parts = candidates[0].get("content", {}).get("parts", [])
+            if not parts:
+                raise RuntimeError(f"Gemini API empty parts: {res_data}")
+            text = str(parts[0].get("text") or "").strip()
+
+        if not text:
+            raise RuntimeError(f"Gemini API empty text content: {res_data}")
 
         if text.startswith("```json"):
             text = text[7:]

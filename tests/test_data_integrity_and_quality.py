@@ -161,30 +161,61 @@ def test_d4_and_e5_honest_stats_excludes_unknown_dedupes_and_warns_short_hold(tm
 def test_k1_gemini_uses_header_not_url_query_key_and_global_secret_redaction(monkeypatch):
     captured = {}
 
-    class FakeResp:
+    class FakeRespOpenAI:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"ok": true}'}}]}
+
+    class FakeRespNative:
+        status_code = 200
+
         def raise_for_status(self):
             return None
 
         def json(self):
             return {"candidates": [{"content": {"parts": [{"text": '{"ok": true}'}]}}]}
 
-    def fake_post(url, headers=None, json=None, timeout=None):
+    def fake_post_openai(url, headers=None, json=None, timeout=None):
         captured["url"] = url
         captured["headers"] = headers
-        return FakeResp()
+        captured["json"] = json
+        return FakeRespOpenAI()
+
+    def fake_post_native(url, headers=None, json=None, timeout=None):
+        captured["native_url"] = url
+        captured["native_headers"] = headers
+        return FakeRespNative()
 
     # Kunci palsu dirangkai dari potongan: berkas test tidak boleh memuat string yang cocok pola
     # `AIza...{20,}` di tools/sanitize_gate.py, tanpa mengurangi kekuatan pemeriksaan redaksinya.
     KUNCI_PALSU = "AIzaSy" + "FakeSecretKey123456789012345"
 
+    # 1. Mode default ClassAI Router (OpenAI-compatible https://router.classai.id/v1/chat/completions)
     client = llm_research.GeminiClient(api_key=KUNCI_PALSU)
-    monkeypatch.setattr(client.client, "post", fake_post)
+    monkeypatch.setattr(client.client, "post", fake_post_openai)
     res = client.chat_json("test prompt")
 
     assert res == {"ok": True}
+    assert captured["url"] == "https://router.classai.id/v1/chat/completions"
     assert "?key=" not in captured["url"]
     assert KUNCI_PALSU[:18] not in captured["url"]
-    assert captured["headers"].get("x-goog-api-key") == KUNCI_PALSU
+    assert captured["headers"].get("Authorization") == f"Bearer {KUNCI_PALSU}"
+
+    # 2. Mode Google native (jika GEMINI_BASE_URL diarahkan ke generativelanguage.googleapis.com)
+    native_client = llm_research.GeminiClient(
+        api_key=KUNCI_PALSU,
+        base_url="https://generativelanguage.googleapis.com/v1beta",
+    )
+    monkeypatch.setattr(native_client.client, "post", fake_post_native)
+    res_native = native_client.chat_json("test prompt")
+    assert res_native == {"ok": True}
+    assert "?key=" not in captured["native_url"]
+    assert KUNCI_PALSU[:18] not in captured["native_url"]
+    assert captured["native_headers"].get("x-goog-api-key") == KUNCI_PALSU
 
     # Global secret filter menyensor key=, Bearer, AIza
     noisy = (

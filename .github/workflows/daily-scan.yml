@@ -62,7 +62,9 @@ jobs:
           DASHSCOPE_MODEL: ${{ vars.DASHSCOPE_MODEL || 'qwen-plus' }}
           DASHSCOPE_MODEL_V1: ${{ vars.DASHSCOPE_MODEL_V1 || 'qwen-flash' }}
           DASHSCOPE_API_GEMINI_KEY: ${{ secrets.DASHSCOPE_API_GEMINI_KEY || secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-flash-latest' }}
+          GEMINI_BASE_URL: ${{ vars.GEMINI_BASE_URL || 'https://router.classai.id/v1' }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-4-argon' }}
+          GEMINI_MODEL_V4: ${{ vars.GEMINI_MODEL_V4 || 'gemini-4-argon' }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || secrets.GOOGLE_SHEET_ID }}
