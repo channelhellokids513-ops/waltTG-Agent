@@ -8,13 +8,13 @@ import oak_mcp_client
 
 
 def test_option_a_default_models_and_classai_aggregator(monkeypatch):
-    # Voter hemat (GLM + MiniMax M3 + Claude Haiku 5.5) + Meta-Aggregator terbaik (Claude Opus 5.5 -> GPT-6.1 Sol)
+    # Voter hemat (GLM + MiniMax M3 + Claude Haiku 5.5) + Meta-Aggregator pemenang #1 OAK (glm-5.3 -> claude-opus-5.5)
     assert llm_research.MODEL_V1 == "glm-5.2-fast-preview"
     assert llm_research.MODEL_V2 == "glm-5.3-prime"
     assert llm_research.MODEL_V3 == "minimax-m3"
     assert llm_research.MODEL_V4 == "claude-haiku-5.5"
-    assert llm_research.MODEL_AGG_CLASSAI == "claude-opus-5.5"
-    assert llm_research.CLASSAI_AGGREGATOR_CHAIN == ["claude-opus-5.5", "gpt-6.1-sol"]
+    assert llm_research.MODEL_AGG_CLASSAI == "glm-5.3"
+    assert llm_research.CLASSAI_AGGREGATOR_CHAIN == ["glm-5.3", "claude-opus-5.5"]
 
     class _FakeClassAI:
         def __init__(self):
@@ -32,13 +32,13 @@ def test_option_a_default_models_and_classai_aggregator(monkeypatch):
                 "overall_consensus_level": "strong",
                 "vendor_alignment": "both_agree",
                 "most_influential_parameter": "P1_sentiment_polarity",
-                "justification": "Sintesis CRO Claude Opus 5.5 solid.",
+                "justification": "Sintesis CRO GLM-5.3 solid.",
                 "disagreement_summary": [],
             }
 
     class _FailIfCalledDashScope:
         def chat_json(self, *a, **kw):
-            raise AssertionError("DashScope aggregator tidak boleh dipanggil jika ClassAI claude-opus-5.5 sukses!")
+            raise AssertionError("DashScope aggregator tidak boleh dipanggil jika ClassAI glm-5.3 sukses!")
 
     verdicts = {
         "V1_qwen_turbo": {"params": {"P1_sentiment_polarity": {"score": 0.6}}, "overall_voter_confidence": 0.8},
@@ -47,8 +47,8 @@ def test_option_a_default_models_and_classai_aggregator(monkeypatch):
     pre = llm_research.analyze_voter_variance(verdicts)
     fake_ca = _FakeClassAI()
     agg = llm_research.run_meta_aggregator(_FailIfCalledDashScope(), "BTC", verdicts, pre, gemini=fake_ca)
-    assert fake_ca.called == ["claude-opus-5.5"]
-    assert agg["aggregator_model"] == "claude-opus-5.5"
+    assert fake_ca.called == ["glm-5.3"]
+    assert agg["aggregator_model"] == "glm-5.3"
 
 
 def test_oak_mcp_not_configured_is_zero_network_fail_safe(monkeypatch):

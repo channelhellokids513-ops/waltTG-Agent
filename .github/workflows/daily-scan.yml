@@ -65,8 +65,8 @@ jobs:
           GEMINI_BASE_URL: ${{ vars.GEMINI_BASE_URL || 'https://router.classai.id/v1' }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'minimax-m3' }}
           GEMINI_MODEL_V4: ${{ vars.GEMINI_MODEL_V4 || 'claude-haiku-5.5' }}
-          CLASSAI_MODEL_AGG: ${{ vars.CLASSAI_MODEL_AGG || 'claude-opus-5.5' }}
-          CLASSAI_MODEL_AGG_FALLBACK: ${{ vars.CLASSAI_MODEL_AGG_FALLBACK || 'gpt-6.1-sol' }}
+          CLASSAI_MODEL_AGG: ${{ vars.CLASSAI_MODEL_AGG || 'glm-5.3' }}
+          CLASSAI_MODEL_AGG_FALLBACK: ${{ vars.CLASSAI_MODEL_AGG_FALLBACK || 'claude-opus-5.5' }}
           OAK_MCP_ENABLED: ${{ vars.OAK_MCP_ENABLED || 'on' }}
           OAK_MCP_CLIENT_ID: ${{ secrets.OAK_MCP_CLIENT_ID }}
           OAK_MCP_REFRESH_TOKEN: ${{ secrets.OAK_MCP_REFRESH_TOKEN }}

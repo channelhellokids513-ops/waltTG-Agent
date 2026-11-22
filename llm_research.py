@@ -75,8 +75,8 @@ GEMINI_CLASSAI_FALLBACK_MODEL = "claude-haiku-5.5"
 #   V2: glm-5.3-prime        (DashScope — #1 OAK +29.4%, 0 likuidasi)
 #   V3: minimax-m3           (ClassAI Router — #7 OAK Max DD terendah -6.5%, 0 liq, Rp 900/3.465)
 #   V4: claude-haiku-5.5     (ClassAI Router — 1.84s cepat & hemat Rp 1.620/4.950, 1M context)
-#   Meta-Aggregator (CRO): claude-opus-5.5 (#3 OAK Best Risk-Adjusted, Sharpe 1.73, Max DD -8.7%, 0 liq)
-#                          -> fallback gpt-6.1-sol (#4 OAK, varians terendah) -> DashScope GLM/Qwen -> rule-based.
+#   Meta-Aggregator (CRO): glm-5.3 (#1 OAK Winner +29.4%, 0 liq, Rp 1.875/9.240)
+#                          -> fallback claude-opus-5.5 (#3 OAK Sharpe 1.73, Max DD -8.7%) -> DashScope GLM/Qwen -> rule-based.
 MODEL_V1 = os.getenv("DASHSCOPE_MODEL_V1", "glm-5.2-fast-preview")
 MODEL_V2 = os.getenv("DASHSCOPE_MODEL", "glm-5.3-prime")
 MODEL_V3 = os.getenv("GEMINI_MODEL", "minimax-m3")
@@ -84,8 +84,8 @@ MODEL_V4 = os.getenv("GEMINI_MODEL_V4", "claude-haiku-5.5")
 # Model GLM via DashScope untuk mode hemat burst (bila MULTI_OPP_GLM_FALLBACK=true).
 MODEL_V3_GLM = os.getenv("DASHSCOPE_MODEL_V3_GLM", "glm-5.2-fast-preview")
 MODEL_V4_GLM = os.getenv("DASHSCOPE_MODEL_V4_GLM", "glm-5.3-prime")
-MODEL_AGG_CLASSAI = os.getenv("CLASSAI_MODEL_AGG", "claude-opus-5.5")
-MODEL_AGG_CLASSAI_FALLBACK = os.getenv("CLASSAI_MODEL_AGG_FALLBACK", "gpt-6.1-sol")
+MODEL_AGG_CLASSAI = os.getenv("CLASSAI_MODEL_AGG", "glm-5.3")
+MODEL_AGG_CLASSAI_FALLBACK = os.getenv("CLASSAI_MODEL_AGG_FALLBACK", "claude-opus-5.5")
 MODEL_AGGREGATOR = os.getenv("DASHSCOPE_MODEL_AGG", "glm-5.3-prime")
 
 CLASSAI_AGGREGATOR_CHAIN: list[str] = []
