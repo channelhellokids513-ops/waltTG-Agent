@@ -4130,6 +4130,41 @@ def scan_with_research(
     except Exception as e:
         log.warning(f"Logging scan/PnL to sheet failed: {e}")
 
+    # Logging otomatis sampel riset ke tab 'Data Training' & logs/training_dataset.jsonl (non-blocking)
+    try:
+        from training_data import build_training_sample, log_training_samples
+        from sheet_logger import gravity_diagnostics
+        from types import SimpleNamespace
+
+        ts_scan = summary.get("ts") or datetime.now(timezone.utc).isoformat()
+        train_samples = []
+        for opp in summary.get("top_opportunities", []):
+            asset = opp["asset"]
+            res_obj = researches.get(asset)
+            if not res_obj:
+                continue
+            funding_dec = float(opp.get("funding_daily", opp.get("funding_daily_pct", 0.0) / 100.0))
+            pseudo = SimpleNamespace(base_asset=asset, side=opp["side"], funding_daily=funding_dec)
+            v_str, r_str, _ = decide_go_nogo(pseudo, res_obj)
+            sample = build_training_sample(
+                timestamp_utc=ts_scan,
+                asset=asset,
+                side=opp["side"],
+                funding_daily=funding_dec,
+                price=opp.get("price"),
+                verdict=v_str,
+                decision_reason=r_str,
+                research=res_obj,
+                mg_context=gravity_diagnostics(asset),
+            )
+            if sample:
+                train_samples.append(sample)
+        if train_samples:
+            tr_res = log_training_samples(train_samples)
+            log.info(f"🎓 Logging Data Training result: {tr_res}")
+    except Exception as e:
+        log.warning(f"Logging Data Training failed (non-blocking): {e}")
+
     result_payload = {
         "summary": summary,
         "researches": {k: v.__dict__ for k, v in researches.items()},
@@ -4581,6 +4616,37 @@ def market_execute(
         log.info(f"📊 Logging executions result: {log_res}")
     except Exception as e:
         log.warning(f"Logging execution to sheet failed: {e}")
+
+    # Logging otomatis riset on-the-fly baru (yang tidak berasal dari cache) ke tab 'Data Training'
+    try:
+        from training_data import build_training_sample, log_training_samples
+
+        ts_exec = datetime.now(timezone.utc).isoformat()
+        fresh_samples = []
+        for opp in opps:
+            if opp.base_asset in cached_researches:
+                continue
+            res_obj = researches.get(opp.base_asset)
+            if not res_obj:
+                continue
+            v_str, r_str, _ = decide_go_nogo(opp, res_obj)
+            sample = build_training_sample(
+                timestamp_utc=ts_exec,
+                asset=opp.base_asset,
+                side=opp.side,
+                funding_daily=opp.funding_daily,
+                price=None,
+                verdict=v_str,
+                decision_reason=r_str,
+                research=res_obj,
+            )
+            if sample:
+                fresh_samples.append(sample)
+        if fresh_samples:
+            tr_res = log_training_samples(fresh_samples)
+            log.info(f"🎓 Logging Data Training (on-the-fly) result: {tr_res}")
+    except Exception as e:
+        log.warning(f"Logging Data Training (on-the-fly) failed (non-blocking): {e}")
 
     result_payload = {
         "gear": gear_label,

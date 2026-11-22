@@ -154,6 +154,7 @@ class Research:
     voter_failures: list[str] = field(default_factory=list)
     earnings_status: str = "unknown"  # unknown | ok | no_data | past_only | http_error:<kode> | exception:<tipe> | no_crumb
     secondary_provider: str = "gemini"  # "gemini" (Idle) | "glm" (multi-opportunity > 1)
+    headlines: list[str] = field(default_factory=list)
 
 
 # =============================================================================
@@ -1169,6 +1170,7 @@ def research_stock(
         earnings_status=earnings_status,
         voter_failures=voter_failures,
         secondary_provider=active_secondary,
+        headlines=list(headlines),
     )
 
 

@@ -13,6 +13,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import sheet_logger
+import training_data
 import walt_bot
 
 _PROD_LOGS_DIR = REPO_ROOT / "logs"
@@ -31,6 +32,7 @@ _STATE_FILES = (
     # R6-5 [V1]: dua jalur tulis produksi yang sebelumnya di luar pengawasan guard ronde 5.
     "security_audit.jsonl",
     "_tmp_sheet_batch.json",
+    "training_dataset.jsonl",
 )
 _SESSION_STATE_SNAPSHOT: dict[str, tuple[int, str]] = {}
 
@@ -145,6 +147,12 @@ def isolate_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, captured_clo
 
     monkeypatch.setattr(walt_bot, "CLOSED_IDS_PATH", str(iso_logs / "closed_ids.json"))
     monkeypatch.setattr(sheet_logger, "FALLBACK_LOG_DIR", str(iso_logs))
+    monkeypatch.setattr(training_data, "DEFAULT_JSONL_PATH", str(iso_logs / "training_dataset.jsonl"))
+    monkeypatch.setattr(
+        training_data,
+        "log_training_samples",
+        _wrap_default_path_args(training_data.log_training_samples, iso_logs, ("jsonl_path",)),
+    )
 
     # Bungkus fungsi tulis sheet_logger (tetap mengeksekusi fungsi asli ke tmp_path + merekam payload)
     monkeypatch.setattr(
