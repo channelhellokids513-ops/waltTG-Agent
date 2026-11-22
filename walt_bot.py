@@ -2451,13 +2451,18 @@ def check_entry_frequency_limits(
     regime_path: str = "logs/market_regime.json",
     max_per_asset: Optional[int] = None,
     max_per_day: Optional[int] = None,
+    verdict: Optional[str] = None,
 ) -> tuple[bool, str]:
     """
     E4: Cek batas frekuensi entry dalam 24 jam terakhir:
-    - Maksimal max_entries_per_asset_24h (default 2) per aset.
-    - Maksimal max_entries_per_day (default 8) total seluruh aset.
+    - Vonis GO melewati rem frekuensi 24 jam (keputusan pemilik: peluang GO tidak diblokir
+      batas kuota harian/per-aset; circuit breaker -5%, cooldown, slot, & buffer kas tetap aktif).
+    - Untuk HALF / tanpa verdict: maksimal max_entries_per_asset_24h (default 2) per aset
+      dan max_entries_per_day (default 8) total seluruh aset.
     Return (allowed, reason).
     """
+    if str(verdict or "").strip().upper() == "GO":
+        return True, "OK (GO bypass batas frekuensi 24 jam)"
     now = time.time() if now_ts is None else float(now_ts)
     cutoff = now - 86400.0
     lim_asset = MAX_ENTRIES_PER_ASSET_24H if max_per_asset is None else int(max_per_asset)
@@ -3750,7 +3755,7 @@ def scan_with_research(
                     })
                     continue
 
-                freq_ok, freq_reason = check_entry_frequency_limits(asset)
+                freq_ok, freq_reason = check_entry_frequency_limits(asset, verdict=verdict)
                 if not freq_ok:
                     log.info(f"  SKIP {asset}: {freq_reason}")
                     executions.append({
@@ -4133,7 +4138,7 @@ def market_execute(
             })
             continue
 
-        freq_ok, freq_reason = check_entry_frequency_limits(opp.base_asset)
+        freq_ok, freq_reason = check_entry_frequency_limits(opp.base_asset, verdict=verdict)
         if not freq_ok:
             log.info(f"  SKIP {opp.base_asset}: {freq_reason}")
             executions.append({

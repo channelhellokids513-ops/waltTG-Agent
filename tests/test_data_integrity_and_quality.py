@@ -266,6 +266,18 @@ def test_e4_frequency_limits_and_daily_circuit_breaker(tmp_path):
     assert ok_day is False
     assert "8/8" in reason_day
 
+    # HALF tetap kena rem 24 jam, sedangkan vonis GO melewati rem 24 jam (baik per-aset maupun total harian)
+    ok_half_day, _ = walt_bot.check_entry_frequency_limits("BTC", now_ts=t0 + 240, regime_path=regime, verdict="HALF")
+    assert ok_half_day is False
+    ok_half_asset, _ = walt_bot.check_entry_frequency_limits("NBIS", now_ts=t0 + 240, regime_path=regime, verdict="HALF")
+    assert ok_half_asset is False
+
+    ok_go_day, reason_go_day = walt_bot.check_entry_frequency_limits("BTC", now_ts=t0 + 240, regime_path=regime, verdict="GO")
+    assert ok_go_day is True
+    assert "GO" in reason_go_day
+    ok_go_asset, _ = walt_bot.check_entry_frequency_limits("NBIS", now_ts=t0 + 240, regime_path=regime, verdict="go")
+    assert ok_go_asset is True
+
     # Circuit breaker: ekuitas turun >= 5% dari awal hari UTC -> tripped
     day1 = datetime(2026, 11, 19, 1, 0, tzinfo=timezone.utc)
     tripped0, _ = walt_bot.check_daily_circuit_breaker(15.50, now_utc=day1, regime_path=regime, send_alert=False)
