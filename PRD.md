@@ -1,23 +1,23 @@
 # Product Requirements Document (PRD)
 # Walt Perps Trading Bot — Phased Evolution: Owner Core & Multi-User SaaS Platform
 
-**Version:** 2.1 (Phased Roadmap Edition)  
-**Date:** 2026-11-14  
+**Version:** 2.2 (Production Alignment — 2026-11-22)  
+**Date:** 2026-11-22  
 **Platform Owner & Lead Architect:** Rizal Dicky  
-**Status:** In Implementation (Fase 1: Immediate / Fase 2: SaaS Expansion)  
+**Status:** Production Live (Fase 1 Owner Core Aktif + OAK MCP + SFT Data Collection / Fase 2 SaaS Expansion)  
 
 ---
 
 ## 1. Executive Summary
 
-Dokumen ini mendefinisikan peta jalan pengembangan **Walt Perps Trading Bot** melalui pendekatan bertahap (*phased rollout*). Bot ini berfokus pada strategi *funding rate arbitrage* (delta-neutral dan directional funding capture) di platform Walt (`walletbot.me`) dengan perbantuan riset kecerdasan buatan kolaboratif (**Dual-AI Consensus: Alibaba Cloud Qwen & Google Gemini**).
+Dokumen ini mendefinisikan peta jalan pengembangan **Walt Perps Trading Bot** melalui pendekatan bertahap (*phased rollout*). Bot ini berfokus pada strategi *funding rate arbitrage* (delta-neutral dan directional funding capture) di platform Walt (`walletbot.me`) dengan perbantuan riset kecerdasan buatan kolaboratif lintas vendor (**Multi-Vendor AI Research Swarm: GLM-5.2-Fast, GLM-5.3-Prime, MiniMax M3, Claude Haiku 5.5 + CRO Meta-Aggregator `glm-5.3`**) yang diperkaya data real-time dari **OAK Research Remote MCP Server** (`https://oakresearch.io/api/mcp`).
 
 Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersialisasi masa depan**, peta jalan dibagi menjadi 2 fase utama:
 
-1. **Fase 1: Owner-Dedicated Core Bot (Infrastruktur Eksisting & Segera Diterapkan)**  
-   - Menggunakan infrastruktur eksisting yang sudah berjalan: Python 3.12, GitHub Actions cloud cron, Dual-AI Consensus (Qwen-Plus + Google Gemini via `DASHSCOPE_API_GEMINI_KEY`), dan notifikasi Telegram terarah.  
+1. **Fase 1: Owner-Dedicated Core Bot (Produksi Live)**  
+   - Menggunakan infrastruktur Python 3.14, GitHub Actions cloud runners + Google Cloud Scheduler, OAK Research Remote MCP Server (`oak_mcp_client.py`), Swarm AI (`glm-5.3` CRO Meta-Aggregator via `DASHSCOPE_API_KEY` + ClassAI Router via `DASHSCOPE_API_GEMINI_KEY`), serta pengumpulan dataset SFT `<think>` otomatis ke Google Sheet tab **`Data Training`** (`training_data.py`).  
    - **Eksklusif untuk Platform Owner (Rizal Dicky)**: Menghasilkan *passive income* harian ($50–$100/bulan) dari modal pribadi, memverifikasi stabilitas eksekusi Walt API, dan memperketat risk guardrails dengan biaya infrastruktur $0 (memanfaatkan GitHub Actions free tier).  
-   - **Status:** **Prioritas Utama — Siap dan Perlu Segera Diterapkan.**
+   - **Status:** **LIVE di Produksi (Terverifikasi CI + Webhook v2 + OAK MCP).**
 
 2. **Fase 2: Multi-User SaaS, Sistem Bisnis & Dashboard Interaktif (Komersialisasi Publik)**  
    - Membuka akses bot kepada pengguna publik (*Subscribers / Retail Traders*) dengan arsitektur *non-custodial* (OAuth 2.0 PKCE, tanpa akses private key).  
@@ -33,11 +33,11 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
 |---|---|---|
 | **Target Pengguna** | 1 Orang (Platform Owner: Rizal Dicky) | Multi-User (Public Subscribers & Traders) |
 | **Infrastruktur Komputasi** | GitHub Actions Cloud Runners (Ubuntu) + Local Python | Firebase Cloud Functions Gen 2 / Cloud Run + Node.js 20 |
-| **Bahasa & Runtime** | Python 3.12 (`walt_bot.py`, `token_manager.py`) | TypeScript / Node.js 20 + Client WebApp (React/Vite) |
-| **Mekanisme Scheduler** | GitHub Actions Cron (`.github/workflows/*.yml`) | Google Cloud Scheduler + Pub/Sub (WIB Precision) |
-| **Basis Data & State** | Statless / GitHub Actions Artifacts / Memory Cache | Google Cloud Firestore (Multi-Tenant Document Store) |
-| **Kredensial & Secrets** | GitHub Repository Secrets & Local `.env` | AES-256-GCM Vault di Firestore + Google Cloud KMS |
-| **Riset AI (Swarm Voting + Aggregator)** | 4 Voters balanced vendor: 2 Qwen (turbo + plus) + 2 Gemini (flash + pro) → Qwen-max meta-aggregator | *Shared Swarm Engine* (1 pemanggilan global untuk semua user, hasil di-broadcast) |
+| **Bahasa & Runtime** | Python 3.14 (`walt_bot.py`, `token_manager.py`, `oak_mcp_client.py`) | TypeScript / Node.js 20 + Client WebApp (React/Vite) |
+| **Mekanisme Scheduler** | Google Cloud Scheduler + GitHub Actions (`.github/workflows/*.yml`, Gear 0–3) | Google Cloud Scheduler + Pub/Sub (WIB Precision) |
+| **Basis Data & State** | GitHub Actions Cache + Google Sheets Webhook v2 (5 tab incl. `Data Training`) | Google Cloud Firestore (Multi-Tenant Document Store) |
+| **Kredensial & Secrets** | GitHub Repository Secrets & Local `.env` (auto-rotate Walt & OAK MCP) | AES-256-GCM Vault di Firestore + Google Cloud KMS |
+| **Riset AI (Swarm Voting + Aggregator)** | 4 Voters lintas vendor (`glm-5.2-fast-preview`, `glm-5.3-prime`, `minimax-m3`, `claude-haiku-5.5`) + OAK MCP $\to$ CRO `glm-5.3` | *Shared Swarm Engine* (1 pemanggilan global untuk semua user + model SFT Fase 2) |
 | **Antarmuka Utama** | Notifikasi Broadcast Telegram ke `TELEGRAM_CHAT_ID` | **Dashboard Interaktif (Telegram Mini App)** + Menu Bot |
 | **Sistem Bisnis / Billing**| $0 (Self-funded dari hasil funding rate pribadi) | Pembayaran Otomatis: QRIS, Crypto (USDT), Telegram Stars |
 | **Koneksi Walt** | 1 Akun Walt Owner via OAuth Refresh Token | Multi-Tenant Dynamic OAuth PKCE per Pengguna |
@@ -49,7 +49,7 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
 ## 3. Fase 1: Owner-Dedicated Core Bot (Infrastruktur Eksisting)
 
 ### 3.1 Prinsip Desain Fase 1
-- **Zero Rework / Zero Latency:** Memaksimalkan codebase Python yang telah selesai (`walt_bot.py`, `token_manager.py`, `llm_research.py`, `notifier.py`, `setup_walt_oauth.py`).
+- **Zero Rework / Zero Latency:** Memaksimalkan codebase Python yang telah berjalan di produksi (`walt_bot.py`, `token_manager.py`, `oak_mcp_client.py`, `llm_research.py`, `training_data.py`, `notifier.py`, `sheet_logger.py`).
 - **Zero Cost:** Sepenuhnya beroperasi di atas kuota gratis GitHub Actions (2.000 menit/bulan untuk private repository) dan free credits DashScope.
 - **Fokus Tunggal:** Menangkap peluang funding rate arbitrage secara konsisten untuk portofolio Owner dengan manajemen risiko konservatif.
 
@@ -61,25 +61,24 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
 └────────────────────────────────────────────────────────────────────────────────────────┘
 
     Google Cloud Scheduler & GitHub Actions
-    ├─ 07:17 & 19:17 WIB (daily-scan.yml — Scan & Instant Auto-Execute GO/HALF)
+    ├─ 07:17 & 19:17 WIB (daily-scan.yml — Scan, OAK MCP + Swarm & Execute)
     ├─ Tiap 10 Menit (risk-monitor.yml — 4-Layer Risk & Smart Fast-Exit Idle <2s)
-    ├─ Tiap 2 Jam @ menit 43 (market-execute.yml — 24/7 Saham US & Komoditas)
-    └─ Tiap 2 Jam @ menit 11 (crypto-execute.yml — Crypto Bluechip Execution)
+    ├─ Tiap 2 Jam @ menit 43 (market-execute.yml — Gear 0-3: Saham US [13:30-21:00 UTC] & Komoditas 24/7)
+    └─ Tiap 2 Jam @ menit 11 (crypto-execute.yml — Gear 0-3: Crypto Bluechip 24/7)
                    │
                    ▼
      ┌───────────────────────────┐
      │  GitHub Actions Runner    │
-     │  (Ubuntu / Python 3.12)   │
+     │  (Ubuntu / Python 3.14)   │
      └─────────────┬─────────────┘
                    │
          [Inject Secrets via Env]
-         • WALT_CLIENT_ID
-         • WALT_REFRESH_TOKEN (Auto-Sync via Libsodium)
-         • DASHSCOPE_API_KEY
-         • DASHSCOPE_API_GEMINI_KEY
-         • TELEGRAM_BOT_TOKEN
-         • TELEGRAM_CHAT_ID
-         • GOOGLE_SHEET_WEBHOOK_URL
+         • WALT_CLIENT_ID & WALT_REFRESH_TOKEN (Auto-Sync via Libsodium)
+         • OAK_MCP_CLIENT_ID & OAK_MCP_REFRESH_TOKEN (Auto-Sync Rotated RT)
+         • DASHSCOPE_API_KEY (DashScope: GLM-5.3 Agg + V1/V2)
+         • DASHSCOPE_API_GEMINI_KEY (ClassAI Router: V3 MiniMax M3 + V4 Haiku 5.5)
+         • TELEGRAM_BOT_TOKEN & TELEGRAM_CHAT_ID
+         • GOOGLE_SHEET_WEBHOOK_URL & GOOGLE_SHEET_ID
                    │
                    ▼
      ┌───────────────────────────┐
@@ -87,10 +86,11 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
      │                           │
      │   1. token_manager.py ────┼───> Walt OAuth Server (Get/Refresh Access Token)
      │   2. Walt Perps API ──────┼───> Fetch Contracts, Real-Time Positions & Funding
-     │   3. llm_research.py ─────┼───> Dual-AI Swarm: Qwen-Plus + Gemini-Pro (4 Voters)
-     │   4. Execute Position ────┼───> Dynamic Slot (5-15) & Conviction Sizing (@ 2x Lev)
-     │   5. notifier.py ─────────┼───> Telegram Bot API
-     │   6. sheet_logger.py ─────┼───> Google Sheets Logging
+     │   3. oak_mcp_client.py ───┼───> OAK Research Remote MCP (Macro, Cal, News, Asset)
+     │   4. llm_research.py ─────┼───> 4-Voter Swarm + GLM-5.3 CRO Meta-Aggregator
+     │   5. training_data.py ────┼───> Log SFT <think> JSONL ke Tab 'Data Training'
+     │   6. Execute Position ────┼───> Dynamic Slot (5-15) & Conviction Sizing (@ 2x Lev)
+     │   7. notifier.py & sheets ┼───> Telegram Bot API & Google Sheets Webhook v2
      └───────────────────────────┘
                    │
                    ▼
@@ -104,11 +104,10 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
 
 ### 3.3 Jadwal & Spesifikasi Eksekusi Fase 1
 1. **Daily Scan (`daily-scan.yml` — 07:17 & 19:17 WIB / 00:17 & 12:17 UTC via `walt-daily-scan` Scheduler):**
-   - Mengambil seluruh 130 kontrak perpetual di Walt.
-   - Menyaring volume 24 jam > $1.000.000 USD dan `|funding_daily| >= 0.50%/hari`.
-   - Menghitung *annualized funding rate* untuk SHORT (funding positif tinggi) dan LONG (funding negatif ekstrim).
-   - Memanggil Swarm AI (`llm_research.py` — Qwen + Gemini 4-voter) untuk menganalisis sentimen berita & makro aset pilihan.
-   - Eksekusi instan order berstatus GO / HALF dan menyimpan database ke Google Sheet & notifikasi Telegram.
+   - Mengambil seluruh kontrak perpetual di Walt (disaring ke 31 aset diizinkan: 18 Saham US, 3 Komoditas, 10 Crypto Tier-1).
+   - Memfilter Saham US (`ALLOWED_STOCKS`) ke **jam bursa reguler NYSE/NASDAQ (`Senin–Jumat 13:30–21:00 UTC`, `US_STOCK_HOURS_ONLY=true`)**; Komoditas dan Crypto diproses 24/7.
+   - Mengambil konteks real-time dari **OAK Research Remote MCP Server** (`oak_mcp_client.py`) lalu memanggil 4-Voter Swarm + CRO `glm-5.3` (`llm_research.py`) dan mencatat dataset `<think>` ke tab **`Data Training`** (`training_data.py`).
+   - Eksekusi instan order berstatus `GO` / `HALF` (dimana **`'GO'` otomatis melewati batas frekuensi 24 jam `E4`**) dan menyimpan database ke `Daily_Scans` (30 kolom) & Telegram.
 2. **Risk Monitor (`risk-monitor.yml` — Dinamis 5–10 Menit / 6x–12x per Jam via `walt-risk-monitor` Scheduler):**
    - **Opsi A Smart Fast-Exit Idle:** Jika 0 posisi aktif dan tidak ada perubahan snapshot penutupan, proses langsung selesai (*fast-exit*) dalam <2 detik sehingga hemat kuota runner hingga 95%.
    - **Dynamic Adaptive Cadence (5 Menit vs 10 Menit):**
@@ -120,27 +119,28 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
      - **Lapis 2:** Funding Integrity dengan **Hysteresis 0.1%/hari** (*emergency close* jika funding berlawanan arah $\ge 0.1\%$/hari, atau geser SL ke breakeven jika $< 0.1\%$/hari).
      - **Lapis 3:** *Deprecated* (digantikan oleh SL baseline 1.5%).
      - **Lapis 4:** **True Zero-Risk Trailing Tiers:** Profit $\ge +0.80\% \to$ lock SL di `Entry + 0.35%` (`lock_0035`); Profit $\ge +1.40\% \to$ lock SL di `Entry + 0.85%` (`lock_0085`); Profit $\ge +2.00\% \to$ Trailing Stop dinamis `0.60%`.
-3. **Market Execute (`market-execute.yml` — Dinamis 1 Jam / 2 Jam dengan Calmed Adaptive Engine):**
-   - Berjalan 24/7 memanfaatkan likuiditas perpetual synthetic Walt dengan **Calmed Adaptive Execution (`evaluate_execution_gear`)**:
-     - **Gear 2 (Aktif 1 Jam):** Aktif jika terdapat $\ge 3$ peluang funding $\ge 0.5\%$/hari atau $\ge 2$ peluang ekstrem $\ge 0.8\%$/hari.
-     - **Gear 1 (Konservatif 2 Jam):** Aktif pada kondisi normal/sepi lainnya agar posisi berkesempatan memanen funding tanpa *over-trading*.
-     - **Gear 0 (Smart Idle Gatekeeper):** Langsung *fast-exit* dalam <2 detik tanpa memanggil AI jika slot posisi sudah penuh.
-   - **3-Hour Re-Entry Cooldown & Dynamic Slot Elasticity:** Aset yang baru ditutup dalam 3 jam terakhir otomatis dilewati. Kuota slot elastis 5–15 slot berdasarkan Total Ekuitas dan pembobotan margin berbasis keyakinan (hard ceiling 15% ekuitas).
-4. **Crypto Execute (`crypto-execute.yml` — Dinamis 1 Jam / 2 Jam via Cloud Scheduler):**
-   - Modul mandiri untuk capture yield 10 crypto bluechip (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `AVAX`, `SUI`, `LINK`, `NEAR`, `AAVE`) dengan mekanisme **Calmed Adaptive (1h / 2h)** dan **3-Hour Re-Entry Cooldown** yang identik.
+3. **Market Execute (`market-execute.yml` — Sistem 4-Tier Execution Gear `0..3`):**
+   - Saham US (`ALLOWED_STOCKS`) hanya diproses saat **jam bursa reguler NYSE/NASDAQ (`Senin–Jumat 13:30–21:00 UTC`, `US_STOCK_HOURS_ONLY=true`)**, sementara Komoditas (`XAU`, `XAG`, `BRENTOIL`) aktif 24/7 memakai **4-Tier Execution Gear (`evaluate_execution_gear`)**:
+     - **Gear 0 (`GEAR_0_IDLE_2X_US` — `0` peluang `'GO'`):** Berjalan maksimal **2 kali selama jam operasional Saham AS** (`13:30–21:00 UTC`, interval `225` menit).
+     - **Gear 1 (`GEAR_1_CONSERVATIVE_120M` — `< 2` peluang `'GO'`):** Interval `120` menit (2 jam) agar posisi berkesempatan memanen funding tanpa *over-trading*.
+     - **Gear 2 (`GEAR_2_ACTIVE_60M` — `2..5` peluang `'GO'`):** Interval `60` menit (1 jam) aktif menangkap peluang kuat.
+     - **Gear 3 (`GEAR_3_FULL_RESEARCH_60M` — `> 5` peluang `'GO'` atau `GEAR_3_FULL_RESEARCH=true`):** Interval `60` menit (1 jam) + membuka izin **riset & analisa AI penuh untuk setiap keputusan trading** (mengangkat cap `max_otf_calls` & `CRYPTO_RESEARCH_TOP_N`).
+   - **3-Hour Re-Entry Cooldown, `'GO'` Bypass E4, & Dynamic Slot Elasticity:** Verdict **`GO`** melewati batas frekuensi `2/aset/24j` & `8/hari` (sirkuit `-5%`, cooldown 3 jam, batas slot 5–15, & buffer kas 15% tetap ketat).
+4. **Crypto Execute (`crypto-execute.yml` — 4-Tier Execution Gear `0..3`, 24/7 via Cloud Scheduler):**
+   - Modul mandiri untuk 10 crypto bluechip (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `AVAX`, `SUI`, `LINK`, `NEAR`, `AAVE`) dengan sistem **4-Tier Execution Gear** (`Gear 0` `720m` = 2x/hari; `Gear 1` `120m`; `Gear 2` `60m`; `Gear 3` `60m` Full Research) + *3-hour re-entry cooldown*.
    - Strict altcoin exclusion: token spekulatif dan memecoin di-blacklist total.
    - Asymmetric R:R TP +2.0% & SL 1.5% untuk memberi ruang napas *funding carry*.
 5. **Watchdog & CI Safety (`watchdog.yml` & `tests.yml`):**
    - **Cloud Scheduler Satu-Satunya Trigger Trading:** Blok `schedule:` dihapus dari 4 workflow trading agar tidak terjadi eksekusi dobel/terlambat. Verifikasi job Cloud Scheduler dilakukan dengan `gcloud scheduler jobs list --location=asia-southeast2`.
    - **Watchdog (`watchdog.yml`, `0 * * * *`, timeout `3m`):** Mengecek apakah `Walt Risk Monitor` sukses dalam 30 menit terakhir; jika tidak, mengirim alert Telegram dan memicu 1x `workflow_dispatch` fallback (tanpa mengakses Walt API).
    - **Timeout & Guard 6 Menit:** `risk-monitor` memakai `timeout-minutes: 20` (lainnya `15`), dengan guard di `walt_bot.py` yang melewati *sub-cycle* & *adaptive execute* jika sisa waktu `< 6 menit` sebelum `JOB_TIMEOUT_MIN`.
-   - **Cache Tahan Error & Integritas Data (`D1`–`D4`):** Memakai pasangan `actions/cache/restore@v4` + `save@v4` (`if: always()`), cache terpisah `walt-snapshot-*` eksklusif untuk `risk-monitor.yml`, dedupe penutupan berbasis unique `Position ID` (`logs/closed_ids.json`), pelabelan jujur `UNKNOWN` bila data close exchange tidak ada, pengelolaan header tunggal di Apps Script `doPost` (+ fungsi manual `cleanupClosedPositions()`), kolom `Strategy Version`, serta `LOG_REDACT=true` + header `x-goog-api-key` untuk Gemini (`K1`).
-   - **Gerbang Kualitas Entry & Proteksi Modal (`E1`–`E5`):** `HALF` di bawah floor `$2.50` → `SKIP`, `P5 >= max_p5_risk` (`0.70`) → `SKIP`, riset basi `> max_research_age_hours` (`6` jam) diabaikan, batas `2 entry/aset/24h` & `8 entry/24h`, *daily circuit breaker* `-5%` ekuitas UTC, serta gerbang ekonomi `expected_funding >= 1.5 × (fee + slippage)` + metrik *median hold time* pada `stats`.
+   - **Cache Tahan Error & Integritas Data (`D1`–`D4`):** Memakai pasangan `actions/cache/restore@v4` + `save@v4` (`if: always()`), cache terpisah `walt-snapshot-*` eksklusif untuk `risk-monitor.yml`, dedupe penutupan berbasis unique `Position ID` (`logs/closed_ids.json`), pelabelan jujur `UNKNOWN` bila data close exchange tidak ada, pengelolaan header tunggal di Apps Script `doPost` (+ fungsi manual `cleanupClosedPositions()`, versi produksi `2026-11-21.1` untuk 5 tab termasuk `Data Training`), kolom `Strategy Version`, serta `LOG_REDACT=true` + header `Authorization: Bearer ...` (`K1`).
+   - **Gerbang Kualitas Entry & Proteksi Modal (`E1`–`E5`):** `HALF` di bawah floor `$2.50` → `SKIP`, `P5 >= max_p5_risk` (`0.70`) → `SKIP`, riset basi `> max_research_age_hours` (`6` jam) diabaikan, batas `2 entry/aset/24h` & `8 entry/24h` untuk `HALF` (**verdict `'GO'` otomatis melewati batas frekuensi 24h**), *daily circuit breaker* `-5%` ekuitas UTC, serta gerbang ekonomi `expected_funding >= 1.5 × (fee + slippage)` + metrik *median hold time* pada `stats`.
    - **Sinkronisasi Konfigurasi Strategi Bersama:** Telegram `/set_strategy` menyinkronkan parameter aman (tervalidasi `STRATEGY_PARAM_SPECS`) ke GitHub Repository Variable `STRATEGY_CONFIG_JSON` untuk dibaca `walt_bot.py` pada run berikutnya (tanpa mengekspor `user_strategies.json` / ID Telegram).
-   - **CI Test (`tests.yml`):** Menjalankan `pytest -q` dan validasi sintaks YAML pada setiap push/PR ke `main` di concurrency terpisah (`walt-tests`).
+   - **CI Test (`tests.yml`):** Menjalankan `pytest -q` (`608 passed`) dan `tools/sanitize_gate.py` pada setiap push/PR ke `main` di concurrency terpisah (`walt-tests`).
 
 ### 3.4 Langkah Penerapan Segera (Fase 1 Action Plan)
-- [x] Pastikan GitHub Secret terkonfigurasi lengkap di repository (`WALT_CLIENT_ID`, `WALT_REFRESH_TOKEN`, `DASHSCOPE_API_KEY`, `DASHSCOPE_API_GEMINI_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GOOGLE_SHEET_WEBHOOK_URL`, `GH_PAT`).
+- [x] Pastikan GitHub Secret terkonfigurasi lengkap di repository (`WALT_CLIENT_ID`, `WALT_REFRESH_TOKEN`, `OAK_MCP_CLIENT_ID`, `OAK_MCP_REFRESH_TOKEN`, `DASHSCOPE_API_KEY`, `DASHSCOPE_API_GEMINI_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `GOOGLE_SHEET_WEBHOOK_URL`, `GH_PAT`).
 - [x] Lakukan verifikasi uji coba manual (*manual trigger*) untuk workflow `daily-scan.yml`, `risk-monitor.yml`, `market-execute.yml`, dan `crypto-execute.yml`.
 - [x] Pasang Google Cloud Scheduler Bridge (Jakarta `asia-southeast2`) untuk trigger tepat detik tanpa delay cron GitHub.
 - [x] Implementasikan Asymmetric R:R TP (+2.0%/+2.5%) & Uniform SL 1.5% per Asset Class, Windfall Rule 2.5x, True Zero-Risk Trailing Tiers (`+0.35%` / `+0.85%` / `0.60%`), dan 3-Hour Re-Entry Cooldown.
@@ -148,35 +148,32 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
 - [x] Hubungkan real-time logging ke Google Sheets via Google Apps Script Webhook.
 - [x] Aktifkan mode eksekusi riil pada saldo terdedikasi di Walt Perps.
 
-### 3.5 Arsitektur Riset AI: Swarm Voting + Qwen Aggregator
+### 3.5 Arsitektur Riset AI: OAK MCP Enrichment + 4-Voter Swarm + GLM-5.3 CRO Meta-Aggregator
 
-Sistem analisis AI berbasis **4 Voter + 1 Meta-Aggregator** yang dipakai sejak Fase 1 (shared untuk Fase 2).
+Sistem analisis AI berbasis **OAK Research MCP + 4 Voter Lintas Vendor + 1 CRO Meta-Aggregator (`glm-5.3`)** yang aktif di produksi Fase 1 (dan mengumpulkan dataset SFT `<think>` untuk Fase 2 di tab `'Data Training'`).
 
 #### 3.5.1 Prinsip Desain
-- **Standardized Validation Parameters:** Semua 4 voter menilai **7 parameter yang SAMA** (P1-P7). Perbedaannya cuma di **reasoning style** masing-masing voter, bukan di input/metric yang dinilai.
-- **Apples-to-Apples Comparability:** Dengan parameter sama, aggregator bisa compare per-parameter dari tiap voter (bukan free-form reasoning yang susah dibandingkan).
-- **Swarm Voting:** Keempat model bekerja paralel, masing-masing kasih P1-P7 score + reasoning per parameter.
-- **Divisi Vendor Balance 50/50:** 2 model Qwen (DashScope: turbo + plus) + 2 model Gemini (AI Studio: flash + pro). Bias vendor tereliminasi sempurna karena jumlah model seimbang dari dua ekosistem berbeda.
-- **Meta-Aggregator (per-parameter analysis):** Qwen-max analisa consensus/divergence per parameter, identifikasi voter paling kredibel per dimensi, lalu produce final weighted score.
-- **Explainability Tinggi:** Setiap keputusan dapat ditelusuri ke parameter spesifik dan voter mana yang paling berpengaruh di parameter itu.
+- **OAK Research MCP Grounding (`oak_mcp_client.py`):** Sebelum voter menganalisa, bot menyuntikkan blok `[DATA REAL-TIME OAK RESEARCH MCP]` berisi *market overview*, kalender makro/earnings/unlocks 7 hari (`get_calendar`), berita utama (`get_news`), serta metrik aset (`get_crypto`/`get_tradfi`) dari `https://oakresearch.io/api/mcp`.
+- **Standardized Validation Parameters:** Semua 4 voter menilai **7 parameter yang SAMA** (P1-P7). Perbedaannya pada kekuatan model lintas vendor (**Zhipu GLM**, **MiniMax M3**, dan **Claude Haiku 5.5**) dan gaya reasoning per peran.
+- **Apples-to-Apples Comparability:** Dengan parameter sama, aggregator bisa compare per-parameter dari tiap voter dan mengidentifikasi outlier berbasis data MCP.
+- **CRO Meta-Aggregator (`glm-5.3`):** Pemenang #1 **OAK Trading Benchmark** (`+29.4%`, 0 likuidasi) melalui DashScope bertindak sebagai Chief Risk Officer yang memproduksi `final_score` berbobot.
+- **SFT Dataset Pipeline (`training_data.py`):** Setiap keputusan riset yang lolos validasi otomatis disusun dalam format chat-messages `<think>...</think>` + JSON ke Google Sheet tab **`Data Training`** (`12` kolom, target $\ge 1.000$ baris) untuk persiapan fine-tuning Fase 2.
 
-#### 3.5.2 Konfigurasi Voter (2 Qwen + 2 Gemini — Vendor Balance 50/50)
+#### 3.5.2 Konfigurasi Voter Produksi Fase 1 (Multi-Vendor OAK Benchmark Panel)
 
-| Voter | Model | Vendor / API | Role | Bobot Dasar | Keunggulan |
+| Voter | Model | Vendor / Endpoint | Role | Bobot Dasar | Keunggulan |
 |---|---|---|---|---|---|
-| **V1** | `qwen-turbo` | Alibaba / DashScope Intl | Quick Signal | 0.25 | Cepat, surface-level sentiment |
-| **V2** | `qwen-plus` | Alibaba / DashScope Intl | Balanced Analyst | 0.25 | Balanced depth-vs-speed |
-| **V3** | `gemini-flash-latest` (env `DASHSCOPE_API_GEMINI_KEY`) | Google / AI Studio | Realtime Web | 0.25 | Google Search + current events (cepat) |
-| **V4** | `gemini-pro-latest` (env `DASHSCOPE_API_GEMINI_KEY`) | Google / AI Studio | Deep Reasoner | 0.25 | Deep reasoning + multimodal context |
+| **V1** | `glm-5.2-fast-preview` (`DASHSCOPE_MODEL_V1`) | Alibaba DashScope (`DASHSCOPE_API_KEY`) | Fast Validator | 0.25 | Super cepat & hemat untuk scanning polaritas awal |
+| **V2** | `glm-5.3-prime` (`DASHSCOPE_MODEL`) | Alibaba DashScope (`DASHSCOPE_API_KEY`) | Alpha Signal Analyst | 0.25 | Varian #1 OAK Trading Benchmark (`+29.4%`, 0 likuidasi) |
+| **V3** | `minimax-m3` (`GEMINI_MODEL`) | ClassAI Router (`DASHSCOPE_API_GEMINI_KEY`) | Conservative Risk Guard | 0.25 | #7 OAK dengan Max Drawdown terendah (`-6.5%`, 0 liq, biaya sangat hemat) |
+| **V4** | `claude-haiku-5.5` (`GEMINI_MODEL_V4`) | ClassAI Router (`DASHSCOPE_API_GEMINI_KEY`) | Fast Multi-Angle Reasoner | 0.25 | Latensi ~1.84s, konteks 1M, tajam untuk causal & contrarian check |
 
-**Pemisahan vendor:**
-- 2 model Alibaba (Qwen) → kuat di analisa teks + Asian market context
-- 2 model Google (Gemini) → kuat di realtime search + current events US market
-- Vendor bias terseimbangkan 50/50, nggak ada pihak dominan
+*(Opsional: Variabel `MULTI_OPP_GLM_FALLBACK=true` mengizinkan V3/V4 dialihkan ke GLM DashScope saat peluang `> 1`; default produksi `false` agar keragaman 3 vendor selalu aktif.)*
 
-#### 3.5.3 Konfigurasi Aggregator
-- **Model:** `qwen-max` (via DashScope Intl — Alibaba)
-- **Alasan Pilih Qwen-max:** Reasoning strong, cost $0.0024/1K token, netral di meta-level (tidak ikut voting)
+#### 3.5.3 Konfigurasi CRO Meta-Aggregator
+- **Model Utama:** `glm-5.3` (`DASHSCOPE_MODEL_AGG`, via Alibaba DashScope `DASHSCOPE_API_KEY` — #1 OAK Trading Benchmark Winner)
+- **Rantai Fallback:** DashScope (`glm-5.3-prime` $\to$ `glm-5.2-fast-preview` $\to$ `qwen-plus` $\to$ `qwen-flash`) $\to$ ClassAI Router (`claude-opus-5.5` via `CLASSAI_MODEL_AGG` $\to$ `gpt-6.1-sol` via `CLASSAI_MODEL_AGG_FALLBACK`) $\to$ sintesis deterministik rule-based P1–P7.
+- **Alasan Pemilihan:** Karena seluruh data fundamental/makro telah valid dari MCP OAK Research, voter dapat tetap ultra-hemat sementara CRO Meta-Aggregator memakai model juara trading langsung dari OAK Benchmark (`glm-5.3`) untuk menjaga disiplin eksekusi dan nol likuidasi.
 - **Input:** Headlines + context + 4 voter verdicts (score + reasoning)
 - **Output JSON:**
   ```json
@@ -274,36 +271,35 @@ Score 7 parameter berikut (HARUS output JSON valid):
 
 | Voter | `VOTER_ROLE` | `VOTER_PERSPECTIVE` | Kekhususan Reasoning |
 |---|---|---|---|
-| **V1 Qwen-turbo** | "Quick signal analyst" | "Fokus keyword scanning dan surface pattern, cepat" | Kekuatan di P1-P2 (tone polarity + signal strength) |
-| **V2 Qwen-plus** | "Balanced equity analyst" | "Fokus source credibility + narrative consistency" | Kekuatan di P3 (source cred) + P1 nuance |
-| **V3 Gemini-flash** | "Realtime market validator (dengan Google Search grounding)" | "Gunakan Google Search untuk cek breaking news 24h dan upcoming catalysts" | Kekuatan di P4 (momentum 48h) + P5 (risk catalysts) |
-| **V4 Gemini-pro** | "Senior portfolio manager" | "Deep causal reasoning, pattern recognition, contrarian analysis" | Kekuatan di P6 (contrarian) + P7 (historical pattern) |
+| **V1 (`glm-5.2-fast-preview`)** | "Fast signal analyst" | "Fokus keyword scanning & polaritas permukaan, cepat & hemat" | Kekuatan di P1-P2 (tone polarity + signal strength) |
+| **V2 (`glm-5.3-prime`)** | "Alpha signal & narrative analyst" | "Fokus kredibilitas sumber, konteks OAK MCP & konsistensi narasi (#1 OAK Benchmark)" | Kekuatan di P3 (source cred) + P1 nuance |
+| **V3 (`minimax-m3`)** | "Conservative risk guard" | "Verifikasi breaking catalyst & proteksi modal (#7 OAK Max DD -6.5%, 0 likuidasi)" | Kekuatan di P4 (momentum 48h) + P5 (risk catalysts) |
+| **V4 (`claude-haiku-5.5`)** | "Fast multi-angle reasoner" | "Causal reasoning cepat (1.84s, 1M ctx), pattern recognition & contrarian analysis" | Kekuatan di P6 (contrarian) + P7 (historical pattern) |
 
-##### Contoh Isi Prompt untuk V3 (Gemini-flash)
+##### Contoh Isi Prompt untuk V3 (`minimax-m3` via ClassAI Router)
 ```
 [SYSTEM]
-Kamu realtime market validator (dengan Google Search grounding).
-Gunakan Google Search untuk cek breaking news 24h dan upcoming catalysts.
+Kamu conservative risk guard (`minimax-m3`). Gunakan [DATA REAL-TIME OAK RESEARCH MCP]
+dan headlines untuk memverifikasi katalis risiko 24-48h serta proteksi modal.
 Score 7 parameter validasi dengan JSON valid.
 
 [USER]
 Ticker: NVDA
 Sektor: AI Chips / Semiconductor
+[DATA REAL-TIME OAK RESEARCH MCP]: <market_overview, 7-day calendar, news, get_tradfi(NVDA)>
 Headlines 7 hari: [list]
 Harga sekarang: $485.30
 
 Score 7 parameter P1-P7 dengan reasoning dan metadata (schema sama seperti voter lain).
 ```
 
-Hasilnya: V3 akan score P5 (risk catalysts) dengan data real-time yang lebih update (Fed statement, earnings, SEC filings kemarin), sementara V1 cuma pakai headlines 7 hari.
-
-Tapi **schema outputnya sama persis**. Jadi aggregator bisa compare `V1.P5.score vs V3.P5.score` langsung.
+Hasilnya: setiap voter mengevaluasi headlines sekaligus data real-time dari **OAK Research Remote MCP Server** dengan **schema output P1-P7 yang sama persis**. Aggregator dapat membandingkan `V1..V4` langsung per parameter.
 
 ---
 
-##### Voter 1 — Qwen-turbo (Quick Signal Analyst)
+##### Voter 1 — `glm-5.2-fast-preview` (Fast Signal Analyst)
 
-**Yang dicari:** Keyword sentiment, dominant tone, polarity cepat.
+**Yang dicari:** Keyword sentiment, dominant tone, polarity cepat berbiaya rendah.
 **Yang divalidasi:** Apakah sentimen jelas dari permukaan? Berapa banyak headline align?
 
 ```
@@ -327,21 +323,22 @@ Output JSON:
   "confidence": 0.0..1.0,
   "reasoning": "1 kalimat: dominant tone + jumlah headlines align",
   "key_keywords": ["surge", "upgrade", "beat"],
-  "voter": "V1_qwen_turbo"
+  "voter": "V1_glm_fast"
 }
 ```
 
 ---
 
-##### Voter 2 — Qwen-plus (Balanced Analyst)
+##### Voter 2 — `glm-5.3-prime` (Alpha Signal & Narrative Analyst — #1 OAK)
 
-**Yang dicari:** Sentimen + reasoning + source credibility + konsistensi.
-**Yang divalidasi:** Apakah sentimen punya rasional, bukan cuma keyword?
+**Yang dicari:** Sentimen + reasoning + source credibility + konsistensi narasi.
+**Yang divalidasi:** Apakah sentimen punya rasional kuat di balik data MCP?
 
 ```
 [SYSTEM]
-Kamu balanced equity analyst. Weight headlines berdasarkan source credibility
-(Reuters/WSJ/Bloomberg > blog random). Cari CONSISTENCY narrative.
+Kamu balanced equity/crypto alpha analyst (#1 OAK Trading Benchmark variant).
+Weight headlines berdasarkan source credibility (Reuters/WSJ/Bloomberg/OAK MCP > blog random).
+Cari CONSISTENCY narrative.
 
 [USER]
 Ticker: {ticker}
@@ -350,7 +347,7 @@ Headlines 7 hari dengan source:
 {headlines_with_sources}
 
 Tugas:
-1. Weighted sentiment: Reuters/WSJ 2x bobot, lain 1x
+1. Weighted sentiment: Reuters/WSJ/OAK MCP 2x bobot, lain 1x
 2. Cek konsistensi: ada headline yang kontradiksi?
 3. Short-term signal vs long-term thesis
 
@@ -359,72 +356,71 @@ Output JSON:
   "score": -1.0..+1.0,
   "confidence": 0.0..1.0,
   "reasoning": "2-3 kalimat: dominant narrative + support/contradict",
-  "credible_sources": ["Reuters: ...", "WSJ: ..."],
+  "credible_sources": ["Reuters: ...", "OAK MCP: ..."],
   "contradiction_found": true/false,
-  "voter": "V2_qwen_plus"
+  "voter": "V2_glm_prime"
 }
 ```
 
 ---
 
-##### Voter 3 — Gemini-flash (Realtime Web Validator) ⭐
+##### Voter 3 — `minimax-m3` (Conservative Risk Guard — #7 OAK Max DD -6.5%) ⭐
 
-**Yang dicari:** Breaking news dalam 24 jam, event market-moving, Twitter trends.
-**Yang divalidasi:** Apakah sentimen headlines kita masih valid, atau sudah ter-override event terkini?
+**Yang dicari:** Katalis risiko jangka pendek (FOMC, CPI, earnings, token unlock) dari `[DATA REAL-TIME OAK RESEARCH MCP]` dan proteksi downside.
+**Yang divalidasi:** Apakah ada ancaman mendadak 24-48 jam yang dapat membatalkan thesis carry?
 
 ```
 [SYSTEM]
-Kamu realtime market validator. Gunakan Google Search grounding untuk
-cari BREAKING NEWS (24 jam terakhir) yang mungkin ubah sentiment.
+Kamu conservative risk guard (#7 OAK Benchmark dengan Max Drawdown terendah -6.5%).
+Analisa [DATA REAL-TIME OAK RESEARCH MCP] dan headlines 24-48 jam terakhir.
 
 [USER]
 Ticker: {ticker}
-Headlines historis (7 hari): {headlines}
+Headlines historis (7 hari) + OAK MCP Brief: {headlines}
 
 Tugas:
-1. Search "{ticker} news today" dan "{ticker} breaking"
-2. Cari event dalam 24 jam: Fed announcement, earnings surprise,
-   geopolitical, insider selling, SEC filing
-3. Bandingkan: apakah event terkini CONFIRM atau CONTRADICT headlines?
-4. Cek X/Twitter trending (via search)
+1. Cek kalender OAK MCP (`get_calendar`): Fed/FOMC, CPI, earnings, token unlock
+2. Cek OAK News (`get_news`) & metrik aset (`get_crypto`/`get_tradfi`)
+3. Verifikasi apakah event terkini CONFIRM atau CONTRADICT thesis entry
+4. Nilai P5 (risk_catalysts) secara konservatif
 
 Output JSON:
 {
   "score": -1.0..+1.0,
   "confidence": 0.0..1.0,
-  "reasoning": "2 kalimat: berita 24h + apakah ubah sentiment",
+  "reasoning": "2 kalimat: berita 24h/OAK MCP + apakah ubah risiko",
   "breaking_news": [
-    {"time": "2h ago", "source": "CNBC", "headline": "...", "impact": "high"}
+    {"time": "2h ago", "source": "OAK/CNBC", "headline": "...", "impact": "high"}
   ],
   "sentiment_overridden": true/false,
-  "voter": "V3_gemini_flash"
+  "voter": "V3_minimax_m3"
 }
 ```
 
 ---
 
-##### Voter 4 — Gemini-pro (Deep Multi-Angle Reasoner)
+##### Voter 4 — `claude-haiku-5.5` (Fast Multi-Angle Reasoner — 1.84s, 1M Ctx)
 
 **Yang dicari:** Causal chain, second-order effects, contrarian signal, hidden risks.
-**Yang divalidasi:** Apakah narasi sustainable? Ada elephant in the room?
+**Yang divalidasi:** Apakah narasi sustainable? Ada crowded trade / elephant in the room?
 
 ```
 [SYSTEM]
-Kamu senior portfolio manager. Tugas: analisa MULTI-ANGLE dengan
-deep reasoning. Cari CAUSAL CHAIN dan HIDDEN RISKS yang voter dangkal miss.
+Kamu senior portfolio manager & fast multi-angle reasoner. Analisa CAUSAL CHAIN
+dan HIDDEN RISKS yang voter dangkal miss berbasis konteks penuh 1M token.
 
 [USER]
 Ticker: {ticker}
 Sektor: {sector}
 Market cap: {cap}
-Headlines 7 hari: {headlines}
-Related stocks performance: {peers}
+Headlines 7 hari + OAK MCP Data: {headlines}
+Related stocks/coins performance: {peers}
 
 Tugas:
 1. Kenapa sentimen bullish/bearish? (causal reasoning)
 2. Second-order effects: dampak ke sektor, suppliers, competitors
 3. Contrarian check: apakah positioning crowded?
-4. Hidden risk: lawsuit, SEC probe, insider selling pattern
+4. Hidden risk: lawsuit, SEC probe, token unlock besar, insider selling
 5. Historical analog: situasi serupa dulu outcome apa?
 
 Output JSON:
@@ -433,18 +429,18 @@ Output JSON:
   "confidence": 0.0..1.0,
   "reasoning": "3-4 kalimat: causal explanation + risk assessment",
   "causal_chain": ["...", "..."],
-  "hidden_risks": ["lawsuit pending", "insider selling"],
+  "hidden_risks": ["lawsuit pending", "token unlock"],
   "contrarian_signal": true/false,
   "historical_analog": "Similar to Q2 2024 when ...",
-  "voter": "V4_gemini_pro"
+  "voter": "V4_haiku_55"
 }
 ```
 
 ---
 
-#### 3.5.4b Aggregator — Qwen-max (Per-Parameter Analysis)
+#### 3.5.4b CRO Meta-Aggregator — `glm-5.3` (Per-Parameter Analysis)
 
-Aggregator **tidak** cuma rata-rata vote. Dia analisa per-parameter: siapa agree, siapa outlier, siapa paling kredibel per dimensi.
+Aggregator **tidak** cuma rata-rata vote. Dia analisa per-parameter berdasarkan konvensi CRO serta data real-time `[DATA REAL-TIME OAK RESEARCH MCP]`: siapa agree, siapa outlier, siapa paling kredibel per dimensi.
 
 ##### Pre-Processing (Rule-Based, Sebelum LLM Call)
 
@@ -485,15 +481,16 @@ for param in ["P1", "P2", ..., "P7"]:
     }
 ```
 
-##### LLM Prompt untuk Aggregator (Qwen-max)
+##### LLM Prompt untuk Aggregator (`glm-5.3` CRO)
 
-Aggregator LLM diberi per-parameter breakdown + raw voter reasoning, lalu diminta justifikasi mana yang trusted per parameter.
+Aggregator LLM diberi per-parameter breakdown + raw voter reasoning + konteks `[DATA REAL-TIME OAK RESEARCH MCP]`, lalu diminta justifikasi mana yang trusted per parameter.
 
 ```
 [SYSTEM]
-Kamu senior portfolio manager dan meta-analyst. Terima breakdown 7 parameter
-dari 4 voter (2 Qwen Alibaba + 2 Gemini Google). Analisa per-parameter:
-siapa paling kredibel, apa consensus, apa outlier.
+Kamu Chief Risk Officer (CRO) & senior portfolio meta-analyst (`glm-5.3`).
+Terima breakdown 7 parameter dari 4 voter lintas vendor (GLM-5.2, GLM-5.3-Prime,
+MiniMax M3, Claude Haiku 5.5) serta [DATA REAL-TIME OAK RESEARCH MCP].
+Analisa per-parameter: siapa paling kredibel, apa consensus, apa outlier.
 
 [USER]
 Ticker: {ticker}
@@ -503,20 +500,20 @@ Per-Parameter Breakdown (hasil pre-processing):
 {per_parameter_analysis}
 
 Raw Voter Reasoning (untuk konteks):
-V1 Qwen-turbo:
+V1 glm-5.2-fast-preview:
   P1: {score} — "{reasoning}"
   P2: {score} — "{reasoning}"
   ... (P3-P7)
-V2 Qwen-plus: ... (same structure)
-V3 Gemini-flash: ... (same structure, include breaking news if any)
-V4 Gemini-pro: ... (same structure, include contrarian + historical reasoning)
+V2 glm-5.3-prime: ... (same structure)
+V3 minimax-m3: ... (same structure, fokus risk/OAK MCP catalysts)
+V4 claude-haiku-5.5: ... (same structure, contrarian + historical reasoning)
 
 Tugas:
 1. Untuk tiap parameter SPLIT atau MIXED:
    - Identifikasi outlier voter dan ALASAN kenapa outlier
    - Decide: outlier lebih kredibel atau konsensus lebih kredibel untuk situasi ini?
-   - Contoh: V3 Gemini-flash score P5 = 0.7 jauh dari V1-V2 (0.2, 0.3).
-     V3 kredibel kalau alasannya "breaking Fed statement 2h ago".
+   - Contoh: V3 `minimax-m3` score P5 = 0.7 jauh dari V1-V2 (0.2, 0.3).
+     V3 kredibel kalau didukung data kalender/news OAK MCP.
      Konsensus (V1-V2 avg 0.25) kredibel kalau alasan V3 cuma noise.
 
 2. Untuk tiap parameter dengan STRONG/UNANIMOUS consensus:
@@ -581,21 +578,18 @@ Dengan input sebelumnya (V3 outlier di P4/P5, V4 outlier di P6), aggregator retu
 | **ML-ready** | Dataset `(P1-P7 scores, voter, outcome)` bisa dipakai train model akurasi voter per parameter |
 | **Debug friendly** | Kalau final decision salah, bisa identifikasi di parameter mana yang mis-scored |
 
-#### 3.5.4a Ringkasan Validasi Per-Voter (Quick Reference)
+#### 3.5.4a Ringkasan Validasi Per-Voter Produksi (Quick Reference)
 
 | Voter | Input Utama | Horizon | Depth | Fokus Validasi | Kelebihan Unik |
 |---|---|---|---|---|---|
-| **V1 Qwen-turbo** | Headlines | 7 hari | Shallow | Keyword sentiment | Kecepatan triage |
-| **V2 Qwen-plus** | Headlines + source + sector | 7 hari | Medium | Sentiment + reasoning | Balance speed+quality |
-| **V3 Gemini-flash** | Headlines + **Google Search grounding** | **24 jam** | Medium | Realtime events, breaking news | Satu-satunya voter yang tahu "jam ini" |
-| **V4 Gemini-pro** | Headlines + wider context + peers | 7-30 hari | Deep | Causal chain + hidden risks | Multi-angle reasoning |
+| **V1 `glm-5.2-fast-preview`** | Headlines + OAK MCP Brief | 7 hari | Cepat | Keyword sentiment & polaritas | Latensi sangat rendah & hemat |
+| **V2 `glm-5.3-prime`** | Headlines + OAK MCP (`get_crypto`/`get_tradfi`) | 7 hari | Tinggi | Alpha signal + narasi | #1 OAK Trading Benchmark (+29.4%, 0 liq) |
+| **V3 `minimax-m3`** | Headlines + OAK MCP (`get_news`, `get_calendar`) | 24–48 jam | Medium | Risiko katalis & batas downside | #7 OAK Max DD terendah (-6.5%, 0 liq, biaya ultra-hemat) |
+| **V4 `claude-haiku-5.5`** | Headlines + OAK MCP + wider context | 7–30 hari | Deep | Causal chain + contrarian check | Latensi 1.84s, 1M context, penalaran terstruktur |
 
-**Kenapa setup ini robust?**
-- V1 + V2 (Qwen Alibaba) → kuat analisa teks dari static input
-- V3 (Gemini Google) → punya real-time web access yang Qwen nggak punya
-- V4 (Gemini Google) → deep reasoning untuk complex cases
-- Satu-satunya "superpower" Google (realtime search) ter-utilize di V3
-- Satu-satunya "superpower" Qwen (fast cost-effective analysis) ter-utilize di V1+V2
+**Kenapa setup produksi ini kuat dan hemat biaya?**
+- Seluruh data valid, berita, kalender makro/earnings, dan metrik aset sudah dipasok langsung secara real-time oleh **OAK Research MCP Server** (`oak_mcp_client.py`), sehingga V3 & V4 tidak perlu mahal mencari web mentah dan bisa memakai model hemat berakurasi tinggi (`minimax-m3` & `claude-haiku-5.5`).
+- CRO Meta-Aggregator (`glm-5.3` via DashScope) memakai model juara trading #1 OAK Benchmark untuk putusan final yang disiplin dan anti-likuidasi.
 
 #### 3.5.5 Peran dalam 5 Agents (Fase 2 Full Multi-Agent)
 
@@ -604,10 +598,10 @@ Pada Fase 2, Swarm Voting ini jadi **NewsAgent** dalam sistem 5-agent lebih besa
 | Agent | Mekanisme | Bobot Agent |
 |---|---|---|
 | **FundingAgent** | Pure calc dari Walt funding rate history (no LLM) | 0.20 |
-| **NewsAgent** | 4-Voter Swarm + Qwen-max Aggregator (section 3.5) | 0.20 |
-| **FundamentalAgent** | Qwen-max analisa earnings/filings | 0.20 |
-| **TechnicalAgent** | RSI/MACD/SMA dari Yahoo OHLC (no LLM) | 0.20 |
-| **RegimeAgent** | Qwen-turbo klasifikasi macro regime | 0.20 |
+| **NewsAgent** | 4-Voter Swarm + `glm-5.3` CRO Aggregator + OAK MCP (section 3.5) | 0.20 |
+| **FundamentalAgent** | `glm-5.3-prime` / `claude-haiku-5.5` analisa earnings & OAK `get_tradfi` | 0.20 |
+| **TechnicalAgent** | RSI/MACD/SMA dari Yahoo OHLC + OAK Market Overview | 0.20 |
+| **RegimeAgent** | `glm-5.2-fast-preview` klasifikasi macro regime | 0.20 |
 
 Final decision = `Σ(agent.score × agent.confidence × 0.20)`.
 
@@ -625,9 +619,9 @@ Delta biaya ~$0.004/scan × 100 scan/bulan = **$0.40/bulan**. Marginal cost, sig
 #### 3.5.7 Fallback Strategy
 Jika salah satu voter gagal (API down / rate limit):
 - **3 voter tetap bisa jadi dasar keputusan** dengan bobot re-normalized (33% × 3)
-- Jika < 3 voter responsif → fallback ke `SINGLE_MODEL` mode (dual-AI existing)
-- Aggregator tetap jalan dengan jumlah voter yang ada
-- Log warning + Telegram alert ke owner
+- Jika < 3 voter responsif → fallback dengan voter yang tersedia + DashScope GLM/Qwen atau `SINGLE_MODEL`
+- Aggregator: `glm-5.3` $\to$ DashScope fallback (`glm-5.3-prime`, `glm-5.2-fast-preview`, `qwen-plus`, `qwen-flash`) $\to$ ClassAI (`claude-opus-5.5` $\to$ `gpt-6.1-sol`) $\to$ sintesis deterministik rule-based
+- Log warning + Telegram alert ke owner + input health tracking di Step Summary
 
 ---
 
@@ -655,12 +649,12 @@ Setelah strategi dan eksekusi pada Fase 1 terbukti andal dan menghasilkan imbal 
       │   ┌─────────────────────────────────────────────────┐   │
       │   │      Shared Multi-Agent AI Core (Zero Waste)    │   │
       │   │      - Market Regime Engine (VIX, DXY, SPY)     │   │
-      │   │      - News Sentiment Swarm Voting (50/50):     │   │
-      │   │         Voter 1: Qwen-turbo   (Alibaba, quick)  │   │
-      │   │         Voter 2: Qwen-plus    (Alibaba, balance)│   │
-      │   │         Voter 3: Gemini-flash (Google, realtime)│   │
-      │   │         Voter 4: Gemini-pro   (Google, deep)    │   │
-      │   │      - Aggregator: Qwen-max (meta-reasoner)     │   │
+      │   │      - News Sentiment Swarm + OAK Research MCP:       │   │
+      │   │         Voter 1: glm-5.2-fast-preview (DashScope)    │   │
+      │   │         Voter 2: glm-5.3-prime        (DashScope #1) │   │
+      │   │         Voter 3: minimax-m3           (ClassAI #7)   │   │
+      │   │         Voter 4: claude-haiku-5.5     (ClassAI Fast) │   │
+      │   │      - CRO Meta-Aggregator: `glm-5.3` (DashScope)    │   │
       │   │        * Output: score, confidence, justification│   │
       │   │        * Bukan averaging — reasoning-based      │   │
       │   │        * Vendor-neutral meta-level              │   │
@@ -955,15 +949,15 @@ interface TradeRecordDocument {
 
 | ID | Modul / Fungsi | Deskripsi Teknis | Status & Prioritas |
 |---|---|---|---|
-| **F1-01** | Daily Scheduled Scan | Eksekusi 07:17 & 19:17 WIB via `daily-scan.yml` untuk memindai 130 kontrak, riset AI, & auto-execute. | **✅ Selesai (P0)** |
+| **F1-01** | Daily Scheduled Scan | Eksekusi 07:17 & 19:17 WIB via `daily-scan.yml` memindai 31 aset whitelist (Saham AS saat `13:30–21:00 UTC`), OAK MCP, & Swarm. | **✅ Selesai (P0)** |
 | **F1-02** | Automated Token Refresh | `token_manager.py` memperbarui Bearer token secara otomatis sebelum tiap eksekusi. | **✅ Selesai (P0)** |
-| **F1-03** | OAuth Auto-Sync Secret | Auto-encrypt token baru dengan Libsodium (`pynacl`) dan sync ke GitHub Repository Secrets. | **✅ Selesai (P0)** |
-| **F1-04** | Dual-AI Swarm Research | Pemanggilan Qwen-Plus & Gemini-Pro (4 Voter P1-P7) terintegrasi cache Google Sheets. | **✅ Selesai (P0)** |
-| **F1-05** | 24/7 Market Execution | Eksekusi tiap 2 jam @ menit 43 (`market-execute.yml`) dg Dynamic Slot (5-15) & Conviction Sizing. | **✅ Selesai (P0)** |
+| **F1-03** | OAuth Auto-Sync Secret | Auto-encrypt token baru dengan Libsodium (`pynacl`) & sync ke GitHub Secrets (Walt & OAK MCP). | **✅ Selesai (P0)** |
+| **F1-04** | Multi-Vendor Swarm + OAK MCP | `glm-5.2-fast-preview`, `glm-5.3-prime`, `minimax-m3`, `claude-haiku-5.5` + CRO `glm-5.3` + OAK MCP (`Data Training`). | **✅ Selesai (P0)** |
+| **F1-05** | 4-Tier Gear Market Exec | Eksekusi Gear 0–3 (`market-execute.yml`) dg filter jam Saham AS UTC (`13:30–21:00 UTC`) & Komoditas 24/7 + `'GO'` bypass E4. | **✅ Selesai (P0)** |
 | **F1-06** | Continuous Risk Monitor | Eksekusi tiap 10 menit (`risk-monitor.yml`) dg 4 lapis proteksi & Smart Fast-Exit Idle <2 detik. | **✅ Selesai (P0)** |
-| **F1-07** | Owner Telegram Alert | Laporan scan, status eksekusi, PnL, dan error dikirim langsung ke Telegram & Google Sheets. | **✅ Selesai (P0)** |
+| **F1-07** | Owner Telegram Alert | Laporan scan, eksekusi, PnL, dan SFT `Data Training` (Webhook v2 5 tab) ke Telegram & Google Sheets. | **✅ Selesai (P0)** |
 | **F1-08** | Order Fallback & Anti-Dup | Fallback TP/SL terpisah bursa + filter defensif anti-duplicate posisi terbuka (`statuses=["open"]`). | **✅ Selesai (P0)** |
-| **F1-09** | 24/7 Crypto Bluechip Exec | Eksekusi tiap 2 jam @ menit 11 (`crypto-execute.yml`) pada 10 koin Tier-1 via Cloud Scheduler. | **✅ Selesai (P0)** |
+| **F1-09** | 24/7 Crypto Bluechip Exec | Eksekusi tiap 2 jam @ menit 11 (`crypto-execute.yml`) pada 10 koin Tier-1 dg 4-Tier Gear 0–3 via Cloud Scheduler. | **✅ Selesai (P0)** |
 
 ### 9.2 Kebutuhan Fungsional Fase 2 (Multi-User SaaS, Sistem Bisnis & Dashboard)
 

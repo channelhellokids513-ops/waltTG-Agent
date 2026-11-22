@@ -5,7 +5,7 @@
 [![Python 3.14](https://img.shields.io/badge/Python-3.14-green.svg)](https://python.org)
 [![Zero-Cost Infrastructure](https://img.shields.io/badge/Infra%20Cost-%240%20(Free%20Tier)-brightgreen.svg)](#-biaya-infrastruktur-100-zero-cost)
 
-Autonomous delta-neutral & directional funding rate arbitrage trading system untuk platform **Walt Perps** (`walletbot.me`). Ditenagai oleh **Dual-AI Research Swarm (Qwen + Gemini)**, **Google Cloud Scheduler Precision Bridge**, sistem **Risk Monitor 4-Lapis**, dan pelaporan *real-time* ke **Telegram** serta **Google Sheets**.
+Autonomous delta-neutral & directional funding rate arbitrage trading system untuk platform **Walt Perps** (`walletbot.me`). Ditenagai oleh **4-Voter Multi-Vendor AI Research Swarm (GLM-5.3 + MiniMax M3 + Claude Haiku 5.5)**, **OAK Research MCP Intelligence**, **Google Cloud Scheduler Precision Bridge**, sistem **Risk Monitor 4-Lapis**, serta pelaporan *real-time* ke **Telegram** dan **Google Sheets** (termasuk pengumpulan dataset SFT ke tab `Data Training`).
 
 ---
 
@@ -23,27 +23,27 @@ Autonomous delta-neutral & directional funding rate arbitrage trading system unt
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │               GOOGLE CLOUD SCHEDULER (Jakarta asia-southeast2)        │
-│    • walt-market-execute (14:43 & 21:43 WIB Setiap Hari 24/7)          │
-│    • walt-daily-scan     (07:17 WIB Daily)                             │
-│    • walt-risk-monitor   (Tiap 1 Jam di menit 23 WIB)                  │
+│    • walt-market-execute (Tiap 2 Jam di menit 43 / Adaptive Gear 0-3)  │
+│    • walt-daily-scan     (07:17 & 19:17 WIB Daily)                     │
+│    • walt-risk-monitor   (Tiap 10 Menit)                               │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │ (Exact-second HTTP POST trigger)
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │                   GITHUB ACTIONS CLOUD RUNNERS                         │
-│   ├─ daily-scan.yml      ──> Scan, Swarm AI & Instant Auto-Execute     │
-│   ├─ market-execute.yml  ──> Buka Posisi Saham US & Komoditas          │
-│   ├─ crypto-execute.yml  ──> Buka Posisi Crypto Bluechip (BTC/ETH/SOL) │
+│   ├─ daily-scan.yml      ──> Scan, OAK MCP + Swarm AI & Auto-Execute   │
+│   ├─ market-execute.yml  ──> Saham US (Jam Bursa UTC) & Komoditas 24/7 │
+│   ├─ crypto-execute.yml  ──> Crypto Bluechip 24/7 (10 Tier-1 Aset)     │
 │   └─ risk-monitor.yml    ──> Evaluasi 4 Lapis Risiko & Trailing Stop   │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │
                ┌────────────────────┼────────────────────┐
                ▼                    ▼                    ▼
      ┌───────────────────┐┌───────────────────┐┌───────────────────┐
-     │ Walt Perps Relay  ││  Dual-AI Swarm    ││  Telemetry & Log  │
-     │  (MCP & OAuth)    ││ (Qwen 50/50 Gemini││ (Telegram Alerts &│
-     │ • Bearer Auto-Sync││ • P1–P7 Scoring   ││  Google Sheets)   │
-     │ • Min Size Clamp  ││ • Meta-Aggregator ││ • 3x Auto-Retry   │
+     │ Walt Perps Relay  ││ 4-Voter Swarm AI  ││  Telemetry & SFT  │
+     │  (MCP & OAuth)    ││ + OAK Research MCP││ (Telegram Alerts &│
+     │ • Bearer Auto-Sync││ • GLM-5.3 CRO Agg ││  5 Tab Sheets +   │
+     │ • Min Size Clamp  ││ • P1–P7 Scoring   ││  Data Training)   │
      └───────────────────┘└───────────────────┘└───────────────────┘
 ```
 
@@ -51,14 +51,20 @@ Autonomous delta-neutral & directional funding rate arbitrage trading system unt
 
 ## 💎 Fitur Utama & Guardrails
 
-### 1. Dual-AI Swarm Consensus (50/50 Vendor Balance)
-Analisis sentimen berita, katalis earnings, dan momentum makro dilakukan oleh 4 voter seimbang dari dua vendor terdepan:
-- **Alibaba Cloud:** `qwen-flash` & `qwen-plus` (V1 dulunya `qwen-turbo` — dipensiunkan upstream; lihat *Jendela Pemeliharaan & Pemulihan Kredensial*)
-- **Google Cloud:** `gemini-flash-latest` & `gemini-pro-latest`
-- **Meta-Aggregator:** `qwen-max` mengevaluasi konsensus 7 parameter standar (**P1–P7**) untuk menghasilkan keputusan:
-  - `GO` (Full size $2.50 – $3.00 margin)
-  - `HALF` (Half size $1.25 – $1.50 margin jika katalis risiko P5 $\ge 0.70$)
-  - `SKIP` (Batalkan jika melawan sentimen / earnings $\le 7$ hari)
+### 1. 4-Voter Multi-Vendor AI Research Swarm + OAK Research MCP (`llm_research.py` & `oak_mcp_client.py`)
+Analisis sentimen berita, katalis makro/earnings, dan risiko posisi dipandu oleh **OAK Benchmark** dan data real-time dari **OAK Research Remote MCP Server** (`https://oakresearch.io/api/mcp`):
+- **Pre-Research MCP Context (`oak_mcp_client.py`):** Sebelum voter menilai aset, bot mengambil *global market overview*, *7-day calendar* (macro/earnings/unlocks), berita terkini, serta metrik spesifik aset (`get_crypto` / `get_tradfi`) via OAuth 2.1 PKCE dengan rotasi `OAK_MCP_REFRESH_TOKEN` otomatis.
+- **DashScope (`DASHSCOPE_API_KEY`):**
+  - **V1 (Fast Validator):** `glm-5.2-fast-preview`
+  - **V2 (Alpha Signal — #1 OAK Benchmark):** `glm-5.3-prime`
+- **ClassAI Router (`DASHSCOPE_API_GEMINI_KEY`, `https://router.classai.id/v1`):**
+  - **V3 (Conservative Risk Guard — #7 OAK Max DD -6.5%, 0 likuidasi):** `minimax-m3`
+  - **V4 (Fast Multi-Angle Reasoner — 1.84s, 1M ctx):** `claude-haiku-5.5`
+- **CRO Meta-Aggregator:** **`glm-5.3`** (#1 OAK Winner via `DASHSCOPE_API_KEY`, fallback `glm-5.3-prime` -> `glm-5.2-fast-preview` -> `qwen-plus` -> `qwen-flash` -> ClassAI `claude-opus-5.5` -> `gpt-6.1-sol` -> rule-based) mengevaluasi konsensus 7 parameter standar (**P1–P7**):
+  - `GO` (Full size $2.50 – $3.00 margin — **bypass batas frekuensi 24 jam `E4`**)
+  - `HALF` (Half size hanya bila masih $\ge \$2.50$ margin setelah clamp/buffer; jika di bawah floor $\to$ **SKIP**)
+  - `SKIP` (Batalkan jika melawan sentimen / `P5 >= 0.70` / earnings $\le 7$ hari)
+- **SFT Data Training Collector (`training_data.py`):** Setiap riset AI tervalidasi otomatis dicatat dalam format chat-messages `<think>...</think>` + JSON ke Google Sheet tab **`Data Training`** (`12` kolom, target 1,000 baris) dan `logs/training_dataset.jsonl`.
 
 ### 2. Asymmetric R:R Take Profit (TP) & Uniform 1.5% Stop Loss (SL) — True Funding Carry
 Menghindari *fee bleed* (`0.18%` round-trip taker fee + spread) dengan *Risk-to-Reward* asimetris dan ruang napas yang cukup untuk memanen *funding rate*:
@@ -110,9 +116,9 @@ gcloud scheduler jobs list --location=asia-southeast2
 
 | Komponen / Workflow | Trigger Resmi | Timeout / Guard | Deskripsi |
 |---|---|---|---|
-| [`daily-scan.yml`](.github/workflows/daily-scan.yml) | **Cloud Scheduler (`workflow_dispatch`)** — 07:17 & 19:17 WIB | `12m` (`JOB_TIMEOUT_MIN=12`, guard `< 6m`) | Master Scan seluruh kontrak, ranking peluang funding, riset Swarm AI mendalam (Qwen+Gemini P1–P7), eksekusi order GO/HALF, simpan database ke Google Sheet & notif Telegram. |
-| [`market-execute.yml`](.github/workflows/market-execute.yml) | **Cloud Scheduler (`workflow_dispatch`)** — Tiap 2 jam (menit 43) | `12m` (`JOB_TIMEOUT_MIN=12`, guard `< 6m`) | Eksekusi adaptif Saham US & Komoditas 24/7: **1 jam (Gear 2)** saat peluang funding melimpah ($\ge 3$ aset $\ge 0.5\%$/hari atau $\ge 2$ ekstrem $\ge 0.8\%$/hari), **2 jam (Gear 1)** saat normal/sepi, dan *fast-exit* saat slot penuh (Gear 0). Dilengkapi *3-hour re-entry cooldown*. |
-| [`crypto-execute.yml`](.github/workflows/crypto-execute.yml) | **Cloud Scheduler (`workflow_dispatch`)** — Tiap 2 jam (menit 11) | `12m` (`JOB_TIMEOUT_MIN=12`, guard `< 6m`) | Eksekusi adaptif 10 Crypto Bluechip (`BTC`, `ETH`, `SOL`, dll) dengan sistem **Calmed Adaptive (1h / 2h)** dan *3-hour re-entry cooldown*. |
+| [`daily-scan.yml`](.github/workflows/daily-scan.yml) | **Cloud Scheduler (`workflow_dispatch`)** — 07:17 & 19:17 WIB | `12m` (`JOB_TIMEOUT_MIN=12`, guard `< 6m`) | Master Scan **31 aset diizinkan** (`18 Saham US + 3 Komoditas + 10 Crypto`), filter **Jam Bursa Reguler Saham AS (`Sen–Jum 13:30–21:00 UTC`, `US_STOCK_HOURS_ONLY=true`)** untuk `ALLOWED_STOCKS`, pengayaan OAK Research MCP + Swarm AI (`GLM-5.3` CRO), eksekusi GO/HALF, simpan ke Google Sheets (30 kolom `Daily_Scans` + SFT `Data Training`) & notif Telegram. |
+| [`market-execute.yml`](.github/workflows/market-execute.yml) | **Cloud Scheduler (`workflow_dispatch`)** — Tiap 2 jam (menit 43) | `12m` (`JOB_TIMEOUT_MIN=12`, guard `< 6m`) | Eksekusi **4-Tier Execution Gear (`0..3`)** Saham US (hanya saat jam bursa reguler AS `13:30–21:00 UTC`) & Komoditas (24/7): **Gear 0 (`0` GO)** = maks 2x selama jam bursa AS (`225m`); **Gear 1 (`< 2` GO)** = `120m` (2 jam, konservatif); **Gear 2 (`2..5` GO)** = `60m` (1 jam, aktif); **Gear 3 (`> 5` GO atau `GEAR_3_FULL_RESEARCH=true`)** = `60m` + izin riset & analisa AI penuh untuk setiap keputusan trading. Dilengkapi *3-hour re-entry cooldown*. |
+| [`crypto-execute.yml`](.github/workflows/crypto-execute.yml) | **Cloud Scheduler (`workflow_dispatch`)** — Tiap 2 jam (menit 11) | `12m` (`JOB_TIMEOUT_MIN=12`, guard `< 6m`) | Eksekusi mandiri 24/7 untuk 10 Crypto Bluechip (`BTC`, `ETH`, `SOL`, dll) memakai **4-Tier Execution Gear (`0..3`)**: Gear 0 `720m` (2x/hari), Gear 1 `120m`, Gear 2 `60m`, dan Gear 3 `60m` Full AI Research + *3-hour re-entry cooldown*. |
 | [`risk-monitor.yml`](.github/workflows/risk-monitor.yml) | **Cloud Scheduler (`workflow_dispatch`)** — Tiap 10 menit | `20m` (`JOB_TIMEOUT_MIN=20`, guard sisa `< 6m`) | Pengawas risiko adaptif (5–10 menit + *Smart Fast-Exit Idle*). Guard waktu otomatis melewati *sub-cycle* & *adaptive execute* jika sisa waktu job `< 6 menit` agar order tidak terpotong sebelum TP/SL terpasang. |
 | [`watchdog.yml`](.github/workflows/watchdog.yml) | **GitHub Cron (`0 * * * *`) + keepalive dari workflow entry (Ronde 7b)** + `workflow_dispatch` | `3m` (`walt-watchdog`) | Pengaman pengganti cron (Ronde 6 `[R6-3]`): memeriksa usia run `success` **keempat** workflow trading (`risk-monitor` 30 m, `market-execute`/`crypto-execute` 300 m, `daily-scan` 840 m; ambang diturunkan dari tabel jadwal §7.1 STRATEGY.md), mencetak tabel ke Step Summary, mengirim satu alert teragregasi yang menyebut workflow stale, lalu fallback `workflow_dispatch` — otomatis hanya untuk `risk-monitor`; untuk workflow entry perlu `vars.WALT_WATCHDOG_DISPATCH_ENTRY=true`. Tanpa akses Walt API. **Catatan Ronde 7b:** cron GitHub terbukti bisa menguap (~7 jam pada 2026-11-20, §3i) — karena itu `risk-monitor.yml` dan `market-execute.yml` memanggil `keep_watchdog_alive()` di akhir job (`if: always()`, nol OAuth) dan men-dispatch watchdog bila run terakhir > 50 menit. Cloud Scheduler tidak bisa dipakai dari repo ini (0 job pada semua proyek yang terjangkau akun). |
 | [`tests.yml`](.github/workflows/tests.yml) | **Push / PR ke `main`** | `5m` (`walt-tests`) | CI otomatis menjalankan import check modul inti, `pytest -q`, dan validasi sintaks seluruh file `.github/workflows/*.yml` tanpa secrets. |
@@ -199,7 +205,7 @@ Langkah pemeliharaan aman:
 ## 🔒 Kebijakan Privasi Log (Repo Publik) & Alur Konfigurasi Strategi
 
 ### Kebijakan Log & State di Repo Publik
-- **`LOG_REDACT=true` & Global Secret Filter:** Seluruh angka saldo, ekuitas, margin, PnL, `order_id`, dan email disamarkan (`***`) pada *stdout* log publik, sementara pola mirip API key (`key=`, `Bearer`, `AIza...`, `sk-...`, token Telegram) selalu disensor di log global. Gemini API key dikirim lewat header `x-goog-api-key` (bukan query `?key=`). Notifikasi **Telegram** dan **Google Sheets** tetap menerima angka lengkap.
+- **`LOG_REDACT=true` & Global Secret Filter:** Seluruh angka saldo, ekuitas, margin, PnL, `order_id`, dan email disamarkan (`***`) pada *stdout* log publik, sementara pola mirip API key (`key=`, `Bearer`, `AIza...`, `sk-...`, token Telegram) selalu disensor di log global. Kredensial ClassAI Router (`DASHSCOPE_API_GEMINI_KEY`), DashScope (`DASHSCOPE_API_KEY`), maupun OAK MCP OAuth dikirim lewat header `Authorization: Bearer ...` (bukan query parameter). Notifikasi **Telegram** dan **Google Sheets** tetap menerima angka lengkap.
 - **Tanpa Artifact Publik & Ringkasan Aman:** Langkah *Upload Logs Artifact* dihapus; *Step Summary* hanya menampilkan status job, jumlah aksi/eksekusi, *cadence mode*, dan *gear*.
 - **Integritas Snapshot & Dedupe Close (`D1`–`D4`):**
   - `logs/open_snapshot.json` diisolasi ke cache terpisah (`walt-snapshot-*`) yang **hanya** disimpan oleh `risk-monitor.yml` (workflow lain menghapus file ini sebelum menyimpan cache `walt-logs-state-*`).
@@ -228,7 +234,7 @@ Langkah pemeliharaan aman:
 
 ### Gerbang Kualitas Entry & Alur Sinkronisasi Strategi (Telegram ↔ GitHub Actions)
 
-- **Filter Kualitas Entry (`E1`–`E5`):** `HALF` di bawah floor `$2.50` di-**SKIP**, `P5_risk_catalysts >= max_p5_risk` (`0.70`) di-**SKIP**, riset lebih tua dari `max_research_age_hours` (`6` jam) diabaikan, batas frekuensi **2 entry/aset/24 jam** & **8 entry/24 jam**, **circuit breaker harian** (`-5%` ekuitas dari awal hari UTC), serta gerbang ekonomi `expected_funding >= (2 × 0.0009 + slippage) × 1.5` (`expected_hold_hours = 24`).
+- **Filter Kualitas Entry (`E1`–`E5`):** `HALF` di bawah floor `$2.50` di-**SKIP**, `P5_risk_catalysts >= max_p5_risk` (`0.70`) di-**SKIP**, riset lebih tua dari `max_research_age_hours` (`6` jam) diabaikan, batas frekuensi **2 entry/aset/24 jam** & **8 entry/24 jam** berlaku untuk `HALF` (sementara verdict **`'GO'` otomatis melewati batas frekuensi 24 jam tersebut**), **circuit breaker harian** (`-5%` ekuitas dari awal hari UTC), cooldown re-entry 3 jam, batas slot dinamis, buffer kas 15%, serta gerbang ekonomi `expected_funding >= (2 × 0.0009 + slippage) × 1.5` (`expected_hold_hours = 24`).
 - Perubahan strategi lewat Bot Telegram (`/set_strategy` / `/reset_strategy`) divalidasi terhadap batas aman `STRATEGY_PARAM_SPECS`, disimpan lokal di `logs/strategy_config.json`, dan langsung disinkronkan via `GH_PAT` ke **GitHub Repository Variable `STRATEGY_CONFIG_JSON`**.
 - Setiap workflow GitHub Actions meneruskan `STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}` ke `walt_bot.py`. Jika parsing gagal atau ada nilai di luar batas aman, bot mencatat *warning* dan *fallback* otomatis ke `DEFAULT_STRATEGY_CONFIG`.
 - Profil pribadi End User (`logs/user_strategies.json`) dan data auth (`logs/telegram_auth.json`) **tidak pernah** disinkronkan ke variable atau sheet publik.
@@ -246,14 +252,21 @@ walt-trading/
 │   └── risk-monitor.yml        # Workflow pemantau risiko 4-lapis
 ├── STRATEGY.md                 # Dokumentasi strategi finansial & kuantitatif end-to-end
 ├── PRD.md                      # Product Requirements Document (Fase 1 Owner & Fase 2 SaaS)
-├── walt_bot.py                 # Core bot orchestrator (ranking, execution, 4-layer monitor)
+├── AUDIT.md                    # Audit independen & kronologi remedi Ronde 2–9+
+├── walt_bot.py                 # Core bot orchestrator (Gear 0–3, US stock hours, 4-layer monitor)
 ├── token_manager.py            # OAuth PKCE auto-refresh & auto-sync GitHub Secrets
-├── llm_research.py             # Dual-AI Swarm Client (Qwen + Gemini) & 7-parameter voter
+├── llm_research.py             # Multi-Vendor 4-Voter Swarm (GLM-5.2/5.3, MiniMax M3, Haiku 5.5) + GLM-5.3 CRO
+├── oak_mcp_client.py           # Klien MCP Remote OAK Research (`https://oakresearch.io/api/mcp`) + auto-rotate RT
+├── setup_oak_oauth.py          # Skrip interaktif otentikasi OAuth 2.1 PKCE OAK Research MCP
+├── training_data.py            # Pengumpul dataset SFT `<think>` JSONL -> tab Google Sheet `Data Training`
 ├── notifier.py                 # Telegram notifier dengan 3x retry exponential backoff
-├── sheet_logger.py             # Logger eksekusi & scan ke Google Sheets via Webhook
-├── google_apps_script.js       # Script Webhook endpoint untuk Google Sheets
+├── sheet_logger.py             # Logger 5 tab Google Sheets via Webhook v2 & gviz reader
+├── google_apps_script.js       # Script Webhook v2 (2026-11-21.1) untuk Google Sheets (5 tab)
 ├── setup_walt_oauth.py         # Skrip interaktif otentikasi awal Walt OAuth
-└── requirements.txt            # Dependensi Python
+├── tools/
+│   ├── export_training_data.py # Backfill/ekspor dataset SFT `Data Training` (target >= 1.000 baris)
+│   └── ...                     # Probe sheet, reconcile, sanitize_gate, watchdog_check
+└── requirements.txt            # Dependensi Python (pinned)
 ```
 
 ---
@@ -273,9 +286,11 @@ Di GitHub: **Settings -> Secrets and variables -> Actions -> New repository secr
 | Secret Key | Keterangan |
 |---|---|
 | `WALT_CLIENT_ID` | OAuth Client ID dari Walt |
-| `WALT_REFRESH_TOKEN` | OAuth Refresh Token awal dari Walt |
-| `DASHSCOPE_API_KEY` | Alibaba Cloud DashScope API Key (untuk Qwen) |
-| `DASHSCOPE_API_GEMINI_KEY` | Google AI Studio Gemini API Key (atau `GEMINI_API_KEY`) |
+| `WALT_REFRESH_TOKEN` | OAuth Refresh Token awal dari Walt (rotasi otomatis oleh CI) |
+| `DASHSCOPE_API_KEY` | Alibaba Cloud DashScope API Key (Aggregator utama `glm-5.3`, V1 `glm-5.2-fast-preview`, V2 `glm-5.3-prime`, fallback Qwen) |
+| `DASHSCOPE_API_GEMINI_KEY` | ClassAI Router API Key (`https://router.classai.id/v1` — V3 `minimax-m3`, V4 `claude-haiku-5.5`, & fallback aggregator `claude-opus-5.5` / `gpt-6.1-sol`) |
+| `OAK_MCP_CLIENT_ID` | OAuth 2.1 Client ID untuk OAK Research Remote MCP Server (dari `python setup_oak_oauth.py`) |
+| `OAK_MCP_REFRESH_TOKEN` | OAuth 2.1 Refresh Token OAK Research MCP (auto-rotate & tersinkronisasi balik via `GH_PAT`) |
 | `TELEGRAM_BOT_TOKEN` | Token Bot Telegram dari `@BotFather` |
 | `TELEGRAM_CHAT_ID` | ID Chat Telegram Anda dari `@userinfobot` |
 | `GOOGLE_SHEET_WEBHOOK_URL`| URL Webhook Google Apps Script (lihat `google_apps_script.js`) |
@@ -331,31 +346,29 @@ status sistem bisa dibaca tanpa menebak. Di GitHub: **Settings → Secrets and v
 | `MAINTENANCE_MODE` | `false` | Kill-switch: membungkam workflow entry + risiko saat pemulihan kredensial. |
 | `DRY_RUN` | `false` | `true` = pantau nyata, entry disimulasikan (`verdict: DRY_RUN`). Dipakai untuk pelepasan bertahap. |
 | `WALT_COLD_REHYDRATE` | `report` | Start dingin (cache Actions ter-eviksi): `report` = ukur & bunyikan jarak ledger-vs-bursa; `write` = tutup jarak lewat jalur backfill (backup dulu, PnL tetap *belum terukur*, dan diblokir selama `DRY_RUN=true`). |
-| `DASHSCOPE_MODEL_V1` | `qwen-flash` | Model Voter 1. `qwen-turbo` sudah dipensiunkan upstream (404) — jangan dipakai. |
-| `GEMINI_MODEL_V4` | `gemini-pro-latest` | Model Voter 4. |
-| `DASHSCOPE_MODEL_AGG` | `qwen-max` | Model meta-aggregator P1–P7. |
-| `DASHSCOPE_MODEL` | `qwen-plus` | Model Voter 2. |
-| `GEMINI_MODEL` | `gemini-flash-latest` | Model Voter 3. |
+| `DASHSCOPE_MODEL_V1` | `glm-5.2-fast-preview` | Model Voter 1 (DashScope cepat & hemat). |
+| `DASHSCOPE_MODEL` | `glm-5.3-prime` | Model Voter 2 (DashScope #1 OAK Benchmark). |
+| `DASHSCOPE_MODEL_AGG` | `glm-5.3` | Model utama CRO Meta-Aggregator P1–P7 (#1 OAK Winner via `DASHSCOPE_API_KEY`). |
+| `GEMINI_BASE_URL` | `https://router.classai.id/v1` | Endpoint router OpenAI-compatible untuk Voter 3, Voter 4, & fallback aggregator. |
+| `GEMINI_MODEL` | `minimax-m3` | Model Voter 3 via ClassAI Router (#7 OAK Max DD terendah `-6.5%`, 0 likuidasi). |
+| `GEMINI_MODEL_V4` | `claude-haiku-5.5` | Model Voter 4 via ClassAI Router (1.84s cepat & hemat, konteks 1M). |
+| `CLASSAI_MODEL_AGG` | `claude-opus-5.5` | Fallback aggregator lapis ke-2 via ClassAI Router (cadangan ke-2: `CLASSAI_MODEL_AGG_FALLBACK=gpt-6.1-sol`). |
+| `MULTI_OPP_GLM_FALLBACK` | `false` | Jika `true`, saat `opportunity_count > 1` alihkan V3/V4 ke DashScope GLM. Default `false` menjaga keragaman 3 vendor. |
+| `OAK_MCP_ENABLED` | `on` | Aktifkan pengayaan konteks real-time dari OAK Research MCP Server (`OAK_MCP_URL=https://oakresearch.io/api/mcp`, opsional `OAK_MCP_PREMIUM=false`). |
+| `US_STOCK_HOURS_ONLY` | `true` | Memfilter pemindaian & eksekusi `ALLOWED_STOCKS` ke jam bursa reguler AS (`Sen–Jum 13:30–21:00 UTC`). Crypto & Komoditas tetap 24/7. |
+| `GEAR_3_FULL_RESEARCH` | `false` | Jika `true` (atau peluang `GO > 5`), mengaktifkan **Gear 3** agar setiap kandidat trading mendapat riset AI penuh tanpa cap. |
+| `TRAINING_DATA_LOGGING` | `on` | Otomatis menyimpan dataset SFT `<think>...</think>` ke Google Sheet tab `Data Training` dan `logs/training_dataset.jsonl`. |
 | `WALT_TOKEN_SYNC` | `on` | `off` **menolak refresh** (bukan "refresh lalu buang hasilnya") — wajib `on` untuk workflow yang butuh OAuth. |
 | `WALT_WATCHDOG_DISPATCH_ENTRY` | `false` | `true` mengizinkan watchdog men-dispatch ulang workflow entry; default *alert-only* karena dispatch membuka order nyata. |
 | `GOOGLE_SHEET_ID` | — | ID spreadsheet ledger (yang benar bersidik jari `06bded7f`). |
 | `STRATEGY_CONFIG_JSON` | berkas `strategy_config.json` | Override parameter strategi dari CI tanpa commit. |
 
 
-### 2c. Redeploy Apps Script (Webhook v2) — wajib sebelum kolom `mg_*` berguna
+### 2c. Status Webhook v2 & Panduan Redeploy Apps Script
 
-Webhook adalah satu-satunya penulis ledger. Deployment yang aktif saat ini membalas
-HTML (`Webhook is active!`) dan **tidak terbukti menulis apa pun**, sehingga kode v2 di
-repo belum bekerja. Sejak Ronde 8, `_post_webhook` hanya menghitung sukses bila balasan
-membuktikan penulisannya — jadi SELAMA deployment lama masih terpasang, log CI akan
-menampilkan peringatan ini (itu benar, bukan regresi):
+Webhook adalah satu-satunya penulis ledger ke Google Sheets. **Status Produksi (2026-11-22):** Apps Script Webhook v2 (`"version":"2026-11-21.1"`) **sudah ter-deploy dan terverifikasi aktif di produksi** untuk seluruh **5 tab** (`Daily_Scans` tepat 30 kolom bernama tanpa duplikat, `Executions_Log`, `Closed_Positions`, `PnL_Tracker`, serta tab baru **`Data Training`** dengan 12 kolom SFT yang sudah terisi 48 baris awal tervalidasi).
 
-```
-_post_webhook(Daily_Scans): balasan webhook ... bukan JSON (status HTTP 200);
-ini gejala deployment Apps Script lama/stub ... Redeploy google_apps_script.js (v2)
-```
-
-Langkah redeploy (±5 menit, tidak perlu menyentuh bot):
+Jika di masa depan `google_apps_script.js` dimodifikasi, gunakan langkah redeploy berikut (±5 menit, tidak perlu menyentuh bot):
 
 1. Buka spreadsheet: `https://docs.google.com/spreadsheets/d/<GOOGLE_SHEET_ID>/edit`
    (ID diambil dari secret `GOOGLE_SHEET_ID`, jangan ditulis di tempat publik).

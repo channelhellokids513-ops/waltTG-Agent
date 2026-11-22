@@ -1,11 +1,14 @@
 """
-Multi-Voter AI Research Layer (4-Voter Swarm + Qwen-Max Aggregator).
-Implementasi Standar PRD 3.5:
-  - 4 Voter dengan Keseimbangan Vendor 50/50:
-      V1: Alibaba Qwen-Flash  (Quick Signal Analyst)  [dulu qwen-turbo, dipensiunkan upstream]
-      V2: Alibaba Qwen-Plus  (Balanced Equity Analyst)
-      V3: Google Gemini-Flash-Latest (Realtime Web & Breaking News Validator)
-      V4: Google Gemini-Pro-Latest   (Deep Multi-Angle & Contrarian Reasoner)
+Multi-Voter AI Research Layer (4-Voter Multi-Vendor Swarm + GLM-5.3 CRO Meta-Aggregator).
+Implementasi Standar PRD 3.5 (Diselaraskan dengan OAK Benchmark & MCP Integration):
+  - 4 Voter Lintas Vendor:
+      V1: Zhipu GLM-5.2-Fast-Preview (`glm-5.2-fast-preview` via DashScope — Fast Validator)
+      V2: Zhipu GLM-5.3-Prime        (`glm-5.3-prime` via DashScope — #1 OAK +29.4%, 0 liq)
+      V3: MiniMax M3                 (`minimax-m3` via ClassAI Router — #7 OAK Max DD -6.5%, 0 liq)
+      V4: Anthropic Claude Haiku 5.5 (`claude-haiku-5.5` via ClassAI Router — Fast Reasoner, 1M ctx)
+  - Pengayaan Data Real-Time via OAK Research Remote MCP Server (`oak_mcp_client.py`):
+      Injeksi blok [DATA REAL-TIME OAK RESEARCH MCP] (`get_market_overview`, `get_calendar`,
+      `get_news`, `get_crypto`, `get_tradfi`) sebelum seluruh voter & aggregator mengambil keputusan.
   - 7 Parameter Standar Validasi (P1-P7):
       P1: sentiment_polarity    (Weight: 0.25)
       P2: signal_strength       (Weight: 0.10)
@@ -15,11 +18,15 @@ Implementasi Standar PRD 3.5:
       P6: contrarian_check      (Weight: 0.10)
       P7: historical_pattern    (Weight: 0.10)
   - Pre-processing rule-based variance/consensus analysis (UNANIMOUS, STRONG, MIXED, SPLIT)
-  - Meta-Aggregator (Qwen-Max) untuk sintesis bobot per-parameter dan deteksi outlier
+  - Meta-Aggregator CRO: Utama `glm-5.3` (#1 OAK Winner via DashScope `DASHSCOPE_API_KEY`)
+      -> fallback DashScope (`glm-5.3-prime`, `glm-5.2-fast-preview`, `qwen-plus`, `qwen-flash`)
+      -> fallback ClassAI (`claude-opus-5.5` -> `gpt-6.1-sol`) -> sintesis deterministik rule-based.
+  - SFT Data Training Hook (`training_data.py`): Log <think>...</think> + JSON ke tab 'Data Training' & JSONL.
 
 Environment Variables:
-  DASHSCOPE_API_KEY        — Alibaba Cloud Model Studio (Qwen)
-  DASHSCOPE_API_GEMINI_KEY — Google AI Studio (Gemini) [fallback: GEMINI_API_KEY]
+  DASHSCOPE_API_KEY        — Alibaba Cloud Model Studio / DashScope (GLM-5.3 Aggregator, V1, V2, fallback Qwen)
+  DASHSCOPE_API_GEMINI_KEY — ClassAI Router (`https://router.classai.id/v1`, V3 minimax-m3, V4 claude-haiku-5.5, fallback agg)
+  OAK_MCP_CLIENT_ID / OAK_MCP_REFRESH_TOKEN — OAuth 2.1 PKCE untuk OAK Research MCP Server
 """
 
 import os

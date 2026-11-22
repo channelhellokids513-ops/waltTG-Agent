@@ -2,9 +2,9 @@
 
 **Pemilik:** Rizal Dicky  
 **Dibuat:** 13 November 2026  
-**Terakhir Diperbarui:** 15 November 2026 (Swarm AI 4-Voter P1-P7 & Qwen-Max Aggregator Architecture)  
+**Terakhir Diperbarui:** 22 November 2026 (4-Voter Swarm GLM-5.3/MiniMax M3/Haiku 5.5 + GLM-5.3 CRO + OAK Research MCP + 4-Tier Gear 0–3 + SFT `Data Training`)  
 **Platform Eksekusi:** Walt Perps Relay API (`walletbot.me`) via GitHub Actions Autonomous Runner  
-**AI Research Engine:** 4-Voter Swarm (2 Qwen + 2 Gemini, Vendor Balance 50/50) + Meta-Aggregator Qwen-Max  
+**AI Research Engine:** 4-Voter Multi-Vendor Swarm (`glm-5.2-fast-preview`, `glm-5.3-prime`, `minimax-m3`, `claude-haiku-5.5`) + CRO Meta-Aggregator `glm-5.3` + OAK Research Remote MCP Server (`oak_mcp_client.py`)  
 **Notifikasi:** Telegram Bot API (`notifier.py` → `TELEGRAM_CHAT_ID`)  
 **Target:** $100/bulan dari funding income untuk cover tagihan rutin  
 
@@ -35,12 +35,12 @@ Risiko utama adalah pergerakan harga aset yang bergerak melawan arah posisi (*di
   `NVDA`, `NBIS`, `CRCL`, `MSTR`, `AAPL`, `GOOGL`, `AMD`, `PLTR`, `COIN`, `SNDK`, `SPY`, `US100`, `AMZN`, `TSLA`, `META`, `LIT`, `VVV`, `ANTHROPIC`
 - **Komoditas Tradisional:**  
   `XAU` (Emas), `XAG` (Perak), `BRENTOIL` (Minyak Mentah Brent)
-- **Crypto Bluechip (Likuiditas Tinggi & Siklus Funding 8 Jam):**  
-  `BTC` (Bitcoin), `ETH` (Ethereum), `SOL` (Solana)
+- **Crypto Bluechip Tier-1 (10 Aset Whitelist, 24/7):**  
+  `BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `AVAX`, `SUI`, `LINK`, `NEAR`, `AAVE`
 
 ### 2.3 Aturan Eksklusi Ketat (Strict Altcoin Exclusion)
 - ❌ **GRAM dan Altcoin/Memecoin Liar Dilarang Keras:**  
-  Kontrak `GRAM` dan token spekulatif bervolatilitas liar **DIHAPUS & DI-BLACKLIST SECARA PERMANEN**. Universe crypto dibatasi ketat hanya pada aset bluechip likuiditas raksasa (`BTC`, `ETH`, `SOL`) untuk memanen yield funding rate tanpa risiko rugi akibat manipulasi likuiditas tipis.
+  Kontrak `GRAM`, memecoin volatil (`PEPE`, `DOGE`, `SHIB`, `WIF`, `FARTCOIN`, `POPCAT`, `TRUMP`), dan token berlikuiditas tipis **DI-BLACKLIST SECARA PERMANEN**. Universe crypto dibatasi ketat hanya pada 10 aset bluechip/large-cap likuid (`ALLOWED_CRYPTO`) untuk memanen yield funding rate tanpa risiko rugi akibat manipulasi likuiditas tipis.
 
 ### 2.4 Formula Ranking Peluang
 Setiap pagi pukul **06:39 WIB**, annualized funding rate dihitung otomatis oleh bot:
@@ -98,10 +98,12 @@ Setiap kontrak di Walt memiliki ketentuan *minimum order size (min_size_base)*. 
 ### 4.1 Syarat Pembukaan Posisi
 1. **Funding Rate:** Nilai absolut funding rate harian `|funding_daily| ≥ 0.5%/hari` (annualized ≥ 182%/tahun).
 2. **Likuiditas:** Volume 24 jam > $1.000.000 USD.
-3. **Saldo:** Saldo tersedia memenuhi margin minimum + alokasi buffer wajib (minimal $3.00 USDC tersedia).
-4. **Waktu Eksekusi (Saham & Komoditas):** Berjalan 24 Jam x 7 Hari tanpa henti (14:43 & 21:43 WIB Setiap Hari, plus auto-eksekusi instan saat scan 07:17 WIB).
-5. **No Duplicate:** Belum ada posisi aktif yang terbuka pada kontrak/aset yang sama.
-6. **AI Research Confirmation:** Lolos verifikasi model Qwen (skor keputusan **GO** atau **HALF**).
+3. **Saldo:** Saldo tersedia memenuhi margin minimum + alokasi buffer wajib (minimal $3.00 USDC tersedia, menjaga 15% cash buffer).
+4. **Filter Jam Bursa Saham AS (`US_STOCK_HOURS_ONLY=true`) vs 24/7 Komoditas & Crypto:**  
+   - Saham US (`ALLOWED_STOCKS`) hanya dipindai riset AI & dieksekusi saat **jam bursa reguler NYSE/NASDAQ (`Senin–Jumat 13:30–21:00 UTC`)**.
+   - Komoditas (`XAU`, `XAG`, `BRENTOIL`) dan Crypto Bluechip (10 aset Tier-1) tetap berjalan **24/7**. Workflow `risk-monitor.yml` tetap memantau posisi terbuka seluruh aset 24/7.
+5. **No Duplicate & 3h Cooldown:** Belum ada posisi aktif pada kontrak yang sama dan aset tidak sedang dalam jeda cooldown 3 jam pasca-close.
+6. **AI Research Confirmation:** Lolos verifikasi Swarm AI + OAK Research MCP (`GO` atau `HALF`). Verdict **`GO` otomatis melewati batas frekuensi 24 jam (`E4`)** (`2/aset/24j` & `8/hari`), sedangkan verdict `HALF` tetap dibatasi. Circuit breaker `-5%`, cooldown 3 jam, batas slot, dan cadangan kas 15% tetap berlaku mutlak untuk semua verdict.
 
 ### 4.2 Alur Eksekusi API Walt & Minimum Order Sizing
 Walt mewajibkan pola 2-tahap dengan *time-limited confirmation token*:
@@ -126,13 +128,15 @@ Memberi ruang napas bagi harga agar tidak terpicu *noise* jangka pendek sekaligu
 
 ---
 
-## 5. Dual-AI Collaboration Layer (Qwen-Plus + Google Gemini)
+## 5. Multi-Vendor AI Collaboration Layer (OAK MCP + GLM-5.3 + MiniMax M3 + Claude Haiku 5.5)
 
-Khusus untuk instrumen saham US, sebelum order dieksekusi, bot menjalankan lapisan analisis fundamental dan sentimen menggunakan arsitektur **4-Voter Swarm AI + Qwen-Max Aggregator** (sesuai PRD 3.5) yang memadukan 4 model kecerdasan buatan dengan keseimbangan vendor 50/50:
-1. **V1: Alibaba Qwen-Flash** — *Quick Signal Analyst* (deteksi kata kunci dan polaritas permukaan). Dulunya `qwen-turbo`; model tersebut sudah dipensiunkan di DashScope intl (404 `model_not_found`, diverifikasi 2026-11-20) sehingga nama model dapat dioverride lewat variable `DASHSCOPE_MODEL_V1`.
-2. **V2: Alibaba Qwen-Plus** — *Balanced Equity Analyst* (kredibilitas sumber berita dan konsistensi narasi).
-3. **V3: Google Gemini-Flash-Latest** — *Realtime Market Validator* (cek breaking news 24 jam dan katalis terkini).
-4. **V4: Google Gemini-Pro-Latest** — *Deep Multi-Angle Reasoner* (analisis kausalitas, contrarian crowdedness, dan pola historis).
+Sebelum order dieksekusi, bot memperkaya data pasar real-time dari **OAK Research Remote MCP Server** (`oak_mcp_client.py` $\to$ `https://oakresearch.io/api/mcp`) lalu menjalankan analisis **4-Voter Multi-Vendor Swarm + CRO Meta-Aggregator (`glm-5.3`)** yang dirancang berdasarkan hasil **OAK Trading Benchmark**:
+- **Pre-Research MCP Data (`[DATA REAL-TIME OAK RESEARCH MCP]`):** Menyuntikkan *global market overview* (`get_market_overview`), kalender makro/earnings/token-unlock 7 hari (`get_calendar`), berita utama (`get_news`), serta metrik fundamental/on-chain spesifik aset (`get_crypto` / `get_tradfi`) lewat OAuth 2.1 PKCE dengan rotasi token otomatis.
+1. **V1 (`glm-5.2-fast-preview` via DashScope `DASHSCOPE_API_KEY`):** *Fast Validator* — deteksi kata kunci dan polaritas permukaan berbiaya rendah (dapat dioverride lewat `DASHSCOPE_MODEL_V1`).
+2. **V2 (`glm-5.3-prime` via DashScope `DASHSCOPE_API_KEY`):** *Alpha Signal Analyst* — varian #1 OAK Trading Benchmark (+29.4%, 0 likuidasi) untuk kredibilitas sumber dan konsistensi narasi (override: `DASHSCOPE_MODEL`).
+3. **V3 (`minimax-m3` via ClassAI Router `DASHSCOPE_API_GEMINI_KEY`):** *Conservative Risk Guard* — peringkat #7 OAK dengan *Max Drawdown* terendah (`-6.5%`, 0 likuidasi, hemat biaya), berfokus pada risiko katalis dan proteksi modal (override: `GEMINI_MODEL`).
+4. **V4 (`claude-haiku-5.5` via ClassAI Router `DASHSCOPE_API_GEMINI_KEY`):** *Fast Multi-Angle Reasoner* — latensi ~1.84s dengan konteks 1M token untuk menganalisis kausalitas, posisi *crowded*, dan preseden historis (override: `GEMINI_MODEL_V4`).
+*(Catatan: Apabila `MULTI_OPP_GLM_FALLBACK=true` dan jumlah peluang `> 1`, V3/V4 dapat dialihkan sementara ke GLM DashScope; default produksi `false` agar keragaman 3-vendor tetap aktif sepanjang waktu.)*
 
 Keempat voter menilai **7 Parameter Standar Validasi (P1-P7)** yang sama secara independen:
 - **P1 `sentiment_polarity` (Weight: 0.25):** Nada sentimen 7 hari (-1.0 bearish ekstrem hingga +1.0 bullish ekstrem).
@@ -143,18 +147,18 @@ Keempat voter menilai **7 Parameter Standar Validasi (P1-P7)** yang sama secara 
 - **P6 `contrarian_check` (Weight: 0.10):** Posisi pasar terlalu padat/crowded (0.0 sehat hingga 1.0 sangat crowded berisiko reversal).
 - **P7 `historical_pattern` (Weight: 0.10):** Analogi terhadap preseden pola historis pasar serupa (-1.0 negatif hingga +1.0 positif).
 
-### 5.1 Pre-Processing Varians & Meta-Aggregator (Qwen-Max)
+### 5.1 Pre-Processing Varians, CRO Meta-Aggregator (`glm-5.3`), & SFT Dataset Hook
 1. **Analisis Varians Parameter (Rule-Based):**
    - Menghitung rata-rata (*mean*) dan varians untuk setiap parameter P1–P7.
    - Mengklasifikasikan level konsensus: `UNANIMOUS` (<0.05), `STRONG` (<0.15), `MIXED` (<0.30), atau `SPLIT` (≥0.30).
    - Mendeteksi voter outlier bila varians > 0.15.
-2. **Meta-Aggregator (Qwen-Max):**
-   - Menganalisis alasan outlier dan bobot per-parameter secara objektif tanpa bias vendor.
+2. **Meta-Aggregator CRO (`glm-5.3` via DashScope `DASHSCOPE_API_KEY`):**
+   - Pemenang #1 **OAK Trading Benchmark** (`glm-5.3`, override `DASHSCOPE_MODEL_AGG`) bertindak sebagai **Chief Risk Officer (CRO)** yang menyintesiskan skor berbobot P1–P7, data OAK Research MCP, dan deteksi outlier.
    - Menghasilkan `final_score` terbobot, `overall_confidence`, `overall_consensus_level`, dan `vendor_alignment`.
-   - Mengaktifkan proteksi bila terjadi `SPLIT` konsensus atau divergensi tajam antara kubu Qwen dan Gemini.
-3. **Fallback Synthesis:**
-   - Bila salah satu voter mengalami rate limit atau gangguan koneksi, sistem tetap berjalan dengan voter yang aktif secara re-normalized.
-   - Jika Meta-Aggregator offline, sistem mengeksekusi rumus sintesis deterministik berbasis bobot P1–P7.
+   - Mengaktifkan proteksi bila terjadi `SPLIT` konsensus atau divergensi tajam antar-vendor.
+3. **Rantai Fallback Berlapis & SFT Training Pipeline (`training_data.py`):**
+   - Bila `glm-5.3` mengalami kendala sementara, aggregator otomatis fallback ke rantai DashScope (`glm-5.3-prime` $\to$ `glm-5.2-fast-preview` $\to$ `qwen-plus` $\to$ `qwen-flash`), lalu ke ClassAI Router (`claude-opus-5.5` via `CLASSAI_MODEL_AGG` $\to$ `gpt-6.1-sol` via `CLASSAI_MODEL_AGG_FALLBACK`), hingga akhirnya sintesis deterministik berbasis bobot P1–P7.
+   - Setiap output riset AI tervalidasi otomatis disimpan dalam format chat-messages `<think>...</think>` + JSON ke Google Sheet tab **`Data Training`** (`12` kolom, deduped oleh `Sample ID`, target $\ge 1.000$ baris) dan `logs/training_dataset.jsonl` untuk fine-tuning model Fase 2.
 
 ### 5.2 Decision Matrix (Keputusan Eksekusi Swarm AI)
 
@@ -172,7 +176,7 @@ Keempat voter menilai **7 Parameter Standar Validasi (P1-P7)** yang sama secara 
 
 *Aturan Gerbang Kualitas Entry & Ekonomi Tambahan (E1–E5):*
 - **HALF di Bawah Floor (`E1`):** Jika verdict `HALF` menghasilkan margin `< $2.50`, bot otomatis **SKIP** (`HALF di bawah floor exchange`), tidak lagi dinaikkan paksa ke `$2.50`.
-- **Batas Frekuensi 24 Jam (`E4`):** Maksimal **2 entry/aset/24 jam** (`max_entries_per_asset_24h`) dan **8 entry total/24 jam** (`max_entries_per_day`) yang dilacak di `logs/market_regime.json`.
+- **Batas Frekuensi 24 Jam (`E4`):** Maksimal **2 entry/aset/24 jam** (`max_entries_per_asset_24h`) dan **8 entry total/24 jam** (`max_entries_per_day`) untuk verdict `HALF` (dilacak di `logs/market_regime.json`), sedangkan **verdict `'GO'` otomatis melewati batas frekuensi 24 jam ini**.
 - **Circuit Breaker Harian UTC (`E4`):** Jika ekuitas turun $\ge 5\%$ (`daily_loss_limit_pct`) dari ekuitas awal hari UTC, seluruh entry baru dihentikan hingga `00:00 UTC` berikutnya disertai alert Telegram (risk monitor tetap berjalan normal).
 - **Gerbang Ekonomi Funding vs Fee (`E5`):** Entry hanya lolos jika `expected_funding = |funding_daily| × (expected_hold_hours / 24)` memenuhi `expected_funding >= (2 × 0.0009 + price_slippage) × 1.5` (`expected_hold_hours` default `24` jam). Laporan `stats` juga memantau *median hold time* dan memberi peringatan jika jauh di bawah target *carry*.
 
@@ -251,28 +255,31 @@ Sistem beroperasi 100% secara otonom di cloud GitHub Actions runners dengan nol 
 └────────────────────────────────────────────────────────────────────────────────────────┘
 
     GitHub & Google Cloud Scheduler (Precision Triggers)
-    ├── daily-scan.yml      (07:17 & 19:17 WIB / 2x sehari) → Master Scan 127 kontrak + Swarm AI + Sheet
+    ├── daily-scan.yml      (07:17 & 19:17 WIB / 2x sehari) → Master Scan + OAK MCP + Swarm AI + Sheet
     ├── risk-monitor.yml    (Tiap 10 menit WIB)              → Pengawas 4-lapis risiko intensif + Smart Fast-Exit Idle
-    ├── market-execute.yml  (Tiap 2 jam di menit 43 WIB)     → Eksekusi Saham US & Komoditas (Prioritas Sheet Cache)
-    └── crypto-execute.yml  (Tiap 2 jam di menit 11 WIB)     → Eksekusi Crypto Tier-1 Scalp Turn-over (24/7)
+    ├── market-execute.yml  (Tiap 2 jam di menit 43 WIB)     → Saham US (13:30–21:00 UTC) & Komoditas 24/7 (Gear 0–3)
+    └── crypto-execute.yml  (Tiap 2 jam di menit 11 WIB)     → Eksekusi Crypto Tier-1 (10 aset 24/7, Gear 0–3)
                    │
                    ▼
      ┌───────────────────────────┐
      │   GitHub Actions Runner   │
-     │   (Ubuntu Latest / Py 3.12│
+     │   (Ubuntu Latest / Py 3.14│
      └─────────────┬─────────────┘
                    │
       [Injeksi Secrets & Environment]
       • WALT_CLIENT_ID & WALT_REFRESH_TOKEN
-      • DASHSCOPE_API_KEY & DASHSCOPE_MODEL
+      • OAK_MCP_CLIENT_ID & OAK_MCP_REFRESH_TOKEN
+      • DASHSCOPE_API_KEY & DASHSCOPE_API_GEMINI_KEY
       • TELEGRAM_BOT_TOKEN & TELEGRAM_CHAT_ID
-      • GH_PAT (Untuk rotasi secret otomatis)
+      • GH_PAT (Untuk rotasi secret otomatis Walt & OAK MCP)
                    │
                    ▼
      ┌───────────────────────────┐
      │        walt_bot.py        │
      │  - token_manager.py       │ ──> Auto-refresh Bearer token & auto-sync Secret
-     │  - llm_research.py        │ ──> Qwen-Plus financial reasoning & sentiment
+     │  - oak_mcp_client.py      │ ──> Live macro, calendar, news & metric OAK MCP
+     │  - llm_research.py        │ ──> GLM-5.2/5.3 + MiniMax M3 + Haiku 5.5 + GLM-5.3 CRO
+     │  - training_data.py       │ ──> Simpan <think> SFT JSONL ke tab Data Training
      │  - Walt MCP Relay API     │ ──> Eksekusi order & data market Walt Perps
      │  - notifier.py            │ ──> Notifikasi laporan terstruktur Telegram
      └─────────────┬─────────────┘
@@ -290,10 +297,10 @@ Sistem beroperasi dengan arsitektur hibrida: cron internal GitHub Actions diduku
 
 | Workflow File | Jadwal Scheduler (WIB) | Jadwal Cron (UTC) | Target Cloud Scheduler | Fungsi Utama |
 |---|---|---|---|---|
-| [daily-scan.yml](file:///.github/workflows/daily-scan.yml) | **07:17 & 19:17 WIB** (2x Sehari) | `17 0,12 * * *` | `walt-daily-scan` | Master Scan seluruh kontrak, ranking peluang funding harian, riset sentimen Swarm AI (Qwen+Gemini), eksekusi instan sinyal GO/HALF, simpan database ke Google Sheet. |
-| [risk-monitor.yml](file:///.github/workflows/risk-monitor.yml) | **Dinamis 5–10 Menit** (6x–12x/Jam + Smart Idle) | `*/10 * * * *` | `walt-risk-monitor` | Evaluasi risiko adaptif (True Zero-Risk Trailing & Asymmetric R:R). Fast-exit <2 detik saat 0 posisi; otomatis mempercepat ke **tiap ~5 menit (12x/jam)** jika $\ge 3$ posisi aktif, kategori `HALF`, atau dekat TP ($\ge +0.70\%$) / SL ($\le -1.00\%$); dan stabil **10 menit** untuk posisi `GO` tenang. |
-| [market-execute.yml](file:///.github/workflows/market-execute.yml) | **Dinamis 1h / 2h** (Calmed Adaptive) | `43 */2 * * *` | `walt-market-execute` | Eksekusi adaptif Saham US & Komoditas 24/7: **Gear 2 (1h)** saat peluang funding $\ge 3$ aset ($\ge 0.5\%$/hari) atau $\ge 2$ ekstrem $\ge 0.8\%$/hari; **Gear 1 (2h)** saat kondisi normal/sepi; dan **Gear 0 (Fast-Exit)** saat slot penuh. Dilengkapi *3-hour re-entry cooldown*. |
-| [crypto-execute.yml](file:///.github/workflows/crypto-execute.yml) | **Dinamis 1h / 2h** (Calmed Adaptive) | `11 */2 * * *` | `walt-crypto-execute` | Eksekusi adaptif Crypto Bluechip (10 Tier-1) dengan mekanisme **Calmed Adaptive (1h / 2h)** dan *3-hour re-entry cooldown* untuk memanen funding secara berkelanjutan. |
+| [daily-scan.yml](file:///.github/workflows/daily-scan.yml) | **07:17 & 19:17 WIB** (2x Sehari) | `17 0,12 * * *` | `walt-daily-scan` | Master Scan 31 aset diizinkan (Saham US hanya di jam reguler AS `13:30–21:00 UTC`), pengayaan OAK Research MCP, Swarm AI (`GLM-5.3` CRO), eksekusi GO/HALF, simpan 5 tab Google Sheets (`Daily_Scans` 30 kolom & `Data Training`). |
+| [risk-monitor.yml](file:///.github/workflows/risk-monitor.yml) | **Dinamis 5–10 Menit** (6x–12x/Jam + Smart Idle) | `*/10 * * * *` | `walt-risk-monitor` | Evaluasi risiko adaptif 24/7 (True Zero-Risk Trailing & Asymmetric R:R). Fast-exit <2 detik saat 0 posisi; otomatis mempercepat ke **tiap ~5 menit (12x/jam)** jika $\ge 3$ posisi aktif, kategori `HALF`, atau dekat TP ($\ge +0.70\%$) / SL ($\le -1.00\%$); dan stabil **10 menit** untuk posisi `GO` tenang. |
+| [market-execute.yml](file:///.github/workflows/market-execute.yml) | **4-Tier Gear 0–3** (Dinamis) | `43 */2 * * *` | `walt-market-execute` | Eksekusi Saham US (`13:30–21:00 UTC`) & Komoditas (24/7) dengan **4-Tier Execution Gear**: **Gear 0 (`0` GO)** = maks 2x selama jam bursa AS (`225m`); **Gear 1 (`< 2` GO)** = `120m` (2 jam); **Gear 2 (`2..5` GO)** = `60m` (1 jam); **Gear 3 (`> 5` GO / `GEAR_3_FULL_RESEARCH=true`)** = `60m` + izin riset AI penuh untuk setiap keputusan trading. |
+| [crypto-execute.yml](file:///.github/workflows/crypto-execute.yml) | **4-Tier Gear 0–3** (Dinamis) | `11 */2 * * *` | `walt-crypto-execute` | Eksekusi mandiri Crypto Bluechip (10 Tier-1, 24/7) memakai **4-Tier Execution Gear** (`Gear 0` `720m` / 2x sehari; `Gear 1` `120m`; `Gear 2` `60m`; `Gear 3` `60m` Full AI Research) + *3-hour re-entry cooldown*. |
 
 ### 7.2 Otomasi Rotasi Token OAuth (`token_manager.py`)
 - Akses ke Walt API menggunakan protokol OAuth 2.0 PKCE dengan Bearer token yang memiliki masa berlaku terbatas.
@@ -305,12 +312,13 @@ Sistem beroperasi dengan arsitektur hibrida: cron internal GitHub Actions diduku
 - **Fault-Tolerant Exponential Backoff:** `notifier.py` dilengkapi sistem 3x percobaan ulang (*retry*) dengan jeda eksponensial untuk mengantisipasi gangguan jaringan sementara (`Connection reset by peer`).
 - **GitHub Step Summary:** Setiap eksekusi mencatat audit log terformat rapi pada antarmuka *Actions Step Summary* di repository GitHub.
 
-### 7.4 Sinkronisasi Real-Time Google Sheets (`sheet_logger.py`)
-- Setiap hasil scan, eksekusi order, penutupan posisi, dan ringkasan PnL harian secara otomatis dikirimkan ke Google Sheets melalui Google Apps Script Webhook (`google_apps_script.js`):
-  - **`Daily_Scans`:** Hasil pemindaian kontrak dan skor konsensus Swarm AI P1–P7.
-  - **`Executions_Log`:** Log 12 kolom terstandarisasi untuk setiap order (`EXECUTED`, `SKIP`, `FAILED`, `ERROR`).
+### 7.4 Sinkronisasi Real-Time Google Sheets (`sheet_logger.py` & `training_data.py`)
+- Setiap hasil scan, eksekusi order, penutupan posisi, ringkasan PnL harian, dan dataset pelatihan SFT otomatis dikirimkan ke Google Sheets melalui Apps Script Webhook v2 (`google_apps_script.js`, versi `2026-11-21.1` terverifikasi aktif untuk **5 tab**):
+  - **`Daily_Scans`:** Tepat **30 kolom bernama** (19 kolom scan + konsensus Swarm AI P1–P7 + 11 kolom diagnostik Market Gravity `mg_*`), dengan dedupe read-back verification.
+  - **`Executions_Log`:** Log terstandarisasi untuk setiap order (`EXECUTED`, `SKIP`, `FAILED`, `ERROR`).
   - **`Closed_Positions`:** Riwayat penutupan posisi (baik yang ditutup oleh monitor karena funding flip/breach maupun auto-close TP/SL exchange yang terdeteksi lewat diff snapshot `logs/open_snapshot.json`).
   - **`PnL_Tracker`:** Rekapitulasi harian idempotent (1 baris per tanggal UTC) berisi total ekuitas, funding bulan berjalan, dan progres terhadap target $100/bulan.
+  - **`Data Training`:** Tab khusus SFT dataset (`12` kolom bernama, deduped oleh `Sample ID`, terisi baris awal tervalidasi menuju target $\ge 1.000$ baris `<think>...</think>` + JSON untuk fine-tuning Fase 2).
 - Evaluasi statistik performa keseluruhan trade dapat dijalankan kapan saja melalui perintah CLI `python walt_bot.py stats`.
 
 ---
@@ -340,14 +348,19 @@ Sistem beroperasi dengan arsitektur hibrida: cron internal GitHub Actions diduku
 
 ## 9. Ringkasan File & Komponen Terkait
 
-- [`walt_bot.py`](file:///walt_bot.py) — Core bot orchestrator (scan, research, market execute, crypto execute, 4-layer risk monitor, order size clamping).
-- [`token_manager.py`](file:///token_manager.py) — Otomasi refresh OAuth token dan sinkronisasi secret GitHub via PyNaCl.
-- [`llm_research.py`](file:///llm_research.py) — Client Dual-AI Swarm (Alibaba Qwen + Google Gemini) 4-voter consensus & 7-parameter scoring.
+- [`walt_bot.py`](file:///walt_bot.py) — Core bot orchestrator (Gear 0–3, US stock hours UTC, 4-layer risk monitor, order size clamping).
+- [`token_manager.py`](file:///token_manager.py) — Otomasi refresh OAuth token Walt dan sinkronisasi secret GitHub via PyNaCl.
+- [`oak_mcp_client.py`](file:///oak_mcp_client.py) — Klien Streamable HTTP OAK Research MCP (`https://oakresearch.io/api/mcp`) + auto-rotate refresh token ke `.env` & GitHub Secrets.
+- [`setup_oak_oauth.py`](file:///setup_oak_oauth.py) — Skrip interaktif otentikasi awal OAuth 2.1 PKCE OAK Research MCP.
+- [`llm_research.py`](file:///llm_research.py) — Client 4-Voter Multi-Vendor Swarm (`glm-5.2-fast-preview`, `glm-5.3-prime`, `minimax-m3`, `claude-haiku-5.5`) + CRO Meta-Aggregator `glm-5.3` + injeksi OAK MCP.
+- [`training_data.py`](file:///training_data.py) — Pengumpul otomatis dataset SFT `<think>` ke tab Google Sheet `Data Training` & `logs/training_dataset.jsonl`.
+- [`tools/export_training_data.py`](file:///tools/export_training_data.py) — Utilitas backfill/ekspor dataset `Data Training` menuju target >= 1.000 baris SFT.
 - [`notifier.py`](file:///notifier.py) — Pengirim pesan notifikasi format Markdown ke Telegram Bot API dengan 3x exponential backoff retry.
-- [`sheet_logger.py`](file:///sheet_logger.py) — Modul pengirim telemetry eksekusi dan scan ke Google Sheets Webhook.
-- [`google_apps_script.js`](file:///google_apps_script.js) — Skrip Google Apps Script endpoint penampung data spreadsheet.
-- [`.github/workflows/`](file:///.github/workflows/) — Definisi cron scheduler cloud runners (daily scan, risk monitor, market execute, crypto execute).
+- [`sheet_logger.py`](file:///sheet_logger.py) — Modul pengirim telemetry 5 tab Google Sheets via Webhook v2 & gviz reader.
+- [`google_apps_script.js`](file:///google_apps_script.js) — Skrip Google Apps Script Webhook v2 (`2026-11-21.1`) penampung 5 tab spreadsheet.
+- [`.github/workflows/`](file:///.github/workflows/) — Definisi scheduler cloud runners (daily scan, risk monitor, market execute, crypto execute).
 - [PRD.md](file:///PRD.md) — Dokumen spesifikasi kebutuhan produk untuk Roadmap Evolusi SaaS Fase 1 & Fase 2.
+- [AUDIT.md](file:///AUDIT.md) — Log audit independen dan rekam jejak verifikasi teknis Ronde 2–9+.
 
 ## 10. USULAN strategi berbasis struktur likuiditas (Ronde 8) - **BELUM AKTIF**
 

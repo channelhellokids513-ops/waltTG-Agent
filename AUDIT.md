@@ -1509,6 +1509,22 @@ Catatan yang tetap berlaku: baris dobel dari sebelum Bug C diperbaiki (rows 54-6
 itu jejak historis, bukan kerusakan yang sedang berjalan. Klaim "nol baris dobel" sekarang hanya
 berlaku sejak siklus ini, bukan untuk seluruh isi ledger.
 
+### 3v. Penyelarasan Pasca-Ronde 9: Pembersihan Daily_Scans, Jam Saham AS UTC, Gear 0–3, OAK Research MCP, Swarm GLM-5.3, dan Tab Data Training (2026-11-22)
+
+Setelah Ronde 9 menutup seluruh bug webhook v2, tujuh pembaruan arsitektur diterapkan bertahap dan terverifikasi hijau di `CI Unit Tests`:
+
+1. **Konsolidasi Header & Deduplikasi `Daily_Scans` (`c5de177`, `CI Unit Tests #45002571050`):** Menyelaraskan tab `Daily_Scans` menjadi tepat **30 kolom bernama** tanpa duplikat (`110` baris bersih) serta memperkuat `apps_script_webhook.gs` v2 (`2026-11-21.1`) agar write/read-back tetap deterministik.
+2. **Bypass Batas Frekuensi 24 Jam untuk Verdict `'GO'` (`3c6f36b`):** `check_entry_frequency_limits()` di `walt_bot.py` membebaskan sinyal bervonis `'GO'` dari kuota `2 entry/aset/24h` dan `8 entry/24h` agar peluang funding kuat tidak tertahan, sementara `'HALF'` tetap dibatasi dan pengaman keras (*circuit breaker* `-5%`, *cooldown* 3 jam, batas slot dinamis, serta *cash buffer* 15%) tetap berlaku penuh.
+3. **Filter Jam Bursa Reguler Saham AS UTC (`0c326bc`):** `is_us_stock_market_open_utc()` membatasi pemindaian riset AI dan pembukaan posisi baru `ALLOWED_STOCKS` ke jam operasional reguler NYSE/NASDAQ (`Senin–Jumat 13:30–21:00 UTC`, toggle `US_STOCK_HOURS_ONLY=true`). Komoditas & 10 Crypto Bluechip tetap aktif 24/7, dan `risk-monitor` tetap memantau seluruh posisi terbuka 24/7.
+4. **Sistem 4-Tier Execution Gear `0..3` (`fc525ce`, `CI Unit Tests #45008153855`):**
+   - `GEAR_0_IDLE_2X_US` / `GEAR_0_IDLE_720M` (`0` GO): `2x` selama jam bursa Saham AS (`225m`, maks 2x/sesi) untuk `market`, dan `2x/hari` (`720m`) untuk `crypto`.
+   - `GEAR_1_CONSERVATIVE_120M` (`< 2` GO): `120m` (2 jam).
+   - `GEAR_2_ACTIVE_60M` (`2..5` GO): `60m` (1 jam).
+   - `GEAR_3_FULL_RESEARCH_60M` (`> 5` GO atau `GEAR_3_FULL_RESEARCH=true`): `60m` + mengizinkan riset & analisa AI penuh untuk **setiap keputusan trading** (mengangkat cap `max_otf_calls` & `CRYPTO_RESEARCH_TOP_N`).
+5. **Pipeline SFT Dataset `Data Training` (`7b4039c` & `5cb6394`, `CI Unit Tests #45009622435`):** Membuat `training_data.py` & `tools/export_training_data.py` yang mencatat setiap riset tervalidasi dalam format chat-messages `<think>...</think>` + JSON (`logs/training_dataset.jsonl`), sekaligus menyiapkan tab Google Sheet **`Data Training`** (`12` kolom bernama, deduped `Sample ID`, seeded 48 baris historis bersih menuju target `>= 1.000` baris SFT). Kontrak isolasi `walt_bot.py` vs modul `market_gravity` dijaga melalui pembacaan cache internal di `training_data.py` (`602 passed`).
+6. **Integrasi Live OAK Research Remote MCP Server (`65f9843` & `8c7ce24`, `CI Unit Tests #45018375476`):** Membuat `oak_mcp_client.py` & `setup_oak_oauth.py` yang terhubung langsung ke `https://oakresearch.io/api/mcp` (`Streamable HTTP 2025-03-26` + OAuth 2.1 PKCE), teruji live menyinkronkan skema alat aktual (`get_market_overview`, `get_calendar(from, to)`, `get_news`, `get_crypto(id, locale)`, `get_tradfi(ticker)` dengan 0 error) dan otomatis menulis balik rotasi `OAK_MCP_REFRESH_TOKEN` ke `.env` & GitHub Secrets.
+7. **Swarm Hemat Berbasis OAK Benchmark & Aggregator `glm-5.3` (`341011f`, `c2a1e20`, `5d73c58`, `CI Unit Tests #45021257348`):** Menyesuaikan `GeminiClient` ke **ClassAI Router** (`https://router.classai.id/v1` via `DASHSCOPE_API_GEMINI_KEY`), menetapkan V1 `glm-5.2-fast-preview` + V2 `glm-5.3-prime` (DashScope `DASHSCOPE_API_KEY`), V3 `minimax-m3` (#7 OAK Max DD `-6.5%`, 0 liq) + V4 `claude-haiku-5.5` (ClassAI Router hemat), serta **CRO Meta-Aggregator utama `glm-5.3`** (#1 OAK Trading Benchmark winner `+29.4%`, 0 liq) melalui **DashScope (`DASHSCOPE_API_KEY`)** dengan fallback DashScope GLM/Qwen $\to$ ClassAI (`claude-opus-5.5` $\to$ `gpt-6.1-sol`) $\to$ deterministik (`608 passed, 1 skipped`).
+
 ## 4. Bukti eksternal yang mendukung kesimpulan
 
 
