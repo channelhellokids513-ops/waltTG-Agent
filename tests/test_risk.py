@@ -439,11 +439,19 @@ def test_dynamic_monitor_cadence_rules():
 
 
 # -----------------------------------------------------------------------------
-# 10. Adaptive Execution Gear (60m / 120m) & Cooldown Re-Entry 3 Jam
+# 10. Adaptive Execution Gear (4 Tingkatan: 0, 1, 2, 3) & Cooldown Re-Entry 3 Jam
 # -----------------------------------------------------------------------------
 
 def test_evaluate_execution_gear_and_cooldown(tmp_path):
-    from walt_bot import Opportunity, evaluate_execution_gear, _set_asset_cooldown, _is_asset_in_cooldown
+    from datetime import datetime, timezone
+    from walt_bot import (
+        Opportunity,
+        evaluate_execution_gear,
+        is_gear3_full_research,
+        _set_asset_cooldown,
+        _is_asset_in_cooldown,
+        _should_run_gear0_cycle,
+    )
 
     def _opp(asset: str, funding: float) -> Opportunity:
         return Opportunity(
@@ -455,40 +463,61 @@ def test_evaluate_execution_gear_and_cooldown(tmp_path):
             side="short" if funding > 0 else "long",
         )
 
-    # 1. Gear 2 Aktif (60m): >= 3 peluang >= 0.5%/hari atau >= 2 ekstrem >= 0.8%/hari
-    opps_many = [_opp("NVDA", 0.006), _opp("SNDK", 0.0055), _opp("MSTR", 0.006)]
-    gear, interval, _ = evaluate_execution_gear(opps_many)
-    assert gear == "GEAR_2_ACTIVE_60M"
-    assert interval == 60
+    # 1. Gear 0 Idle: 0 peluang GO -> market 2x selama jam operasional Saham AS (225m), crypto 720m
+    gear_0_m, interval_0_m, _ = evaluate_execution_gear([], category="market", full_research_mode=False)
+    assert gear_0_m == "GEAR_0_IDLE_2X_US"
+    assert interval_0_m == 225
+    gear_0_c, interval_0_c, _ = evaluate_execution_gear([_opp("BTC", 0.001)], category="crypto", full_research_mode=False)
+    assert gear_0_c == "GEAR_0_IDLE_720M"
+    assert interval_0_c == 720
 
-    opps_extreme = [_opp("NVDA", 0.009), _opp("SNDK", 0.0085)]
-    gear_ex, interval_ex, _ = evaluate_execution_gear(opps_extreme)
-    assert gear_ex == "GEAR_2_ACTIVE_60M"
-    assert interval_ex == 60
+    # 2. Gear 1 Conservative (120m / 2 jam): < 2 peluang GO (tepat 1 peluang)
+    gear_1, interval_1, _ = evaluate_execution_gear([_opp("AAPL", 0.0055)], full_research_mode=False)
+    assert gear_1 == "GEAR_1_CONSERVATIVE_120M"
+    assert interval_1 == 120
 
-    # 2. Gear 1 Konservatif (120m / 2 jam): 1-2 peluang >= 0.5%/hari dan < 2 ekstrem
-    opps_quiet = [_opp("AAPL", 0.0051), _opp("BTC", 0.0052)]
-    gear_120, interval_120, _ = evaluate_execution_gear(opps_quiet)
-    assert gear_120 == "GEAR_1_CONSERVATIVE_120M"
-    assert interval_120 == 120
+    # 3. Gear 2 Active (60m / 1 jam): 2 s/d 5 peluang GO (termasuk 5 peluang GO)
+    opps_five = [
+        _opp("NVDA", 0.006), _opp("SNDK", 0.0055), _opp("MSTR", 0.006),
+        _opp("TSLA", 0.0058), _opp("AAPL", 0.0052),
+    ]
+    gear_2, interval_2, _ = evaluate_execution_gear(opps_five, full_research_mode=False)
+    assert gear_2 == "GEAR_2_ACTIVE_60M"
+    assert interval_2 == 60
+    assert is_gear3_full_research(gear_2) is False
 
-    # 2b. Gear 0 Idle (720m / 12 jam = 2x sehari): 0 peluang >= 0.5%/hari
-    gear_0, interval_0, _ = evaluate_execution_gear([])
-    assert gear_0 == "GEAR_0_IDLE_720M"
-    assert interval_0 == 720
-    gear_0_low, interval_0_low, _ = evaluate_execution_gear([_opp("AAPL", 0.001)])
-    assert gear_0_low == "GEAR_0_IDLE_720M"
-    assert interval_0_low == 720
+    # 4. Gear 3 Full Research Permission (60m): > 5 peluang GO atau full_research_mode=True
+    opps_six = opps_five + [_opp("META", 0.0061)]
+    gear_3, interval_3, _ = evaluate_execution_gear(opps_six, full_research_mode=False)
+    assert gear_3 == "GEAR_3_FULL_RESEARCH_60M"
+    assert interval_3 == 60
+    assert is_gear3_full_research(gear_3) is True
 
-    # Gear 0 throttle: maksimal 2x sehari (720m)
-    from walt_bot import _should_run_gear0_cycle
+    gear_3_ov, interval_3_ov, _ = evaluate_execution_gear([_opp("NVDA", 0.006)], full_research_mode=True)
+    assert gear_3_ov == "GEAR_3_FULL_RESEARCH_60M"
+    assert interval_3_ov == 60
+
+    # Gear 0 throttle:
+    # - market: hanya saat jam operasional Saham AS (Senin-Jumat 13:30-21:00 UTC), maks 2x/hari
     regime_g0 = str(tmp_path / "gear0_regime.json")
-    t_g0 = 1_700_000_000.0
-    assert _should_run_gear0_cycle("market", now_ts=t_g0, regime_path=regime_g0)[0] is True
-    assert _should_run_gear0_cycle("market", now_ts=t_g0 + 6 * 3600, regime_path=regime_g0)[0] is False
-    assert _should_run_gear0_cycle("market", now_ts=t_g0 + 12 * 3600, regime_path=regime_g0)[0] is True
+    t_closed = datetime(2026, 11, 23, 10, 0, tzinfo=timezone.utc)   # Senin 10:00 UTC (tutup)
+    t_open_1 = datetime(2026, 11, 23, 14, 0, tzinfo=timezone.utc)   # Senin 14:00 UTC (buka)
+    t_open_early = datetime(2026, 11, 23, 15, 30, tzinfo=timezone.utc)  # +90m (< 225m)
+    t_open_2 = datetime(2026, 11, 23, 18, 0, tzinfo=timezone.utc)   # +240m (>= 225m, run ke-2)
+    t_open_3 = datetime(2026, 11, 23, 20, 50, tzinfo=timezone.utc)  # sudah 2x hari ini -> blokir
+    assert _should_run_gear0_cycle("market", now_utc=t_closed, regime_path=regime_g0)[0] is False
+    assert _should_run_gear0_cycle("market", now_utc=t_open_1, regime_path=regime_g0)[0] is True
+    assert _should_run_gear0_cycle("market", now_utc=t_open_early, regime_path=regime_g0)[0] is False
+    assert _should_run_gear0_cycle("market", now_utc=t_open_2, regime_path=regime_g0)[0] is True
+    assert _should_run_gear0_cycle("market", now_utc=t_open_3, regime_path=regime_g0)[0] is False
 
-    # 3. Cooldown Re-Entry 3 Jam
+    # - crypto: 2x sehari (720m)
+    t_g0 = 1_700_000_000.0
+    assert _should_run_gear0_cycle("crypto", now_ts=t_g0, regime_path=regime_g0)[0] is True
+    assert _should_run_gear0_cycle("crypto", now_ts=t_g0 + 6 * 3600, regime_path=regime_g0)[0] is False
+    assert _should_run_gear0_cycle("crypto", now_ts=t_g0 + 12 * 3600, regime_path=regime_g0)[0] is True
+
+    # 5. Cooldown Re-Entry 3 Jam
     regime_file = str(tmp_path / "market_regime.json")
     in_cd, _ = _is_asset_in_cooldown("NVDA", regime_path=regime_file)
     assert in_cd is False

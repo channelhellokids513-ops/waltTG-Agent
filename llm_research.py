@@ -79,7 +79,27 @@ MODEL_V1 = os.getenv("DASHSCOPE_MODEL_V1", "qwen-flash")
 MODEL_V2 = os.getenv("DASHSCOPE_MODEL", "qwen-plus")
 MODEL_V3 = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
 MODEL_V4 = os.getenv("GEMINI_MODEL_V4", "gemini-pro-latest")
+# Kebijakan Routing Multi-Peluang: saat banyak peluang (> 1), Voter 3 & Voter 4 dialihkan
+# dari Google Gemini (Flash/Pro) ke GLM via DashScope memakai DASHSCOPE_API_KEY.
+MODEL_V3_GLM = os.getenv("DASHSCOPE_MODEL_V3_GLM", "glm-5.2-fast-preview")
+MODEL_V4_GLM = os.getenv("DASHSCOPE_MODEL_V4_GLM", "glm-5.3-prime")
 MODEL_AGGREGATOR = os.getenv("DASHSCOPE_MODEL_AGG", "qwen-max")
+
+
+def should_use_glm_for_secondary_voters(
+    opportunity_count: int = 0,
+    is_idle: Optional[bool] = None,
+) -> bool:
+    """
+    Tentukan provider untuk Voter 3 & Voter 4 (pengganti Gemini Flash & Pro):
+    - Kondisi Idle (is_idle=True atau opportunity_count <= 1): gunakan Gemini API
+      (gemini-flash-latest & gemini-pro-latest).
+    - Kondisi banyak peluang (opportunity_count > 1 dan tidak Idle): alihkan ke GLM
+      via DashScope (glm-5.2-fast-preview & glm-5.3-prime) menggunakan DASHSCOPE_API_KEY.
+    """
+    if is_idle is True:
+        return False
+    return int(opportunity_count or 0) > 1
 # Rantai fallback aggregator. Pada 2026-11-21 `qwen-max` terbukti menjawab
 # 403 "The free quota has been exhausted" - itu KUOTA, bukan bug kode - sedangkan
 # `qwen-plus` dan `qwen-flash` menjawab 200. Tanpa rantai ini, setiap riset aset
@@ -133,6 +153,7 @@ class Research:
     # siklus 3/4 voter tidak lagi dilaporkan sebagai siklus sehat.
     voter_failures: list[str] = field(default_factory=list)
     earnings_status: str = "unknown"  # unknown | ok | no_data | past_only | http_error:<kode> | exception:<tipe> | no_crumb
+    secondary_provider: str = "gemini"  # "gemini" (Idle) | "glm" (multi-opportunity > 1)
 
 
 # =============================================================================
@@ -153,11 +174,11 @@ class QwenClient:
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             },
-            timeout=60.0,
+            timeout=90.0,
         )
 
     def chat_json(self, messages: list[dict], model: Optional[str] = None) -> dict:
-        """Kirim request ke DashScope dengan response_format JSON."""
+        """Kirim request ke DashScope dengan response_format JSON (mendukung Qwen & GLM)."""
         target_model = model or self.model
         payload = {
             "model": target_model,
@@ -166,14 +187,17 @@ class QwenClient:
             "response_format": {"type": "json_object"},
         }
         r = self.client.post("/chat/completions", json=payload)
-        
-        # Fallback otomatis V1 -> V2. Dua punca yang TERBUKA berbeda tetapi sama-sama berarti
-        # "voter ini tidak bisa dipakai siklus ini": 429 (rate limit) dan 404 (model dipensiunkan
-        # upstream — kasus qwen-turbo, 2026-11-20). Tanpa 404, swarm diam-diam kehilangan 1 voter.
+
+        # Fallback otomatis V1 -> V2 dan V4 GLM -> V3 GLM saat 404/429 upstream.
         if r.status_code in (404, 429) and target_model == MODEL_V1:
             reason = "rate limited (429)" if r.status_code == 429 else "model not found (404)"
             log.warning(f"Qwen model {target_model} {reason}. Fallback ke {MODEL_V2}...")
             payload["model"] = MODEL_V2
+            r = self.client.post("/chat/completions", json=payload)
+        elif r.status_code in (404, 429) and target_model == MODEL_V4_GLM and MODEL_V3_GLM != MODEL_V4_GLM:
+            reason = "rate limited (429)" if r.status_code == 429 else "model not found (404)"
+            log.warning(f"GLM model {target_model} {reason}. Fallback ke {MODEL_V3_GLM}...")
+            payload["model"] = MODEL_V3_GLM
             r = self.client.post("/chat/completions", json=payload)
 
         r.raise_for_status()
@@ -643,6 +667,63 @@ def run_voter_4(
         return None
 
 
+def run_voter_3_glm(
+    qwen: QwenClient,
+    ticker: str,
+    headlines: list[str],
+    strategy_context: str = "",
+) -> Optional[dict]:
+    """Voter 3 (Multi-Peluang): GLM Fast (`glm-5.2-fast-preview`) via DashScope (pengganti Gemini Flash)."""
+    sys_prompt = (
+        "Kamu Voter 3: Realtime Market Validator (GLM Fast). Evaluasi apakah ada breaking news atau "
+        "katalis makro 24-48 jam terakhir yang mengonfirmasi atau membalikkan tren berita 7 hari."
+    )
+    user_prompt = (
+        f"Ticker: {ticker}\n"
+        f"{strategy_context}\n"
+        f"Headlines 7 hari terakhir:\n" + "\n".join(f"- {h}" for h in headlines) + "\n\n"
+        + UNIFIED_VOTER_SCHEMA_PROMPT.replace("{voter_id}", "V3_glm_fast")
+    )
+    try:
+        raw = qwen.chat_json(
+            [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_prompt}],
+            model=MODEL_V3_GLM,
+        )
+        return _extract_voter_params(raw, "V3_glm_fast")
+    except Exception as e:
+        log.warning(f"Voter 3 ({MODEL_V3_GLM}) error for {ticker}: {e}")
+        return None
+
+
+def run_voter_4_glm(
+    qwen: QwenClient,
+    ticker: str,
+    headlines: list[str],
+    strategy_context: str = "",
+) -> Optional[dict]:
+    """Voter 4 (Multi-Peluang): GLM Prime (`glm-5.3-prime`) via DashScope (pengganti Gemini Pro)."""
+    sys_prompt = (
+        "Kamu Voter 4: Senior Portfolio Manager & Deep Multi-Angle Reasoner (GLM Prime). "
+        "Tugasmu menganalisa rantai kausalitas 1-3 hari, risiko tersembunyi (hidden risks), posisi crowded (contrarian), "
+        "dan preseden historis agar bot terhindar dari jebakan harga."
+    )
+    user_prompt = (
+        f"Ticker: {ticker}\n"
+        f"{strategy_context}\n"
+        f"Headlines 7 hari terakhir:\n" + "\n".join(f"- {h}" for h in headlines) + "\n\n"
+        + UNIFIED_VOTER_SCHEMA_PROMPT.replace("{voter_id}", "V4_glm_prime")
+    )
+    try:
+        raw = qwen.chat_json(
+            [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_prompt}],
+            model=MODEL_V4_GLM,
+        )
+        return _extract_voter_params(raw, "V4_glm_prime")
+    except Exception as e:
+        log.warning(f"Voter 4 ({MODEL_V4_GLM}) error for {ticker}: {e}")
+        return None
+
+
 # =============================================================================
 # PRE-PROCESSING & VARIANCE ANALYSIS (RULE-BASED)
 # =============================================================================
@@ -820,7 +901,7 @@ def run_meta_aggregator(
     else:
         overall_consensus = "split"
 
-    # Evaluasi Vendor Alignment (Qwen vs Gemini)
+    # Evaluasi Vendor Alignment (Qwen vs Secondary Vendor: Gemini atau GLM)
     qwen_scores = [
         v["params"]["P1_sentiment_polarity"]["score"]
         for k, v in voter_verdicts.items()
@@ -829,7 +910,7 @@ def run_meta_aggregator(
     gemini_scores = [
         v["params"]["P1_sentiment_polarity"]["score"]
         for k, v in voter_verdicts.items()
-        if "gemini" in k.lower() and "P1_sentiment_polarity" in v.get("params", {})
+        if ("gemini" in k.lower() or "glm" in k.lower()) and "P1_sentiment_polarity" in v.get("params", {})
     ]
 
     q_avg = sum(qwen_scores) / len(qwen_scores) if qwen_scores else None
@@ -894,11 +975,16 @@ def research_stock(
     gemini: Optional[GeminiClient] = None,
     funding_daily: Optional[float] = None,
     recommended_side: Optional[str] = None,
+    opportunity_count: int = 0,
+    is_idle: Optional[bool] = None,
 ) -> Research:
     """
     Eksekusi pipeline riset saham lengkap:
       1. Ambil data pasar & headlines berita 7 hari
-      2. Jalankan 4 Voter Swarm secara independen (2 Qwen + 2 Gemini) dengan konteks taktis 24-72 jam
+      2. Jalankan 4 Voter Swarm secara independen dengan konteks taktis 24-72 jam:
+         - Kondisi Idle (opportunity_count <= 1 / is_idle=True): 2 Qwen + 2 Gemini (Flash & Pro)
+         - Banyak peluang (opportunity_count > 1): 2 Qwen + 2 GLM (glm-5.2-fast-preview & glm-5.3-prime)
+           via DashScope (DASHSCOPE_API_KEY) untuk menghemat/mengalihkan beban API Gemini.
       3. Analisis varians & konsensus P1-P7
       4. Eksekusi Meta-Aggregator (Qwen-Max) dengan skor arah murni (bebas bias positif)
       5. Kembalikan objek Research terstandarisasi
@@ -909,6 +995,10 @@ def research_stock(
         funding_daily=funding_daily,
         recommended_side=recommended_side,
     )
+    use_glm = should_use_glm_for_secondary_voters(
+        opportunity_count=opportunity_count,
+        is_idle=is_idle,
+    )
 
     # Inisialisasi API clients jika belum tersedia
     if qwen is None and os.getenv("DASHSCOPE_API_KEY"):
@@ -917,11 +1007,20 @@ def research_stock(
         except Exception as e:
             log.warning(f"Inisialisasi Qwen gagal: {e}")
 
-    if gemini is None and (os.getenv("DASHSCOPE_API_GEMINI_KEY") or os.getenv("GEMINI_API_KEY")):
+    # Gemini hanya diinisialisasi & digunakan saat kondisi Idle (atau fallback bila DashScope tidak tersedia)
+    if (not use_glm or qwen is None) and gemini is None and (
+        os.getenv("DASHSCOPE_API_GEMINI_KEY") or os.getenv("GEMINI_API_KEY")
+    ):
         try:
             gemini = GeminiClient()
         except Exception as e:
             log.warning(f"Inisialisasi Gemini gagal: {e}")
+
+    active_secondary = "glm" if (use_glm and qwen is not None) else "gemini"
+    log.info(
+        f"🧠 [AI ROUTING] {ticker}: secondary_provider={active_secondary.upper()} "
+        f"(opportunity_count={opportunity_count}, is_idle={is_idle})"
+    )
 
     days_earnings, earnings_status = fetch_earnings_days_with_status(ticker)
     headlines = fetch_headlines(ticker)
@@ -937,6 +1036,7 @@ def research_stock(
             consensus="NO_DATA",
             overall_consensus_level="NO_DATA",
             earnings_status=earnings_status,
+            secondary_provider=active_secondary,
         )
 
     # 1. Jalankan 4 Voters secara Paralel (Swarm Voting)
@@ -949,7 +1049,10 @@ def research_stock(
         if qwen:
             tasks[executor.submit(run_voter_1, qwen, ticker, headlines, strategy_context)] = "V1_qwen_turbo"
             tasks[executor.submit(run_voter_2, qwen, ticker, headlines, strategy_context)] = "V2_qwen_plus"
-        if gemini:
+        if active_secondary == "glm" and qwen:
+            tasks[executor.submit(run_voter_3_glm, qwen, ticker, headlines, strategy_context)] = "V3_glm_fast"
+            tasks[executor.submit(run_voter_4_glm, qwen, ticker, headlines, strategy_context)] = "V4_glm_prime"
+        elif gemini:
             tasks[executor.submit(run_voter_3, gemini, ticker, headlines, strategy_context)] = "V3_gemini_flash"
             tasks[executor.submit(run_voter_4, gemini, ticker, headlines, strategy_context)] = "V4_gemini_pro"
 
@@ -1020,7 +1123,7 @@ def research_stock(
     gemini_scores = [
         v["params"]["P1_sentiment_polarity"]["score"]
         for k, v in voter_verdicts.items()
-        if "gemini" in k.lower() and "P1_sentiment_polarity" in v.get("params", {})
+        if ("gemini" in k.lower() or "glm" in k.lower()) and "P1_sentiment_polarity" in v.get("params", {})
     ]
 
     q_sent = "bullish" if qwen_scores and sum(qwen_scores)/len(qwen_scores) > 0.15 else ("bearish" if qwen_scores and sum(qwen_scores)/len(qwen_scores) < -0.15 else "neutral") if qwen_scores else None
@@ -1031,6 +1134,14 @@ def research_stock(
     for p in PARAM_WEIGHTS.keys():
         p_data = agg_result.get("per_parameter_final", {}).get(p, {})
         p1_to_p7[p] = float(p_data.get("final_score", pre_analysis.get(p, {}).get("avg", 0.0)))
+
+    secondary_voter = (
+        voter_verdicts.get("V3_gemini_flash")
+        or voter_verdicts.get("V3_glm_fast")
+        or voter_verdicts.get("V4_glm_prime")
+        or voter_verdicts.get("V4_gemini_pro")
+        or {}
+    )
 
     return Research(
         ticker=ticker,
@@ -1043,9 +1154,9 @@ def research_stock(
         qwen_sentiment=q_sent,
         gemini_sentiment=g_sent,
         qwen_narrative=voter_verdicts.get("V2_qwen_plus", {}).get("params", {}).get("P1_sentiment_polarity", {}).get("reasoning"),
-        gemini_narrative=voter_verdicts.get("V3_gemini_flash", {}).get("params", {}).get("P4_momentum_direction", {}).get("reasoning"),
+        gemini_narrative=secondary_voter.get("params", {}).get("P4_momentum_direction", {}).get("reasoning"),
         qwen_confidence=voter_verdicts.get("V2_qwen_plus", {}).get("overall_voter_confidence"),
-        gemini_confidence=voter_verdicts.get("V3_gemini_flash", {}).get("overall_voter_confidence"),
+        gemini_confidence=secondary_voter.get("overall_voter_confidence"),
         final_score=final_score,
         overall_consensus_level=consensus_level,
         vendor_alignment=vendor_align,
@@ -1057,6 +1168,7 @@ def research_stock(
         aggregator_details=agg_result,
         earnings_status=earnings_status,
         voter_failures=voter_failures,
+        secondary_provider=active_secondary,
     )
 
 

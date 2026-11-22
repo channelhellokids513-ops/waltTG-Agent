@@ -1208,8 +1208,10 @@ def research_stock(
     gemini: Optional[GeminiClient] = None,
     funding_daily: Optional[float] = None,
     recommended_side: Optional[str] = None,
+    opportunity_count: int = 0,
+    is_idle: Optional[bool] = None,
 ) -> Research:
-    """Full research bundle untuk 1 saham dengan kolaborasi Dual-AI (Qwen + Gemini)."""
+    """Full research bundle untuk 1 aset (Qwen + Gemini saat Idle, Qwen + GLM saat banyak peluang > 1)."""
     log.info(f"🔍 Researching {ticker}...")
     if qwen or gemini:
         import llm_research
@@ -1219,6 +1221,8 @@ def research_stock(
             gemini=gemini,
             funding_daily=funding_daily,
             recommended_side=recommended_side,
+            opportunity_count=opportunity_count,
+            is_idle=is_idle,
         )
     days = check_earnings_date(ticker)
     sentiment, narrative = get_news_sentiment(ticker)
@@ -2365,47 +2369,112 @@ def decide_dynamic_monitor_cadence(
     return False, 0, "Kategori GO stabil (interval normal 10 menit)"
 
 
-GEAR_0_INTERVAL_MIN = 720  # 12 jam (2x sehari) saat 0 peluang / idle
+GEAR_0_US_MARKET_INTERVAL_MIN = 225  # 2x selama jam operasional Saham AS (7,5 jam = 450m / 2)
+GEAR_0_US_MAX_RUNS_PER_DAY = 2       # Maksimal 2 run Gear 0 per hari trading Saham AS (UTC)
+GEAR_0_INTERVAL_MIN = 720            # 12 jam (2x sehari) saat 0 peluang / idle untuk crypto 24/7
+
+
+def is_gear3_full_research(gear_label: str) -> bool:
+    """True bila Gear 3 aktif: setiap keputusan trading diizinkan melakukan penelitian & analisa AI."""
+    return str(gear_label or "").startswith("GEAR_3")
+
+
+def count_go_opportunities(
+    opps: list[Opportunity],
+    researches: Optional[dict[str, Research]] = None,
+) -> int:
+    """
+    Hitung jumlah peluang berpotensi / bervonis 'GO':
+    - Jika `researches` diberikan: hitung aset yang vonis aktualnya 'GO' melalui `decide_go_nogo`
+      (saham yang belum memiliki cache riset namun memenuhi >= MIN_FUNDING_DAILY tetap dihitung
+      sebagai kandidat potensial sebelum riset dijalankan).
+    - Jika `researches` None: hitung jumlah peluang yang memenuhi |funding_daily| >= MIN_FUNDING_DAILY.
+    """
+    qualifying = [o for o in opps if abs(o.funding_daily) >= MIN_FUNDING_DAILY]
+    if researches is None:
+        return len(qualifying)
+    go_total = 0
+    for o in qualifying:
+        res = researches.get(o.base_asset)
+        if res is None and o.base_asset in ALLOWED_STOCKS:
+            go_total += 1
+            continue
+        verdict, _, _ = decide_go_nogo(o, res)
+        if verdict == "GO":
+            go_total += 1
+    return go_total
 
 
 def evaluate_execution_gear(
     opps: list[Opportunity],
     recent_tp_closed: bool = False,
     rng: Optional[Any] = None,
+    go_count: Optional[int] = None,
+    category: Literal["market", "crypto"] = "market",
+    full_research_mode: Optional[bool] = None,
 ) -> tuple[str, int, str]:
     """
-    Tentukan Gigi Kecepatan (Gear) dan interval eksekusi (60, 120, atau 720 menit)
-    untuk Market Execute & Crypto Execute agar tidak over-trading / boros fee:
-    - GEAR 2 (Aktif Normal 60 Menit / 1 Jam):
-      * Terdapat >= 3 aset dengan |funding_daily| >= 0.5%/hari, ATAU
-      * Terdapat >= 2 aset dengan funding ekstrem (|funding_daily| >= 0.8%/hari).
-    - GEAR 1 (Konservatif 120 Menit / 2 Jam):
-      * Peluang funding moderat/tipis (1-2 aset yang memenuhi >= 0.5%/hari).
-    - GEAR 0 (Idle 720 Menit / 12 Jam = 2x Sehari):
-      * Tidak ada peluang yang memenuhi >= 0.5%/hari (0 aset).
+    Sistem 4 Tingkatan Execution Gear:
+    - GEAR 0 (Idle):
+      * 0 peluang 'GO' / qualifying.
+      * Saham AS (`market`): 2 kali selama jam operasional Saham AS (Senin–Jumat 13:30–21:00 UTC,
+        interval 225 menit, maks 2x/sesi).
+      * Crypto 24/7 (`crypto`): 2x sehari (interval 720 menit / 12 jam).
+    - GEAR 1 (Conservative — 2 jam / 120 menit):
+      * Kurang dari 2 peluang 'GO' (tepat 1 peluang 'GO').
+    - GEAR 2 (Active — 1 jam / 60 menit):
+      * 2 s/d 5 peluang 'GO' (mencakup tepat 5 peluang 'GO').
+    - GEAR 3 (Full Research Permission — 1 jam / 60 menit):
+      * > 5 peluang 'GO' ATAU override `GEAR_3_FULL_RESEARCH=true`.
+      * Memberikan izin setiap keputusan trading untuk melakukan penelitian & analisa AI penuh
+        (mengangkat batas `max_otf_calls` & `CRYPTO_RESEARCH_TOP_N`).
     Return (gear_label, interval_minutes, reason).
     """
     qualifying = [o for o in opps if abs(o.funding_daily) >= MIN_FUNDING_DAILY]
-    extreme = [o for o in qualifying if abs(o.funding_daily) >= 0.008]
+    effective_go = len(qualifying) if go_count is None else max(0, int(go_count))
+    gear3_override = (
+        full_research_mode
+        if full_research_mode is not None
+        else os.getenv("GEAR_3_FULL_RESEARCH", "false").strip().lower() in ("1", "true", "yes", "on")
+    )
 
-    if not qualifying:
+    if gear3_override or effective_go > 5:
+        trigger = (
+            f"override GEAR_3_FULL_RESEARCH aktif ({effective_go} peluang GO)"
+            if gear3_override and effective_go <= 5
+            else f"{effective_go} peluang GO (> 5)"
+        )
+        return (
+            "GEAR_3_FULL_RESEARCH_60M",
+            60,
+            f"Gear 3 Full Research ({trigger}) → izin riset & analisa AI di setiap keputusan trading (60m)",
+        )
+
+    if effective_go == 0:
+        if category == "market":
+            return (
+                "GEAR_0_IDLE_2X_US",
+                GEAR_0_US_MARKET_INTERVAL_MIN,
+                f"Gear 0 Idle (0 peluang GO) → 2x selama jam operasional Saham AS "
+                f"(interval {GEAR_0_US_MARKET_INTERVAL_MIN}m, 13:30-21:00 UTC)",
+            )
         return (
             "GEAR_0_IDLE_720M",
             GEAR_0_INTERVAL_MIN,
-            f"Idle (0 peluang >=0.5%/hari) → interval {GEAR_0_INTERVAL_MIN} menit (12 jam / 2x sehari)",
+            f"Gear 0 Idle (0 peluang GO) → interval {GEAR_0_INTERVAL_MIN} menit (12 jam / 2x sehari)",
         )
 
-    if len(qualifying) >= 3 or len(extreme) >= 2:
+    if effective_go < 2:
         return (
-            "GEAR_2_ACTIVE_60M",
-            60,
-            f"Aktif ({len(qualifying)} peluang >=0.5%, {len(extreme)} ekstrem >=0.8%/hari) → interval 60 menit (1 jam)",
+            "GEAR_1_CONSERVATIVE_120M",
+            120,
+            f"Gear 1 Conservative ({effective_go} peluang GO < 2) → interval 120 menit (2 jam)",
         )
 
     return (
-        "GEAR_1_CONSERVATIVE_120M",
-        120,
-        f"Konservatif ({len(qualifying)} peluang >=0.5%/hari) → interval 120 menit (2 jam)",
+        "GEAR_2_ACTIVE_60M",
+        60,
+        f"Gear 2 Active ({effective_go} peluang GO, 2-5 peluang) → interval 60 menit (1 jam)",
     )
 
 
@@ -2413,13 +2482,43 @@ def _should_run_gear0_cycle(
     category: Literal["market", "crypto"],
     now_ts: Optional[float] = None,
     regime_path: str = "logs/market_regime.json",
+    now_utc: Optional[datetime] = None,
 ) -> tuple[bool, float]:
-    """Izinkan siklus penuh Gear 0 maksimal 2x sehari (setiap 720 menit / 12 jam)."""
-    now = time.time() if now_ts is None else float(now_ts)
+    """
+    Batasi siklus Gear 0 (Idle):
+    - `market`: maksimal 2 kali selama jam operasional Saham AS (Senin–Jumat 13:30–21:00 UTC),
+      dengan jeda minimal 225 menit (3,75 jam) antar-run. Di luar jam pasar AS, ditahan.
+    - `crypto`: maksimal 2 kali sehari (setiap 720 menit / 12 jam).
+    """
+    if now_utc is not None:
+        dt_utc = now_utc.astimezone(timezone.utc) if now_utc.tzinfo else now_utc.replace(tzinfo=timezone.utc)
+        now = dt_utc.timestamp() if now_ts is None else float(now_ts)
+    else:
+        now = time.time() if now_ts is None else float(now_ts)
+        dt_utc = datetime.fromtimestamp(now, tz=timezone.utc)
+
     state = _load_execution_regime(regime_path)
     key = f"last_{category}_gear0_ts"
     last_ts = float(state.get(key, 0.0) or 0.0)
     elapsed_min = (now - last_ts) / 60.0 if last_ts > 0 else float("inf")
+
+    if category == "market":
+        us_open, _ = is_us_stock_market_open_utc(now_utc=dt_utc)
+        if not us_open:
+            return False, elapsed_min
+        today_str = dt_utc.strftime("%Y-%m-%d")
+        saved_date = str(state.get("gear0_market_date", "") or "")
+        runs_today = int(state.get("gear0_market_runs", 0) or 0) if saved_date == today_str else 0
+        if runs_today >= GEAR_0_US_MAX_RUNS_PER_DAY:
+            return False, elapsed_min
+        if runs_today >= 1 and last_ts > 0 and elapsed_min < (GEAR_0_US_MARKET_INTERVAL_MIN - 2.0):
+            return False, elapsed_min
+        state["gear0_market_date"] = today_str
+        state["gear0_market_runs"] = runs_today + 1
+        state[key] = now
+        _save_execution_regime(state, regime_path=regime_path)
+        return True, elapsed_min
+
     if last_ts > 0 and elapsed_min < (GEAR_0_INTERVAL_MIN - 2.0):
         return False, elapsed_min
     state[key] = now
@@ -2617,11 +2716,16 @@ def _update_regime_state(
     recent_tp_closed: bool = False,
     regime_path: str = "logs/market_regime.json",
     rng: Optional[Any] = None,
+    go_count: Optional[int] = None,
 ) -> tuple[str, int, str]:
     """Update Gear, interval, dan timestamp eksekusi untuk 'market' atau 'crypto'."""
     state = _load_execution_regime(regime_path)
     gear, interval_min, reason = evaluate_execution_gear(
-        opps, recent_tp_closed=recent_tp_closed, rng=rng
+        opps,
+        recent_tp_closed=recent_tp_closed,
+        rng=rng,
+        go_count=go_count,
+        category=category,
     )
     state[f"{category}_gear"] = gear
     state[f"{category}_interval_min"] = interval_min
@@ -3656,7 +3760,8 @@ def format_summary_telegram(
             if research.consensus and research.consensus not in ("NONE", "NO_DATA"):
                 lines.append(f"   🤖 Swarm AI: `{research.overall_consensus_level}` (Vendor: `{research.vendor_alignment}`)")
                 if research.qwen_sentiment and research.gemini_sentiment:
-                    lines.append(f"   ├ Qwen: `{research.qwen_sentiment}` | Gemini: `{research.gemini_sentiment}`")
+                    sec_label = "GLM" if getattr(research, "secondary_provider", "gemini") == "glm" else "Gemini"
+                    lines.append(f"   ├ Qwen: `{research.qwen_sentiment}` | {sec_label}: `{research.gemini_sentiment}`")
                 p1_7 = research.p1_to_p7_scores
                 if p1_7:
                     lines.append(
@@ -3708,26 +3813,51 @@ def scan_with_research(
             o for o in summary["top_opportunities"] if o["asset"] not in ALLOWED_STOCKS
         ]
 
-    # Research tiap stock candidate
+    # Evaluasi Gear & kebijakan routing AI (Idle -> Gemini, banyak peluang > 1 -> GLM via DASHSCOPE_API_KEY)
+    import llm_research as _lr
+
+    active_top_opps = [
+        o for o in summary["top_opportunities"]
+        if abs(float(o.get("funding_daily", 0.0) or 0.0)) >= MIN_FUNDING_DAILY
+    ]
+    opp_count = len(active_top_opps)
+    scan_gear, _, scan_gear_reason = evaluate_execution_gear(
+        summary.get("_raw_opportunities", []),
+        go_count=opp_count,
+        category="market",
+    )
+    full_research_gear3 = is_gear3_full_research(scan_gear)
+    scan_is_idle = scan_gear.startswith("GEAR_0") or opp_count <= 1
+    use_glm_routing = _lr.should_use_glm_for_secondary_voters(
+        opportunity_count=opp_count, is_idle=scan_is_idle
+    )
+    log.info(
+        f"⚙️ [SCAN GEAR] {scan_gear}: {scan_gear_reason} | "
+        f"AI Secondary={'GLM (DashScope)' if use_glm_routing else 'Gemini (Idle)'} (peluang={opp_count})"
+    )
+
     qwen = QwenClient() if os.getenv("DASHSCOPE_API_KEY") else None
     gemini = (
         GeminiClient()
-        if (os.getenv("DASHSCOPE_API_GEMINI_KEY") or os.getenv("GEMINI_API_KEY"))
+        if (not use_glm_routing or qwen is None)
+        and (os.getenv("DASHSCOPE_API_GEMINI_KEY") or os.getenv("GEMINI_API_KEY"))
         else None
     )
     researches: dict[str, Research] = {}
 
     crypto_research = crypto_research_set(
-        [(o["asset"], o.get("funding_daily")) for o in summary["top_opportunities"]])
-    if crypto_research:
+        [(o["asset"], o.get("funding_daily")) for o in summary["top_opportunities"]]
+    )
+    if full_research_gear3:
+        log.info("  🧠 [GEAR 3] Izin riset & analisa AI aktif untuk SETIAP kandidat keputusan trading.")
+    elif crypto_research:
         log.info(f"  🧠 riset AI crypto/komoditas dibatasi {CRYPTO_RESEARCH_TOP_N} |funding| "
                  f"terbesar: {', '.join(sorted(crypto_research))}")
 
     for opp in summary["top_opportunities"]:
         asset = opp["asset"]
-        # Batas biaya (Ronde 8): saham selalu dinilai; crypto/komoditas hanya yang masuk
-        # prioritas funding tertinggi. Riset yang SUDAH ada di sheet tetap dipakai - gratis.
-        worth_calling = asset in ALLOWED_STOCKS or asset in crypto_research
+        # Gear 3: setiap kandidat keputusan trading boleh diteliti AI; selain itu saham + top-N crypto.
+        worth_calling = full_research_gear3 or asset in ALLOWED_STOCKS or asset in crypto_research
         if asset in RESEARCH_ELIGIBLE and worth_calling and (qwen or gemini):
             try:
                 researches[asset] = research_stock(
@@ -3736,11 +3866,13 @@ def scan_with_research(
                     gemini=gemini,
                     funding_daily=opp.get("funding_daily"),
                     recommended_side=opp.get("recommended_side"),
+                    opportunity_count=opp_count,
+                    is_idle=scan_is_idle,
                 )
                 record_research_health(asset, researches[asset])
                 log.info(
                     f"  ✓ research {asset}: {researches[asset].news_sentiment} "
-                    f"(Consensus: {researches[asset].consensus})"
+                    f"(Consensus: {researches[asset].consensus}, Secondary: {researches[asset].secondary_provider})"
                 )
             except Exception as e:
                 record_input_failure("input.riset_error", f"{asset}:{type(e).__name__}")
@@ -3810,6 +3942,8 @@ def scan_with_research(
                         gemini=gemini,
                         funding_daily=opp.funding_daily,
                         recommended_side=opp.side,
+                        opportunity_count=opp_count,
+                        is_idle=scan_is_idle,
                     )
                     record_research_health(asset, researches[asset])
                 except Exception as e:
@@ -4057,13 +4191,15 @@ def market_execute(
     )
     log.info(f"⚙️ [ADAPTIVE GEAR - {category_key.upper()}] {gear_label} ({gear_interval_min}m): {gear_reason}")
 
-    # GEAR 0 Idle Cap: saat 0 peluang qualifying, cukup jalan/lapor maksimal 2x sehari (tiap 12 jam)
-    if gear_label == "GEAR_0_IDLE_720M":
-        allow_g0, g0_elapsed_min = _should_run_gear0_cycle(category_key)
+    # GEAR 0 Idle Cap:
+    # - market: maks 2x selama jam operasional Saham AS (13:30-21:00 UTC)
+    # - crypto: maks 2x sehari (tiap 12 jam)
+    if gear_label.startswith("GEAR_0"):
+        allow_g0, g0_elapsed_min = _should_run_gear0_cycle(category_key, now_utc=now_utc)
         if not allow_g0:
             log.info(
-                f"💤 [GEAR 0 IDLE] 0 peluang >=0.5%/hari dan siklus Gear 0 sudah berjalan "
-                f"{g0_elapsed_min/60.0:.1f}j lalu (< 12j / 2x sehari). Fast-exit tanpa spam."
+                f"💤 [GEAR 0 IDLE] {gear_reason} — batas 2x siklus Gear 0 sudah terpenuhi "
+                f"(atau di luar jam operasional Saham AS). Fast-exit tanpa spam."
             )
             return {
                 "status": "gear_0_idle",
@@ -4134,15 +4270,42 @@ def market_execute(
     if research_read in ("http_error", "html_or_unparsable", "no_config", "exception", "status_not_success"):
         record_input_failure("input.riset_webhook", research_read)
 
+    import llm_research as _lr
+
+    # Evaluasi jumlah peluang 'GO' (dengan cache riset) untuk Gear 3 & kebijakan routing AI (Gemini vs GLM)
+    eligible_now = [
+        o for o in opps
+        if not (o.base_asset in ALLOWED_STOCKS and not us_stocks_open)
+    ]
+    go_count_now = count_go_opportunities(eligible_now, researches=cached_researches)
+    if go_count_now != len([o for o in opps if abs(o.funding_daily) >= MIN_FUNDING_DAILY]) or os.getenv("GEAR_3_FULL_RESEARCH", "false").strip().lower() in ("1", "true", "yes", "on"):
+        gear_label, gear_interval_min, gear_reason = _update_regime_state(
+            category_key, eligible_now, mark_executed=True, go_count=go_count_now
+        )
+        log.info(f"⚙️ [ADAPTIVE GEAR - {category_key.upper()} REFINED] {gear_label} ({gear_interval_min}m): {gear_reason}")
+
+    full_research_gear3 = is_gear3_full_research(gear_label)
+    exec_opp_count = len([o for o in eligible_now if abs(o.funding_daily) >= MIN_FUNDING_DAILY])
+    exec_is_idle = gear_label.startswith("GEAR_0") or exec_opp_count <= 1
+    use_glm_routing = _lr.should_use_glm_for_secondary_voters(
+        opportunity_count=exec_opp_count, is_idle=exec_is_idle
+    )
+    log.info(
+        f"🧠 [AI ROUTING - {category_key.upper()}] Secondary={'GLM (DashScope)' if use_glm_routing else 'Gemini (Idle)'} "
+        f"(peluang={exec_opp_count}, go={go_count_now}, gear={gear_label})"
+    )
+
     qwen = QwenClient() if os.getenv("DASHSCOPE_API_KEY") else None
     gemini = (
         GeminiClient()
-        if (os.getenv("DASHSCOPE_API_GEMINI_KEY") or os.getenv("GEMINI_API_KEY"))
+        if (not use_glm_routing or qwen is None)
+        and (os.getenv("DASHSCOPE_API_GEMINI_KEY") or os.getenv("GEMINI_API_KEY"))
         else None
     )
     researches: dict[str, Research] = {}
     otf_research_calls = 0
-    max_otf_calls = max_slots * 2
+    # Gear 3 memberi izin setiap keputusan trading melakukan penelitian & analisa AI tanpa cap
+    max_otf_calls = len(opps) if full_research_gear3 else (max_slots * 2)
     cb_tripped, cb_reason = check_daily_circuit_breaker(total_equity)
     if cb_tripped:
         log.warning(f"🚨 [CIRCUIT BREAKER] {cb_reason}")
@@ -4164,11 +4327,12 @@ def market_execute(
                 log.info(f"  ✓ Pakai riset spreadsheet {opp.base_asset}: skor {cached.final_score:+.2f}, sentimen {cached.news_sentiment}")
                 researches[opp.base_asset] = cached
             elif (qwen or gemini) and otf_research_calls < max_otf_calls and (
-                    opp.base_asset in ALLOWED_STOCKS or opp.base_asset in crypto_research):
+                    full_research_gear3 or opp.base_asset in ALLOWED_STOCKS or opp.base_asset in crypto_research):
                 try:
                     otf_research_calls += 1
                     log.info(
-                        f"  🔍 Riset on-the-fly ({otf_research_calls}/{max_otf_calls}) untuk {opp.base_asset} (belum ada di spreadsheet)..."
+                        f"  🔍 Riset on-the-fly ({otf_research_calls}/{max_otf_calls}) untuk {opp.base_asset} "
+                        f"({'Gear 3 Full Research' if full_research_gear3 else 'belum ada di spreadsheet'})..."
                     )
                     researches[opp.base_asset] = research_stock(
                         opp.base_asset,
@@ -4176,6 +4340,8 @@ def market_execute(
                         gemini=gemini,
                         funding_daily=opp.funding_daily,
                         recommended_side=opp.side,
+                        opportunity_count=exec_opp_count,
+                        is_idle=exec_is_idle,
                     )
                     record_research_health(opp.base_asset, researches[opp.base_asset])
                 except Exception as e:
@@ -4416,7 +4582,13 @@ def market_execute(
     except Exception as e:
         log.warning(f"Logging execution to sheet failed: {e}")
 
-    result_payload = {"executions": executions, "deployed": deployed, "available": available}
+    result_payload = {
+        "gear": gear_label,
+        "interval_minutes": gear_interval_min,
+        "executions": executions,
+        "deployed": deployed,
+        "available": available,
+    }
     if skipped_timeout:
         result_payload["status"] = "partial_timeout"
         result_payload["skipped"] = skipped_timeout
