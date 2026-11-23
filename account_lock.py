@@ -56,6 +56,21 @@ def _headers() -> dict[str, str]:
 
 
 # --- transport (di-monkeypatch di test) --------------------------------------------------
+_DIAG_LOGGED = False
+
+
+def _log_backend_diag(op: str, code: int) -> None:
+    """Sekali per proses: perjelas kenapa lock tak terbaca (biasanya PAT tanpa izin Variables)."""
+    global _DIAG_LOGGED
+    if _DIAG_LOGGED:
+        return
+    _DIAG_LOGGED = True
+    log.warning(
+        f"account_lock: GitHub API {op} HTTP {code} — lock tidak terbaca, berjalan fail-open. "
+        f"Berikan izin 'Variables: Read and write' pada GH_PAT untuk mengaktifkan proteksi dua-arah."
+    )
+
+
 def _read_state() -> tuple[Optional[dict[str, Any]], str]:
     """(state|None, reason). None + reason 'backend_error'/'backend_unavailable' = tak terbaca."""
     token, repo = _creds()
@@ -67,6 +82,7 @@ def _read_state() -> tuple[Optional[dict[str, Any]], str]:
         if r.status_code == 404:
             return {}, ""  # variabel belum pernah dibuat -> bebas
         if r.status_code != 200:
+            _log_backend_diag("GET variable", r.status_code)
             return None, "backend_error"
         value = (r.json() or {}).get("value") or ""
         try:
@@ -92,6 +108,7 @@ def _write_state(value_json: str) -> tuple[bool, str]:
             r = httpx.post(url, headers=_headers(), json=body, timeout=10.0)
             if r.status_code in (200, 201):
                 return True, ""
+        _log_backend_diag("PATCH variable", r.status_code)
         return False, "backend_error"
     except Exception:
         return False, "backend_error"

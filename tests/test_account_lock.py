@@ -116,6 +116,27 @@ def test_release_only_clears_our_token(backend):
     assert _state(store)["holder"] == "telegram"
 
 
+def test_read_state_logs_backend_diag_on_403(monkeypatch, caplog):
+    import logging as _logging
+    monkeypatch.setenv("GH_PAT", "tok")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    monkeypatch.setenv("ACCOUNT_LOCK", "on")
+    monkeypatch.setattr(al, "_DIAG_LOGGED", False)
+
+    class _R403:
+        status_code = 403
+        text = "Resource not accessible by personal access token"
+
+        def json(self):
+            return {}
+
+    monkeypatch.setattr(al.httpx, "get", lambda *a, **k: _R403())
+    with caplog.at_level(_logging.WARNING, logger="walt_bot"):
+        state, reason = al._read_state()
+    assert state is None and reason == "backend_error"
+    assert any("Variables: Read and write" in r.getMessage() for r in caplog.records)
+
+
 def test_cli_account_lock_helpers(backend, monkeypatch):
     seen = []
     monkeypatch.setattr(al, "acquire", lambda holder, ttl_sec, wait_sec=0.0, settle_sec=1.2:
