@@ -295,7 +295,7 @@ def test_risk_monitor_engine2_respects_atr_sl_adverse_funding_and_time_stop(monk
     assert res3 is not None and res3["action"] == "CLOSE"
     assert "Time-Stop" in res3["detail"]
 
-    # 4. Umur 73h TETAPI profit sudah +0.90% (>= +0.80%) -> TIDAK time-stop, biarkan Trailing L4 mengunci +0.35%
+    # 4. Umur 73h TETAPI profit sudah +2.30% (>= 0.55 * 4.0% = +2.20%) -> TIDAK time-stop, Trailing L4 kunci +0.80%
     c4 = _make_mock_client()
     p4 = Position(
         contract_id=91,
@@ -304,7 +304,7 @@ def test_risk_monitor_engine2_respects_atr_sl_adverse_funding_and_time_stop(monk
         leverage=2,
         margin=3.0,
         entry_price=100.0,
-        current_price=100.9,
+        current_price=102.30,
         tp=104.0,
         sl=96.0,
         funding_paid=0.0,
@@ -317,7 +317,7 @@ def test_risk_monitor_engine2_respects_atr_sl_adverse_funding_and_time_stop(monk
     )
     res4 = evaluate_and_apply_position_risk(c4, p4, current_funding_daily=0.0, now_utc=now_dt)
     assert res4 is not None and res4["action"] == "UPDATE_AUTO_CLOSE"
-    assert res4["sl"] == pytest.approx(100.35)
+    assert res4["sl"] == pytest.approx(100.80)
 
 
 # ---------------------------------------------------------------------------

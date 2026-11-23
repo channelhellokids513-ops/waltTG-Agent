@@ -366,6 +366,7 @@ status sistem bisa dibaca tanpa menebak. Di GitHub: **Settings → Secrets and v
 | `CRYPTO_FORECAST_ENGINE` | `on` | Aktifkan Engine 2 Crypto Mean-Reversion Fade teruji OOS (`V5 4h Rejected->Comfort` + `V4 1h Extreme Fade`, ATR SL `<= 4.5%`, Time-Stop `24h/72h`) di `crypto_execute` & `daily_scan`. |
 | `CRYPTO_FORECAST_UNIVERSE` | `all` | Cakupan aset Crypto Engine 2: `all` (seluruh kontrak crypto likuid >= $1M, top 50, maks 5 sinyal/siklus) atau `tier1` (khusus 10 `ALLOWED_CRYPTO`). |
 | `STOCK_FORECAST_ENGINE` | `on` | Aktifkan Engine 2 Saham AS **LONG-ONLY Dip-Buy** (`S1 1h z <= -1.8 & RSI <= 32`, hold 48h; `S2 1d`, hold 120h) di `market_execute` & `daily_scan` saat jam bursa AS buka (wajib riset AI segar & E3). |
+| `DYNAMIC_SL_MODE` | `atr` | Mode SL/TP dinamis berbasis ATR 24 jam (`0.85 * atr_24h_pct`, kalem `1.5%–2.5%`, volatil/crypto `1.5%–3.5%`, TP `>= 1.35x SL`, trailing proporsional). Set `fixed` untuk kembali ke SL `1.5%` seragam. |
 | `GEAR_3_FULL_RESEARCH` | `false` | Jika `true` (atau peluang `GO > 5`), mengaktifkan **Gear 3** agar setiap kandidat trading mendapat riset AI penuh tanpa cap. |
 | `TRAINING_DATA_LOGGING` | `on` | Otomatis menyimpan dataset SFT `<think>...</think>` ke Google Sheet tab `Data Training` dan `logs/training_dataset.jsonl`. |
 | `WALT_TOKEN_SYNC` | `on` | `off` **menolak refresh** (bukan "refresh lalu buang hasilnya") — wajib `on` untuk workflow yang butuh OAuth. |

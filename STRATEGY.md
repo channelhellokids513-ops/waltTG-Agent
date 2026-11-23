@@ -223,24 +223,23 @@ Manajemen risiko berjalan otomatis secara adaptif (dinamis 5–10 menit dengan *
 
 ### Penjelasan Detil Tiap Lapis:
 
-1. **Lapis 1 (Asymmetric R:R Baseline TP & Uniform 1.5% SL):**  
-   Target TP asimetris (+2.0% s/d +2.5%) dipadukan dengan Stop Loss seragam **1.5%** di seluruh kelas aset:
-   - ETF / Indeks (`SPY`, `US100`, `AAPL`): TP +2.0%, SL 1.5%
-   - Crypto Tier-1 (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `AVAX`, `SUI`, `LINK`, `NEAR`, `AAVE`): TP +2.0%, SL 1.5%
-   - Komoditas (`XAU`, `XAG`, `BRENTOIL`): TP +2.5%, SL 1.5%
-   - Saham Volatil (`NVDA`, `TSLA`, `MSTR`, `CRCL`, `SNDK`, `VVV`): TP +2.5%, SL 1.5%
-   - *Windfall Rule:* Jika $2.5\times$ funding harian berada di $1.5\% \le \text{windfall} < \text{TP baseline}$, TP dimajukan ke level tersebut.
-   - *Guard Sisi Salah & Migrasi:* Memvalidasi level SL/TP terhadap `current_price` sebelum mengirim `auto_close`. Posisi lama yang sudah melewati batas rugi 1.5% langsung ditutup (`SL 1.5% breached (migrasi)`).
-2. **Lapis 2 (Dinamika Funding Rate dengan Hysteresis 0.1%/hari):**  
+1. **Lapis 1 (Dynamic ATR SL/TP & Asymmetric R:R `>= 1:1.35`, `DYNAMIC_SL_MODE=atr`):**  
+   SL dan TP awal dihitung adaptif dari volatilitas aktual **ATR 24 jam (`0.85 * atr_24h_pct`)** agar tidak mudah tersapu *noise* intraday, dengan pembulatan presisi adaptif (`round_price`: 4/6/8 desimal termasuk memecoin `< $0.01`):
+   - **Aset Kalem (`SPY`, `US100`, `AAPL`, `XAU`):** Rentang SL **`1.5%–2.5%`**, TP `max(2.0%, 1.35 * SL)`
+   - **Crypto & Komoditas Volatil (`BTC`, `ETH`, `SOL`, `XAG`, `BRENTOIL`, dll.):** Rentang SL **`1.5%–3.5%`** (fallback tanpa ATR `2.2%`), TP `max(2.0%/2.5%, 1.35 * SL)`
+   - **Saham Volatil (`NVDA`, `TSLA`, `MSTR`, `CRCL`, `SNDK`, `VVV`, dll.):** Rentang SL **`1.5%–3.5%`** (fallback `2.5%`), TP `max(2.5%, 1.35 * SL)`
+   - *Kill Switch:* `DYNAMIC_SL_MODE=fixed` mengembalikan SL seragam `DEFAULT_SL_PCT` (`1.5%`).
+   - *Windfall Rule:* Jika $2.5\times$ funding harian berada di rentang $\text{SL} \le \text{windfall} < \text{TP}$, TP dimajukan ke level tersebut.
+   - *Guard Sisi Salah & Migrasi:* Memvalidasi level SL/TP terhadap `current_price` sebelum mengirim `auto_close`; posisi ATR dinamis Engine 1 disimpan ke `logs/market_regime.json` (`planned_sl_pct`) agar `risk-monitor` mempertahankan ruang SL dinamisnya.
+2. **Lapis 2 (Dinamika Funding Rate dengan Hysteresis 0.1%/hari & Buffer +0.50%):**  
    - **Hysteresis (`FUNDING_FLIP_CLOSE_THRESHOLD = 0.001`):** Jika arah funding berbalik (*funding flip sign*) DAN `abs(funding_daily) >= 0.1%/hari`, **posisi seketika ditutup pasar**.
-   - Jika funding berbalik arah tetapi masih `< 0.1%/hari`, atau meluruh di bawah `< 0.1%/hari`, stop loss digeser ke harga entry (*breakeven*).
+   - Jika funding berbalik arah tetapi masih `< 0.1%/hari` atau meluruh `< 0.1%/hari`, stop loss hanya digeser ke harga entry (*breakeven*) bila profit harga sudah mencapai **`>= +0.50%` (`L2_BREAKEVEN_MIN_PROFIT_PCT`)** agar tidak tersapu *wick* tipis di dekat entry.
 3. **Lapis 3 (Volatilitas & Momentum Harga — Deprecated):**  
-   - *Deprecated*: Digantikan sepenuhnya oleh SL baseline 1.5% (tidak ada kode yang melonggarkan SL di atas 1.5%).
-4. **Lapis 4 (True Zero-Risk Trailing Stop & 3-Hour Cooldown):**  
+   - *Deprecated*: Digantikan oleh *Dynamic ATR SL/TP* (`DYNAMIC_SL_MODE=atr`) + 3h Cooldown.
+4. **Lapis 4 (True Zero-Risk Trailing Stop Proporsional & 3-Hour Cooldown):**  
    Mengunci surplus bersih di atas biaya transaksi (`0.18%` taker round-trip + spread) tanpa memotong profit terlalu dini:
-   - **Tier 1 (Profit $\ge +0.80\%$):** Geser SL otomatis ke **Entry + 0.35%** (`lock_0035` — True Zero-Risk Lock setelah fee + spread).
-   - **Tier 2 (Profit $\ge +1.40\%$):** Geser SL ke **Entry + 0.85%** (`lock_0085`).
-   - **Tier 3 (Profit $\ge +2.00\%$):** Aktifkan Trailing Stop dinamis **0.60%** di bawah puncak harga berjalan.
+   - **Baseline (`SL <= 1.5%`):** Profit `>= +1.00%` $\to$ SL `Entry + 0.35%` (`lock_0035`, napas `0.65%`); Profit `>= +1.80%` $\to$ SL `Entry + 0.95%` (`lock_0095`, napas `0.85%`); Profit `>= +2.50%` $\to$ Trailing dinamis `0.70%`.
+   - **Proporsional ATR (`planned_sl_pct > 1.5%`):** Tangga trailing otomatis menskalakan terhadap lebar SL (`Tier 1`: `0.55 * SL` $\to$ kunci `0.20 * SL`; `Tier 2`: `0.90 * SL` $\to$ kunci `0.50 * SL`; `Tier 3`: `1.20 * SL` $\to$ trailing `0.40 * SL` maks `1.40%`), menjaga ruang napas tetap lega untuk aset volatil & Engine 2.
    - **3-Hour Re-Entry Cooldown:** Setelah posisi ditutup (`_record_position_close` atau `_detect_and_log_exchange_closes`), aset dikunci selama 3 jam di `logs/market_regime.json` sebelum boleh dibuka ulang.
 
 ### 6.1 Kebijakan Menahan Posisi Saat Pasar Tutup (*Hybrid Cost-Aware Off-Hours Policy*, Opsi B)
@@ -249,7 +248,7 @@ Di Walt Perps, biaya atau pendapatan inap berasal dari `funding_rate_hourly` yan
 
 - **Cakupan Aset:** **Saham AS (`ALLOWED_STOCKS`)** pada *overnight* (Sen–Kam `21:00–13:30 UTC`) & *weekend* (Jum `21:00`–Sen `13:30 UTC`), serta **Komoditas (`XAU`, `XAG`, `BRENTOIL`)** khusus **akhir pekan** (Jum `21:00`–Min `22:00 UTC`). **Crypto Tier-1 tetap berjalan 24/7.**
 - **Zero-Tolerance Biaya Inap:** Begitu *funding* berubah menjadi beban biaya inap (`favorable_funding < 0%`, berapa pun nilainya) pada sesi *pre-close* maupun saat pasar tutup, posisi ditutup seketika tanpa menunggu ambang hysteresis `0.10%/hari`.
-- **Early Profit Lock (`>= +0.40%`):** Pada seluruh sesi *pre-close* & tutup pasar, jika profit harga mencapai `+0.40%` (sebelum Tier 1 `+0.80%`), SL otomatis dikunci lebih dini ke **`Entry +/- 0.25%`** (cukup menutup fee `0.18%` + buffer).
+- **Early Profit Lock (`>= +0.70%`):** Pada seluruh sesi *pre-close* & tutup pasar, jika profit harga mencapai `+0.70%` (ruang napas `0.45%`), SL otomatis dikunci lebih dini ke **`Entry +/- 0.25%`** (cukup menutup fee `0.18%` + buffer).
 - **Pre-Close Overnight (`20:35–21:00 UTC`, Sen–Kam, Saham AS):** Tetap ditahan jika *carry* searah `>= +0.20%/hari` atau posisi sudah terkunci profit (`SL >= Entry + 0.25%`); jika *carry* lemah `< +0.20%/hari` dan belum terkunci profit, posisi ditutup sebelum penutupan pasar.
 - **Pre-Close Weekend (`20:35–21:00 UTC`, Jum, Saham AS & Komoditas):** Posisi hanya diizinkan menginap melewati libur akhir pekan bila **sudah terkunci profit** ATAU *carry* searah kuat **`>= +0.50%/hari`** dengan floating PnL masih aman (`>= -0.50%`). Selain itu posisi ditutup aman menjelang akhir pekan.
 
@@ -291,12 +290,12 @@ Berbeda dari Crypto, saham AS memiliki bias tren jangka panjang naik (*structura
 | **Gerbang Ekonomi** | `expected_funding >= 1.5x (fee + slippage)` | Net expected edge pasca biaya (`0.28%+`) + adverse funding `>= +0.15%` | Net expected edge pasca biaya (`0.28%+`) + adverse funding `>= +0.15%` |
 | **Syarat Riset AI** | Saham wajib riset segar (E3); Crypto/Komoditas riset hilang tetap boleh jalan | AI hanya filter pengaman (`P5 >= 0.70`/berita berlawanan $\to$ SKIP; `SPLIT` $\to$ HALF) | **Wajib riset segar (E3)** + blokir `NO_DATA`/`unknown` + blokir berita `bearish` (*falling knife*) |
 | **Earnings Guard** | Wajib aman **H-7** sebelum laporan keuangan | N/A | Wajib aman **H-7** sebelum laporan keuangan |
-| **SL / TP** | SL seragam **`1.5%`**; TP `+2.0%` s.d. `+2.5%` | SL **ATR `1.5%–4.5%`**; TP `>= 2.0%` (`1.0x–1.2x SL`) | SL **ATR `1.5%–4.5%`**; TP `>= 2.0%` (`1.3x SL`) |
-| **Trailing & Time-Stop** | Trailing L4 (`+0.80% / +1.40% / +2.00%`); tanpa Time-Stop jam | Trailing L4 + **Time-Stop `24h` (1h) / `72h` (4h)** bila profit `< +0.80%` | Trailing L4 + **Time-Stop `48h` (1h) / `120h` (1d)** bila profit `< +0.80%` |
+| **SL / TP** | **Dynamic ATR (`DYNAMIC_SL_MODE=atr`)**: kalem `1.5%–2.5%`, volatil `1.5%–3.5%`; TP `>= 1.35x SL` (`fixed`: `1.5%`) | SL **ATR `1.5%–4.5%`**; TP `>= 2.0%` (`1.0x–1.2x SL`), `round_price` 4/6/8 desimal | SL **ATR `1.5%–4.5%`**; TP `>= 2.0%` (`1.3x SL`) |
+| **Trailing & Time-Stop** | Trailing L4 (`+1.00%/+1.80%/+2.50%`, atau proporsional ATR); L2 Breakeven butuh `>= +0.50%`; tanpa Time-Stop jam | Trailing L4 **Proporsional ATR** + **Time-Stop `24h` (1h) / `72h` (4h)** bila di bawah trigger trailing | Trailing L4 **Proporsional ATR** + **Time-Stop `48h` (1h) / `120h` (1d)** bila di bawah trigger trailing |
 | **Batas Biaya Inap (*Adverse*)** | L2 tutup seketika bila flip `>= 0.10%/hari` (off-hours `< 0%`) | Tolak entry `> 0.30%/hari`; tutup di monitor bila **`>= 0.30%/hari`** | Tolak entry `> 0.15%/hari`; tutup di monitor bila **`>= 0.25%/hari`** |
-| **Jam Aktif & Off-Hours** | Saham AS di jam bursa + Hybrid Off-Hours; Crypto/Komoditas 24/7 | **24/7** | Entry hanya jam reguler AS (`13:30–21:00 UTC`); boleh tahan *overnight* `Sen–Kam` + Early Lock `+0.25%`; **wajib tutup akhir pekan** bila belum *profit-locked* |
+| **Jam Aktif & Off-Hours** | Saham AS di jam bursa + Hybrid Off-Hours (Early Lock `+0.70%` $\to$ `+0.25%`); Crypto/Komoditas 24/7 | **24/7** | Entry hanya jam reguler AS (`13:30–21:00 UTC`); boleh tahan *overnight* `Sen–Kam` + Early Lock `+0.70%` $\to$ `+0.25%`; **wajib tutup akhir pekan** bila belum *profit-locked* |
 | **Workflow & Sheets** | `daily-scan`, `market-execute`, `crypto-execute`, `risk-monitor` $\to$ 5 tab Sheets | `crypto-execute` & `daily-scan` $\to$ 5 tab Sheets (`Daily_Scans` 30 kolom) | `market-execute` & `daily-scan` (jam AS) $\to$ 5 tab Sheets (`Daily_Scans` 30 kolom) |
-| **Kill Switch Env/Vars** | `DRY_RUN=true` / `MAINTENANCE_MODE=on` | `CRYPTO_FORECAST_ENGINE=off`, `CRYPTO_FORECAST_UNIVERSE=tier1` | `STOCK_FORECAST_ENGINE=off` |
+| **Kill Switch Env/Vars** | `DRY_RUN=true` / `MAINTENANCE_MODE=on` / `DYNAMIC_SL_MODE=fixed` | `CRYPTO_FORECAST_ENGINE=off`, `CRYPTO_FORECAST_UNIVERSE=tier1` | `STOCK_FORECAST_ENGINE=off` |
 
 #### Prasyarat Aktivasi & Pagar Pengaman Engine 2
 Sebelum atau saat menjalankan Engine 2 secara penuh di akun live (`DRY_RUN=false`), prasyarat berikut ditegakkan oleh kode & operator:

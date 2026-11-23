@@ -207,9 +207,10 @@ def test_funding_flip_hysteresis_closes_only_at_or_above_threshold(monkeypatch):
     assert res_close["action"] == "CLOSE"
     client_close.preview_close.assert_called_once()
 
-    # Flip kecil < 0.1%/hari pada LONG (funding positif +0.05%/hari) -> TIDAK CLOSE, geser SL ke breakeven (100.0)
+    # Flip kecil < 0.1%/hari pada LONG dengan profit >= +0.50% -> TIDAK CLOSE, geser SL ke breakeven (100.0)
+    pos_be = _make_pos(side="long", entry=100.0, current=100.6, tp=102.0, sl=98.5)
     client_be = _make_mock_client()
-    res_be = evaluate_and_apply_position_risk(client_be, pos, current_funding_daily=0.0005)
+    res_be = evaluate_and_apply_position_risk(client_be, pos_be, current_funding_daily=0.0005)
     assert res_be is not None
     assert res_be["action"] == "UPDATE_AUTO_CLOSE"
     assert res_be["sl"] == pytest.approx(100.0)
@@ -217,53 +218,67 @@ def test_funding_flip_hysteresis_closes_only_at_or_above_threshold(monkeypatch):
 
     # Uji juga di apply_layer2_funding
     client_l2 = _make_mock_client()
-    apply_layer2_funding(client_l2, pos, current_funding_daily=0.0005)
+    apply_layer2_funding(client_l2, pos_be, current_funding_daily=0.0005)
     client_l2.preview_close.assert_not_called()
-    client_l2.preview_auto_close.assert_called_once_with(pos.contract_id, sl=100.0)
+    client_l2.preview_auto_close.assert_called_once_with(pos_be.contract_id, sl=100.0)
 
 
 # -----------------------------------------------------------------------------
-# 5. Trailing tiers True Zero-Risk (+0.35% / +0.85% / Trailing 0.60%)
+# 5. Trailing tiers True Zero-Risk (+1.00%->+0.35% / +1.80%->+0.95% / Trailing 0.70%)
 # -----------------------------------------------------------------------------
 
 def test_true_zero_risk_trailing_tiers():
     assert TRAILING_TIERS == [
-        (0.0080, "lock_0035"),
-        (0.0140, "lock_0085"),
-        (0.0200, 0.0060),
+        (0.0100, "lock_0035"),
+        (0.0180, "lock_0095"),
+        (0.0250, 0.0070),
     ]
 
-    # Tier 1: profit +0.85% (>= 0.80%) pada LONG -> SL di entry +0.35% (100.35 — surplus bersih setelah fee 0.18%)
+    # Tier 1: profit +1.10% (>= 1.00%) pada LONG -> SL di entry +0.35% (100.35)
     client1 = _make_mock_client()
-    pos_t1_long = _make_pos(side="long", entry=100.0, current=100.85, tp=102.5, sl=98.5)
+    pos_t1_long = _make_pos(side="long", entry=100.0, current=101.10, tp=103.0, sl=98.5)
     res1 = evaluate_and_apply_position_risk(client1, pos_t1_long, current_funding_daily=-0.006)
     assert res1 is not None
     assert res1["action"] == "UPDATE_AUTO_CLOSE"
     assert res1["sl"] == pytest.approx(100.35)
 
-    # Tier 2: profit +1.50% (>= 1.40%) pada LONG -> SL di entry +0.85% (100.85)
+    # Tier 2: profit +1.90% (>= 1.80%) pada LONG -> SL di entry +0.95% (100.95)
     client2 = _make_mock_client()
-    pos_t2_long = _make_pos(side="long", entry=100.0, current=101.50, tp=102.5, sl=100.35)
+    pos_t2_long = _make_pos(side="long", entry=100.0, current=101.90, tp=103.0, sl=100.35)
     res2 = evaluate_and_apply_position_risk(client2, pos_t2_long, current_funding_daily=-0.005)
     assert res2 is not None
     assert res2["action"] == "UPDATE_AUTO_CLOSE"
-    assert res2["sl"] == pytest.approx(100.85)
+    assert res2["sl"] == pytest.approx(100.95)
 
-    # Tier 2 pada SHORT: profit +1.50% (current=98.50) -> SL di entry -0.85% (99.15)
+    # Tier 2 pada SHORT: profit +1.90% (current=98.10) -> SL di entry -0.95% (99.05)
     client3 = _make_mock_client()
-    pos_t2_short = _make_pos(side="short", entry=100.0, current=98.50, tp=97.5, sl=101.5)
+    pos_t2_short = _make_pos(side="short", entry=100.0, current=98.10, tp=97.0, sl=101.5)
     res3 = evaluate_and_apply_position_risk(client3, pos_t2_short, current_funding_daily=0.005)
     assert res3 is not None
     assert res3["action"] == "UPDATE_AUTO_CLOSE"
-    assert res3["sl"] == pytest.approx(99.15)
+    assert res3["sl"] == pytest.approx(99.05)
 
-    # Tier 3 Trailing 0.60%: profit +2.10% (current=102.10) -> SL di 102.10 * (1 - 0.006) = 101.4874
+    # Tier 3 Trailing 0.70%: profit +2.60% (current=102.60) -> SL di 102.60 * (1 - 0.007) = 101.8818
     client_t3 = _make_mock_client()
-    pos_t3 = _make_pos(side="long", entry=100.0, current=102.10, tp=102.5, sl=100.85)
+    pos_t3 = Position(
+        contract_id=1,
+        base_asset="NVDA",
+        side="long",
+        leverage=2,
+        margin=2.50,
+        entry_price=100.0,
+        current_price=102.60,
+        tp=103.0,
+        sl=100.95,
+        funding_paid=0.05,
+        liquidation_price=50.0,
+        planned_sl_pct=0.015,
+        planned_tp_pct=0.030,
+    )
     res_t3 = evaluate_and_apply_position_risk(client_t3, pos_t3, current_funding_daily=-0.005)
     assert res_t3 is not None
     assert res_t3["action"] == "UPDATE_AUTO_CLOSE"
-    assert res_t3["sl"] == pytest.approx(101.4874)
+    assert res_t3["sl"] == pytest.approx(101.8818)
 
     # apply_layer4_trailing wrapper
     client4 = _make_mock_client()

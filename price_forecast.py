@@ -52,6 +52,53 @@ FORECAST_MAX_SCAN_ASSETS = 50
 FORECAST_MAX_SIGNALS = 5
 STOCK_FORECAST_MAX_ADVERSE_FUNDING_DAILY = 0.0015  # 0.15%/hari batas adverse funding masuk Saham AS
 STOCK_FORECAST_MAX_SIGNALS = 3
+_ATR_CACHE: dict[str, tuple[float, Optional[float]]] = {}
+
+
+def estimate_asset_atr_24h_pct(
+    asset: str,
+    *,
+    asset_class: Optional[str] = None,
+    fetcher: Optional[Any] = None,
+    cache_ttl_sec: float = 600.0,
+) -> Optional[float]:
+    """Hitung ATR 24 jam (fraksi harga) real-time dari candle 1h terbaru dengan cache TTL."""
+    sym = str(asset or "").strip().upper()
+    if not sym:
+        return None
+    now_mono = time.monotonic()
+    if fetcher is None and cache_ttl_sec > 0:
+        cached = _ATR_CACHE.get(sym)
+        if cached is not None and (now_mono - cached[0]) < cache_ttl_sec:
+            return cached[1]
+
+    ac = asset_class or (
+        "commodity" if sym in COMMODITY_SYMBOLS
+        else ("stock" if sym in NON_CRYPTO_SYMBOLS else "crypto")
+    )
+    candles: Sequence[Mapping[str, Any]] = []
+    try:
+        if fetcher is not None:
+            raw = fetcher(sym, "1h", 120)
+            candles = raw[0] if isinstance(raw, tuple) else raw
+        elif ac == "crypto":
+            from market_chart import fetch_crypto_candles
+            candles, _src = fetch_crypto_candles(sym, "1h", 120)
+        else:
+            from market_chart import _fetch_yahoo_candles
+            candles = _fetch_yahoo_candles(sym, "1h", 120)
+    except Exception:
+        candles = []
+
+    atr_val: Optional[float] = None
+    if candles:
+        delta = compute_price_delta_24h(sym, candles, interval="1h", asset_class=ac)
+        if delta is not None and delta.atr_24h_pct > 0 and math.isfinite(delta.atr_24h_pct):
+            atr_val = round(float(delta.atr_24h_pct), 6)
+
+    if fetcher is None and cache_ttl_sec > 0:
+        _ATR_CACHE[sym] = (now_mono, atr_val)
+    return atr_val
 
 DEFAULT_ROUND_TRIP_COST_PCT = 0.0028  # 0.18% round-trip taker + 0.10% floor slippage terukur
 DEFAULT_MIN_NET_EDGE_PCT = 0.0080     # +0.80% minimal net expected edge 24h

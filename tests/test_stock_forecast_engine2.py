@@ -339,7 +339,7 @@ def test_stock_engine2_off_hours_overnight_hold_weekend_close_and_timestop():
     pol_hold = evaluate_off_hours_position_policy(pos_flat, current_funding_daily=0.0005, now_utc=mon_preclose)
     assert pol_hold["action"] == "HOLD_PROTECT"
 
-    # 2. Senin PRE_CLOSE_OVERNIGHT profit +0.50% (>= +0.40%) -> Early Lock SL +0.25% (100.25)
+    # 2. Senin PRE_CLOSE_OVERNIGHT profit +0.75% (>= +0.70%) -> Early Lock SL +0.25% (100.25)
     pos_early = Position(
         contract_id=88,
         base_asset="NVDA",
@@ -347,7 +347,7 @@ def test_stock_engine2_off_hours_overnight_hold_weekend_close_and_timestop():
         leverage=2,
         margin=3.0,
         entry_price=100.0,
-        current_price=100.5,
+        current_price=100.75,
         tp=103.9,
         sl=97.0,
         funding_paid=0.0,

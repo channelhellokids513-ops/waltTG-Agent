@@ -131,10 +131,10 @@ def test_small_negative_funding_during_open_or_247_assets_uses_standard_hysteres
     monkeypatch.delenv("OFF_HOURS_HOLD_POLICY", raising=False)
     monkeypatch.setattr(walt_bot, "_record_position_close", lambda *a, **kw: None)
 
-    # 1. NVDA saat pasar buka reguler (Rabu 16:00 UTC) -> TIDAK tutup, hanya geser SL breakeven
+    # 1. NVDA saat pasar buka reguler (Rabu 16:00 UTC) -> TIDAK tutup, geser SL breakeven (profit >= +0.50%)
     wed_open = datetime(2026, 11, 25, 16, 0, tzinfo=timezone.utc)
     c_open = _make_client()
-    p_nvda = _make_pos(asset="NVDA", side="long", entry=100.0, current=100.2, sl=98.5)
+    p_nvda = _make_pos(asset="NVDA", side="long", entry=100.0, current=100.6, sl=98.5)
     res_open = evaluate_and_apply_position_risk(c_open, p_nvda, current_funding_daily=0.0004, now_utc=wed_open)
     assert res_open is not None and res_open["action"] == "UPDATE_AUTO_CLOSE"
     assert res_open["sl"] == pytest.approx(100.0)
@@ -143,7 +143,7 @@ def test_small_negative_funding_during_open_or_247_assets_uses_standard_hysteres
     # 2. BTC pada hari Sabtu -> tetap 24/7, TIDAK tutup oleh kebijakan off-hours
     sat = datetime(2026, 11, 28, 15, 0, tzinfo=timezone.utc)
     c_btc = _make_client()
-    p_btc = _make_pos(asset="BTC", side="long", entry=100.0, current=100.2, sl=98.5)
+    p_btc = _make_pos(asset="BTC", side="long", entry=100.0, current=100.6, sl=98.5)
     res_btc = evaluate_and_apply_position_risk(c_btc, p_btc, current_funding_daily=0.0004, now_utc=sat)
     assert res_btc is not None and res_btc["action"] == "UPDATE_AUTO_CLOSE"
     c_btc.preview_close.assert_not_called()
@@ -151,7 +151,7 @@ def test_small_negative_funding_during_open_or_247_assets_uses_standard_hysteres
     # 3. XAU Selasa 03:00 UTC (OPEN) tidak tutup; Sabtu (CLOSED_WEEKEND) langsung CLOSE
     tue_night = datetime(2026, 11, 24, 3, 0, tzinfo=timezone.utc)
     c_xau_open = _make_client()
-    p_xau = _make_pos(asset="XAU", side="long", entry=100.0, current=100.2, sl=98.5)
+    p_xau = _make_pos(asset="XAU", side="long", entry=100.0, current=100.6, sl=98.5)
     res_xau_open = evaluate_and_apply_position_risk(c_xau_open, p_xau, current_funding_daily=0.0004, now_utc=tue_night)
     assert res_xau_open is not None and res_xau_open["action"] == "UPDATE_AUTO_CLOSE"
 
@@ -180,17 +180,17 @@ def test_pre_close_overnight_holds_strong_carry_and_locks_early_profit(monkeypat
     assert res_hold is None
     c_hold.preview_close.assert_not_called()
 
-    # Carry +0.25%/hari & profit +0.50% (>= +0.40%, < Tier 1 +0.80%) -> kunci SL dini di +0.25%
+    # Carry +0.25%/hari & profit +0.75% (>= +0.70%, < Tier 1 +1.00%) -> kunci SL dini di +0.25%
     c_lock = _make_client()
-    p_profit = _make_pos(asset="NVDA", side="long", entry=100.0, current=100.50, sl=98.5)
+    p_profit = _make_pos(asset="NVDA", side="long", entry=100.0, current=100.75, sl=98.5)
     res_lock = evaluate_and_apply_position_risk(c_lock, p_profit, current_funding_daily=-0.0025, now_utc=mon_preclose)
     assert res_lock is not None
     assert res_lock["action"] == "UPDATE_AUTO_CLOSE"
     assert res_lock["sl"] == pytest.approx(100.25)
 
-    # SHORT dengan profit +0.50% -> kunci SL dini di 99.75
+    # SHORT dengan profit +0.75% -> kunci SL dini di 99.75
     c_lock_s = _make_client()
-    p_profit_s = _make_pos(asset="NVDA", side="short", entry=100.0, current=99.50, tp=97.5, sl=101.5)
+    p_profit_s = _make_pos(asset="NVDA", side="short", entry=100.0, current=99.25, tp=97.5, sl=101.5)
     res_lock_s = evaluate_and_apply_position_risk(c_lock_s, p_profit_s, current_funding_daily=0.0025, now_utc=mon_preclose)
     assert res_lock_s is not None
     assert res_lock_s["action"] == "UPDATE_AUTO_CLOSE"
@@ -248,9 +248,9 @@ def test_pre_close_weekend_rules_for_stocks_and_commodities(monkeypatch, asset):
     assert res_ok is None
     c_ok.preview_close.assert_not_called()
 
-    # 4. Carry +0.10%/hari namun profit +0.50% (>= +0.40%) -> TAHAN + kunci SL +0.25%
+    # 4. Carry +0.10%/hari namun profit +0.75% (>= +0.70%) -> TAHAN + kunci SL +0.25%
     c_locked = _make_client()
-    p_gain = _make_pos(asset=asset, side="long", entry=100.0, current=100.50, sl=98.5)
+    p_gain = _make_pos(asset=asset, side="long", entry=100.0, current=100.75, sl=98.5)
     res_locked = evaluate_and_apply_position_risk(c_locked, p_gain, current_funding_daily=-0.0010, now_utc=fri_preclose)
     assert res_locked is not None
     assert res_locked["action"] == "UPDATE_AUTO_CLOSE"
@@ -265,7 +265,7 @@ def test_pre_close_weekend_rules_for_stocks_and_commodities(monkeypatch, asset):
 def test_l4_trailing_tier_beats_off_hours_early_lock():
     tue_overnight = datetime(2026, 11, 24, 2, 0, tzinfo=timezone.utc)
     client = _make_client()
-    pos = _make_pos(asset="NVDA", side="long", entry=100.0, current=101.00, sl=98.5)
+    pos = _make_pos(asset="NVDA", side="long", entry=100.0, current=101.10, sl=98.5)
     res = evaluate_and_apply_position_risk(client, pos, current_funding_daily=-0.0050, now_utc=tue_overnight)
     assert res is not None
     assert res["action"] == "UPDATE_AUTO_CLOSE"
@@ -280,7 +280,7 @@ def test_l4_trailing_tier_beats_off_hours_early_lock():
 def test_kill_switch_off_disables_off_hours_policy(monkeypatch):
     monkeypatch.setenv("OFF_HOURS_HOLD_POLICY", "off")
     sat = datetime(2026, 11, 28, 15, 0, tzinfo=timezone.utc)
-    pos = _make_pos(asset="NVDA", side="long", entry=100.0, current=100.2, sl=98.5)
+    pos = _make_pos(asset="NVDA", side="long", entry=100.0, current=100.6, sl=98.5)
     policy = evaluate_off_hours_position_policy(pos, current_funding_daily=0.0004, now_utc=sat)
     assert policy["action"] == "NONE"
     assert policy["session"] == "DISABLED"

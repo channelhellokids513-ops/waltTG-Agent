@@ -146,6 +146,7 @@ def isolate_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, captured_clo
     iso_logs.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(walt_bot, "CLOSED_IDS_PATH", str(iso_logs / "closed_ids.json"))
+    monkeypatch.setattr(walt_bot, "_estimate_live_atr_24h_pct", lambda *a, **kw: None)
     monkeypatch.setattr(sheet_logger, "FALLBACK_LOG_DIR", str(iso_logs))
     monkeypatch.setattr(training_data, "DEFAULT_JSONL_PATH", str(iso_logs / "training_dataset.jsonl"))
     monkeypatch.setattr(

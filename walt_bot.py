@@ -242,14 +242,38 @@ except Exception as _cfg_exc:
         f"Gagal memuat konfigurasi strategi bersama ({_cfg_exc}); fallback ke DEFAULT_STRATEGY_CONFIG."
     )
 
-# Tangga Trailing Stop (True Zero-Risk — surplus bersih setelah fee 0.18% = 2 * TAKER_FEE_PER_SIDE + spread)
-# Arah monoton: diurutkan naik berdasarkan ambang profit; semakin tinggi profit, semakin ketat SL terkunci
-# (LONG semakin naik di atas entry, SHORT semakin turun di bawah entry).
+# Tangga Trailing Stop Progresif Baseline (ruang napas lebih lega agar tidak mudah tersapu noise)
 TRAILING_TIERS = [
-    (0.0080, "lock_0035"),  # Tier 1: profit >= +0.80% → SL di entry +0.35% (surplus bersih setelah fee)
-    (0.0140, "lock_0085"),  # Tier 2: profit >= +1.40% → SL di entry +0.85% (kunci cuan menengah)
-    (0.0200, 0.0060),       # Tier 3: profit >= +2.00% → Trailing stop 0.60% di bawah running price
+    (0.0100, "lock_0035"),  # Tier 1: profit >= +1.00% → SL di entry +0.35% (ruang napas 0.65%)
+    (0.0180, "lock_0095"),  # Tier 2: profit >= +1.80% → SL di entry +0.95% (ruang napas 0.85%)
+    (0.0250, 0.0070),       # Tier 3: profit >= +2.50% → Trailing stop 0.70% di bawah running price
 ]
+_DEFAULT_TRAILING_TIERS = list(TRAILING_TIERS)
+
+DYNAMIC_SL_MODE_ENV = "DYNAMIC_SL_MODE"
+DYNAMIC_SL_ATR_MULT = 0.85
+DYNAMIC_SL_CALM_CAP_PCT = 0.025        # Maks 2.5% untuk aset kalem (SPY, US100, AAPL, XAU)
+DYNAMIC_SL_VOLATILE_CAP_PCT = 0.035    # Maks 3.5% untuk aset volatil & crypto
+DYNAMIC_TP_RR_MULT = 1.35              # TP minimal 1.35x SL dinamis (menjaga R:R asimetris)
+L2_BREAKEVEN_MIN_PROFIT_PCT = 0.0050   # Syarat profit minimal +0.50% sebelum L2 geser SL ke entry
+CALM_SL_ASSETS: frozenset[str] = frozenset({"SPY", "US100", "AAPL", "XAU"})
+
+
+def round_price(val: float) -> float:
+    """Bulatkan harga adaptif: 4 desimal >= $1, 6 desimal $0.01-$1, 8 desimal < $0.01."""
+    aval = abs(float(val))
+    if aval >= 1.0:
+        return round(float(val), 4)
+    if aval >= 0.01:
+        return round(float(val), 6)
+    return round(float(val), 8)
+
+
+def is_dynamic_sl_enabled() -> bool:
+    """True bila SL dinamis berbasis ATR aktif (DYNAMIC_SL_MODE != fixed/off)."""
+    return os.getenv(DYNAMIC_SL_MODE_ENV, "atr").strip().lower() not in (
+        "fixed", "off", "false", "0", "no", "disabled"
+    )
 
 
 def get_asset_baseline_tpsl_pct(asset: Optional[str] = None) -> tuple[float, float]:
@@ -595,6 +619,7 @@ CI_ENV_KNOBS: tuple[str, ...] = (
     CRYPTO_FORECAST_ENGINE_ENV,
     CRYPTO_FORECAST_UNIVERSE_ENV,
     STOCK_FORECAST_ENGINE_ENV,
+    DYNAMIC_SL_MODE_ENV,
 )
 MONITOR_ENV_KNOBS: tuple[str, ...] = (OFF_HOURS_HOLD_POLICY_ENV,)
 ENTRY_WORKFLOWS: tuple[str, ...] = ("crypto-execute.yml", "market-execute.yml", "daily-scan.yml")
@@ -623,7 +648,7 @@ def get_crypto_forecast_universe_mode() -> Literal["all", "tier1"]:
 
 US_STOCK_PRECLOSE_START_UTC = (20, 35)       # 25 menit sebelum tutup 21:00 UTC (cukup untuk siklus risk-monitor 5-10m)
 COMMODITY_WEEKEND_REOPEN_UTC = (22, 0)       # Minggu 22:00 UTC pembukaan futures komoditas global
-OFF_HOURS_EARLY_LOCK_TRIGGER_PCT = 0.0040    # +0.40% profit harga memicu early lock off-hours/pre-close
+OFF_HOURS_EARLY_LOCK_TRIGGER_PCT = 0.0070    # +0.70% profit harga memicu early lock (ruang napas 0.45%)
 OFF_HOURS_EARLY_LOCK_OFFSET_PCT = 0.0025     # Kunci SL di Entry +/- 0.25% (menutup fee 0.18% + buffer)
 OVERNIGHT_MIN_HOLD_FUNDING_DAILY = 0.0020    # +0.20%/hari carry searah minimal untuk inap overnight Saham AS
 WEEKEND_MIN_HOLD_FUNDING_DAILY = 0.0050      # +0.50%/hari carry searah minimal untuk inap akhir pekan bila belum profit-locked
@@ -728,11 +753,11 @@ def evaluate_off_hours_position_policy(
     early_lock_sl: Optional[float] = None
     if profit >= OFF_HOURS_EARLY_LOCK_TRIGGER_PCT and pos.entry_price > 0:
         if pos.side == "long":
-            cand = round(pos.entry_price * (1.0 + OFF_HOURS_EARLY_LOCK_OFFSET_PCT), 4)
+            cand = round_price(pos.entry_price * (1.0 + OFF_HOURS_EARLY_LOCK_OFFSET_PCT))
             if cand < pos.current_price:
                 early_lock_sl = cand
         else:
-            cand = round(pos.entry_price * (1.0 - OFF_HOURS_EARLY_LOCK_OFFSET_PCT), 4)
+            cand = round_price(pos.entry_price * (1.0 - OFF_HOURS_EARLY_LOCK_OFFSET_PCT))
             if cand > pos.current_price:
                 early_lock_sl = cand
 
@@ -1724,12 +1749,63 @@ def compute_baseline_tpsl(
             tp_pct = windfall_tp
 
     if side == "long":
-        tp = round(entry * (1 + tp_pct), 4)
-        sl = round(entry * (1 - sl_pct), 4)
+        tp = round_price(entry * (1 + tp_pct))
+        sl = round_price(entry * (1 - sl_pct))
     else:
-        tp = round(entry * (1 - tp_pct), 4)
-        sl = round(entry * (1 + sl_pct), 4)
+        tp = round_price(entry * (1 - tp_pct))
+        sl = round_price(entry * (1 + sl_pct))
     return tp, sl
+
+
+def _estimate_live_atr_24h_pct(asset: str) -> Optional[float]:
+    """Ambil estimasi ATR 24 jam secara non-blocking untuk kalkulasi SL dinamis."""
+    try:
+        import price_forecast
+        return price_forecast.estimate_asset_atr_24h_pct(asset)
+    except Exception as exc:
+        log.debug(f"Gagal estimasi ATR 24h {asset} ({type(exc).__name__}): {exc}")
+        return None
+
+
+def compute_dynamic_tpsl(
+    side: str,
+    entry: float,
+    *,
+    asset: Optional[str] = None,
+    funding_daily: float = 0.0,
+    atr_24h_pct: Optional[float] = None,
+) -> tuple[float, float, float, float]:
+    """Hitung `(tp, sl, tp_pct, sl_pct)` adaptif terhadap volatilitas ATR 24 jam."""
+    base_tp_pct, floor_sl = get_asset_baseline_tpsl_pct(asset)
+    sym = str(asset or "").strip().upper()
+    if not is_dynamic_sl_enabled():
+        sl_pct = floor_sl
+        tp_pct = base_tp_pct
+    else:
+        cap_sl = DYNAMIC_SL_CALM_CAP_PCT if sym in CALM_SL_ASSETS else DYNAMIC_SL_VOLATILE_CAP_PCT
+        if atr_24h_pct is not None and math.isfinite(atr_24h_pct) and atr_24h_pct > 0:
+            sl_pct = round(max(floor_sl, min(cap_sl, DYNAMIC_SL_ATR_MULT * float(atr_24h_pct))), 4)
+        else:
+            if sym in CALM_SL_ASSETS:
+                sl_pct = floor_sl
+            elif sym in ALLOWED_CRYPTO or sym in ALLOWED_COMMODITIES:
+                sl_pct = max(floor_sl, 0.022)
+            else:
+                sl_pct = max(floor_sl, 0.025)
+        tp_pct = max(base_tp_pct, round(DYNAMIC_TP_RR_MULT * sl_pct, 4))
+
+    if abs(funding_daily) >= MIN_FUNDING_DAILY:
+        windfall_tp = round(abs(funding_daily) * 2.5, 4)
+        if sl_pct <= windfall_tp < tp_pct:
+            tp_pct = windfall_tp
+
+    if side == "long":
+        tp = round_price(entry * (1.0 + tp_pct))
+        sl = round_price(entry * (1.0 - sl_pct))
+    else:
+        tp = round_price(entry * (1.0 - tp_pct))
+        sl = round_price(entry * (1.0 + sl_pct))
+    return tp, sl, tp_pct, sl_pct
 
 
 def resolve_order_margin(
@@ -1863,13 +1939,20 @@ def open_position(
         sl_pct = min(0.045, max(DEFAULT_SL_PCT, float(opp.planned_sl_pct)))
         tp_pct = max(0.020, float(opp.planned_tp_pct))
         if opp.side == "long":
-            tp = round(price * (1.0 + tp_pct), 4)
-            sl = round(price * (1.0 - sl_pct), 4)
+            tp = round_price(price * (1.0 + tp_pct))
+            sl = round_price(price * (1.0 - sl_pct))
         else:
-            tp = round(price * (1.0 - tp_pct), 4)
-            sl = round(price * (1.0 + sl_pct), 4)
+            tp = round_price(price * (1.0 - tp_pct))
+            sl = round_price(price * (1.0 + sl_pct))
     else:
-        tp, sl = compute_baseline_tpsl(opp.side, price, asset=opp.base_asset, funding_daily=opp.funding_daily)
+        atr_24h = _estimate_live_atr_24h_pct(opp.base_asset) if is_dynamic_sl_enabled() else None
+        tp, sl, tp_pct, sl_pct = compute_dynamic_tpsl(
+            opp.side,
+            price,
+            asset=opp.base_asset,
+            funding_daily=opp.funding_daily,
+            atr_24h_pct=atr_24h,
+        )
 
     # Coba preview dengan TP/SL
     try:
@@ -1981,6 +2064,8 @@ def open_position(
         result["actual_margin"] = applied_margin
         result["tp"] = tp
         result["sl"] = sl
+        result["sl_pct"] = sl_pct
+        result["tp_pct"] = tp_pct
         result["price"] = price
     return result
 
@@ -1993,16 +2078,57 @@ def open_position(
 # Satu-satunya tempat untuk mendaftarkan parameter lock tier string baru.
 _TRAILING_HANDLERS: dict[str, tuple[float, str]] = {
     "lock_0035": (0.0035, "L4 True Zero-Risk"),
-    "lock_0085": (0.0085, "L4 Lock Cuan"),
+    "lock_0095": (0.0095, "L4 Lock Cuan"),
 }
+
+
+def _get_position_trailing_trigger_pct(pos: Position) -> float:
+    """Ambang profit minimal sebelum trailing/lock Lapis 4 aktif (proporsional terhadap planned_sl_pct)."""
+    if (
+        TRAILING_TIERS == _DEFAULT_TRAILING_TIERS
+        and pos.planned_sl_pct is not None
+        and float(pos.planned_sl_pct) > DEFAULT_SL_PCT + 1e-6
+    ):
+        sl_ref = min(0.045, float(pos.planned_sl_pct))
+        return max(0.0100, round(0.55 * sl_ref, 4))
+    return float(TRAILING_TIERS[0][0]) if TRAILING_TIERS else 0.0100
 
 
 def _resolve_trailing_sl(pos: Position, profit: float) -> Optional[tuple[float, str]]:
     """
-    Hitung target SL dan deskripsi alasan dari tangga TRAILING_TIERS (sumber tunggal).
-    Mengembalikan (round(sl_price, 4), deskripsi_reason) atau None jika profit di bawah tier pertama
-    atau action tier tidak dikenal (mencatat log.error tanpa raise/Telegram agar monitor tidak crash).
+    Hitung target SL dan deskripsi alasan dari tangga TRAILING_TIERS atau proporsional ATR.
+    Mengembalikan (round_price(sl_price), deskripsi_reason) atau None jika profit di bawah tier pertama.
     """
+    if (
+        TRAILING_TIERS == _DEFAULT_TRAILING_TIERS
+        and pos.planned_sl_pct is not None
+        and float(pos.planned_sl_pct) > DEFAULT_SL_PCT + 1e-6
+    ):
+        sl_ref = min(0.045, float(pos.planned_sl_pct))
+        t1 = max(0.0100, round(0.55 * sl_ref, 4))
+        lock1 = max(0.0035, round(0.20 * sl_ref, 4))
+        t2 = max(0.0180, round(0.90 * sl_ref, 4))
+        lock2 = max(0.0095, round(0.50 * sl_ref, 4))
+        t3 = max(0.0250, round(1.20 * sl_ref, 4))
+        trail3 = min(0.0140, max(0.0070, round(0.40 * sl_ref, 4)))
+        if profit < t1:
+            return None
+        if profit >= t3:
+            sl_price = (
+                pos.current_price * (1.0 - trail3)
+                if pos.side == "long"
+                else pos.current_price * (1.0 + trail3)
+            )
+            return round_price(sl_price), f"L4 Trailing {trail3*100:.2f}% (Profit {profit*100:+.2f}%)"
+        lock_pct = lock2 if profit >= t2 else lock1
+        lbl = "L4 Lock Cuan" if profit >= t2 else "L4 True Zero-Risk"
+        sl_price = (
+            pos.entry_price * (1.0 + lock_pct)
+            if pos.side == "long"
+            else pos.entry_price * (1.0 - lock_pct)
+        )
+        return round_price(sl_price), f"{lbl} +{lock_pct*100:.2f}% (Profit {profit*100:+.2f}%)"
+
     if not TRAILING_TIERS or profit < TRAILING_TIERS[0][0]:
         return None
     active_tier = None
@@ -2029,14 +2155,14 @@ def _resolve_trailing_sl(pos: Position, profit: float) -> Optional[tuple[float, 
             if pos.side == "long"
             else pos.current_price * (1.0 + trailing_pct)
         )
-        tier_desc = f"L4 Trailing {trailing_pct*100:.1f}% (Profit {profit*100:+.2f}%)"
+        tier_desc = f"L4 Trailing {trailing_pct*100:.2f}% (Profit {profit*100:+.2f}%)"
     else:
         log.error(
             f"Trailing tier action tidak dikenal: action={action!r} "
             f"(asset={pos.base_asset}, profit={profit*100:+.2f}%, TRAILING_TIERS={TRAILING_TIERS!r})"
         )
         return None
-    return round(sl_price, 4), tier_desc
+    return round_price(sl_price), tier_desc
 
 
 def _sl_is_better(side: str, new_sl: float, old_sl: Optional[float]) -> bool:
@@ -2459,7 +2585,8 @@ def evaluate_and_apply_position_risk(
     # --- 1a. Engine 2 Time-Stop (khusus posisi directional price_forecast) ---
     if is_forecast_pos and now_utc is not None and pos.max_hold_hours:
         age_h = _parse_position_age_hours(pos.opened_at, now_utc)
-        if age_h is not None and age_h >= float(pos.max_hold_hours) and pos.profit_pct_price < 0.0080:
+        trailing_trigger = _get_position_trailing_trigger_pct(pos)
+        if age_h is not None and age_h >= float(pos.max_hold_hours) and pos.profit_pct_price < trailing_trigger:
             ts_reason = f"Engine 2 Time-Stop ({float(pos.max_hold_hours):.0f}h, hold={age_h:.1f}h)"
             log.warning(f"[TIME-STOP] {pos.base_asset}: {ts_reason} -> tutup posisi riil")
             preview = client.preview_close(pos.contract_id)
@@ -2485,16 +2612,21 @@ def evaluate_and_apply_position_risk(
                 detail=f"{close_reason} -> Close Posisi",
             )
 
-    # --- 2. Evaluasi Target TP (Lapis 1 Baseline & Windfall, atau Engine 2 Planned TP/SL) ---
-    if is_forecast_pos:
-        plan_tp_pct = max(0.020, float(pos.planned_tp_pct or 0.025))
+    # --- 2. Evaluasi Target TP (Lapis 1 Baseline & Windfall, atau Dynamic ATR / Engine 2 Planned TP/SL) ---
+    has_dynamic_plan = is_forecast_pos or (pos.planned_sl_pct is not None and float(pos.planned_sl_pct) > 0)
+    if has_dynamic_plan:
         plan_sl_pct = min(0.045, max(DEFAULT_SL_PCT, float(pos.planned_sl_pct or 0.035)))
+        plan_tp_pct = max(0.020, float(pos.planned_tp_pct or round(DYNAMIC_TP_RR_MULT * plan_sl_pct, 4)))
+        if not is_forecast_pos and abs(current_funding_daily) >= MIN_FUNDING_DAILY:
+            windfall_tp = round(abs(current_funding_daily) * 2.5, 4)
+            if plan_sl_pct <= windfall_tp < plan_tp_pct:
+                plan_tp_pct = windfall_tp
         if pos.side == "long":
-            target_tp = round(pos.entry_price * (1.0 + plan_tp_pct), 4)
-            target_sl = round(pos.entry_price * (1.0 - plan_sl_pct), 4)
+            target_tp = round_price(pos.entry_price * (1.0 + plan_tp_pct))
+            target_sl = round_price(pos.entry_price * (1.0 - plan_sl_pct))
         else:
-            target_tp = round(pos.entry_price * (1.0 - plan_tp_pct), 4)
-            target_sl = round(pos.entry_price * (1.0 + plan_sl_pct), 4)
+            target_tp = round_price(pos.entry_price * (1.0 - plan_tp_pct))
+            target_sl = round_price(pos.entry_price * (1.0 + plan_sl_pct))
     else:
         target_tp, target_sl = compute_baseline_tpsl(
             pos.side, pos.entry_price, asset=pos.base_asset, funding_daily=current_funding_daily
@@ -2518,14 +2650,23 @@ def evaluate_and_apply_position_risk(
     candidate_sl = None
     sl_reason = None
 
-    # A. Kandidat dari Baseline SL (DEFAULT_SL_PCT atau Engine 2 planned_sl_pct)
+    # A. Kandidat dari Baseline SL (DEFAULT_SL_PCT atau Dynamic ATR / Engine 2 planned_sl_pct)
     if not pos.sl or _sl_is_improvement(pos, target_sl):
         candidate_sl = target_sl
-        sl_reason = "Engine 2 ATR SL" if is_forecast_pos else "L1 Baseline"
+        if is_forecast_pos:
+            sl_reason = "Engine 2 ATR SL"
+        elif has_dynamic_plan:
+            sl_reason = "L1 Dynamic ATR"
+        else:
+            sl_reason = "L1 Baseline"
 
-    # B. Kandidat dari Funding Lemah / Flip di bawah threshold <0.1% (Lapis 2 — khusus Engine 1)
-    if not is_forecast_pos and abs(current_funding_daily) < FUNDING_FLIP_CLOSE_THRESHOLD:
-        l2_sl = round(pos.entry_price, 4)
+    # B. Kandidat dari Funding Lemah / Flip di bawah threshold <0.1% (Lapis 2 — khusus Engine 1, wajib profit >= +0.50%)
+    if (
+        not is_forecast_pos
+        and abs(current_funding_daily) < FUNDING_FLIP_CLOSE_THRESHOLD
+        and pos.profit_pct_price >= L2_BREAKEVEN_MIN_PROFIT_PCT
+    ):
+        l2_sl = round_price(pos.entry_price)
         l2_valid_side = (
             (pos.side == "long" and l2_sl < pos.current_price)
             or (pos.side == "short" and l2_sl > pos.current_price)
@@ -2650,8 +2791,8 @@ def apply_layer2_funding(
         if preview and preview.get("ok"):
             return client.execute(preview["confirmationToken"])
         return None
-    if abs(current_funding_daily) < FUNDING_FLIP_CLOSE_THRESHOLD:
-        new_sl = pos.entry_price
+    if abs(current_funding_daily) < FUNDING_FLIP_CLOSE_THRESHOLD and pos.profit_pct_price >= L2_BREAKEVEN_MIN_PROFIT_PCT:
+        new_sl = round_price(pos.entry_price)
         if _sl_is_improvement(pos, new_sl):
             preview = client.preview_auto_close(pos.contract_id, sl=new_sl)
             if preview and preview.get("ok"):
@@ -2711,20 +2852,24 @@ def _record_forecast_position_meta(
     contract_id: int,
     opp: Opportunity,
     regime_path: str = "logs/market_regime.json",
+    *,
+    sl_pct: Optional[float] = None,
+    tp_pct: Optional[float] = None,
 ) -> None:
-    """Simpan metadata posisi Engine 2 (SL/TP ATR & max_hold_hours) ke market_regime.json."""
+    """Simpan metadata SL/TP dinamis & max_hold_hours posisi (Engine 1 ATR / Engine 2) ke market_regime.json."""
     try:
         state = _load_execution_regime(regime_path)
         meta_map = state.get("forecast_positions")
         if not isinstance(meta_map, dict):
             meta_map = {}
+        sig_src = str(getattr(opp, "signal_source", "funding") or "funding")
         meta_map[str(contract_id)] = {
             "asset": opp.base_asset,
-            "setup": opp.forecast_setup,
-            "signal_source": "price_forecast",
-            "planned_sl_pct": opp.planned_sl_pct,
-            "planned_tp_pct": opp.planned_tp_pct,
-            "max_hold_hours": opp.max_hold_hours,
+            "setup": opp.forecast_setup if sig_src == "price_forecast" else "dynamic_atr_sl",
+            "signal_source": sig_src,
+            "planned_sl_pct": float(sl_pct) if sl_pct is not None else opp.planned_sl_pct,
+            "planned_tp_pct": float(tp_pct) if tp_pct is not None else opp.planned_tp_pct,
+            "max_hold_hours": opp.max_hold_hours if sig_src == "price_forecast" else None,
         }
         state["forecast_positions"] = meta_map
         _save_execution_regime(state, regime_path=regime_path)
@@ -4779,8 +4924,14 @@ def scan_with_research(
                         _record_open_position_verdict(
                             opp.contract_id, asset, opp.side, verdict, actual_margin, order_price
                         )
-                        if getattr(opp, "signal_source", "funding") == "price_forecast":
-                            _record_forecast_position_meta(opp.contract_id, opp)
+                        res_sl_pct = res.get("sl_pct") if isinstance(res, dict) else None
+                        res_tp_pct = res.get("tp_pct") if isinstance(res, dict) else None
+                        if getattr(opp, "signal_source", "funding") == "price_forecast" or (
+                            res_sl_pct is not None and float(res_sl_pct) > DEFAULT_SL_PCT + 1e-6
+                        ):
+                            _record_forecast_position_meta(
+                                opp.contract_id, opp, sl_pct=res_sl_pct, tp_pct=res_tp_pct
+                            )
                         record_entry_execution(asset)
                         deployed += actual_margin
                         existing_contracts.add(opp.contract_id)
@@ -5330,8 +5481,14 @@ def market_execute(
                 _record_open_position_verdict(
                     opp.contract_id, opp.base_asset, opp.side, verdict, actual_margin, order_price
                 )
-                if getattr(opp, "signal_source", "funding") == "price_forecast":
-                    _record_forecast_position_meta(opp.contract_id, opp)
+                res_sl_pct = result.get("sl_pct") if isinstance(result, dict) else None
+                res_tp_pct = result.get("tp_pct") if isinstance(result, dict) else None
+                if getattr(opp, "signal_source", "funding") == "price_forecast" or (
+                    res_sl_pct is not None and float(res_sl_pct) > DEFAULT_SL_PCT + 1e-6
+                ):
+                    _record_forecast_position_meta(
+                        opp.contract_id, opp, sl_pct=res_sl_pct, tp_pct=res_tp_pct
+                    )
                 record_entry_execution(opp.base_asset)
                 deployed += actual_margin
             else:
