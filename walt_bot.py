@@ -1570,36 +1570,56 @@ def crypto_research_set(pairs, limit: Optional[int] = None) -> set[str]:
 def _grav_amplify_decision(
     opp: Opportunity, verdict: str, reason: str, mult: float
 ) -> tuple[Literal["GO", "HALF", "SKIP"], str, float]:
-    """Market Gravity = PENGUAT keputusan, BUKAN pemutus (keputusan pemilik 2026-11-24).
+    """Market Gravity = PENGUAT berkurva, BUKAN pemutus (keputusan pemilik 2026-11-24).
 
     Poin selalu netral-100: bull pressure + bear pressure = 100. Aturan:
       - AI (Berita + OAKresearch MCP) tetap pemutus utama verdict.
-      - Struktur SEPARAH AI (bull >= ambang utk LONG / bear >= ambang utk SHORT)
-        -> keyakinan +10% margin multiplier, ditandai 🧲 di reason.
-      - Struktur berlawanan -> TIDAK memblokir & TIDAK memberi penalti; hanya catatan
-        informatif agar AI tetap memegang keputusan (mis. hasil riset kuat melawan struktur).
+      - Arah harus searah dulu (bull >= ambang LONG / bear >= ambang SHORT).
+      - Pengaruh BARU AKTIF bila skor arah > grav_boost_min_score (default 80):
+            boost = grav_boost_max_pct * ((skor - min_score) / (100 - min_score)) ** curve
+        dengan curve > 1 -> makin ekstrem skor, makin kuat dorongannya; cap = max_pct.
+      - SKIP tidak pernah dinaikkan; struktur berlawanan tidak memblokir/memberi penalti.
     """
     grav = getattr(opp, "grav_bull_pressure", None)
     if grav is None or verdict == "SKIP":
         return verdict, reason, mult
+    thr_l = thr_s = 50.0
+    min_score, max_pct, curve = 80.0, 0.25, 1.5
     try:
         from strategy_config import load_strategy_config
         _cfg = load_strategy_config()
         thr_l = float(_cfg.get("grav_long_min_bull_pressure", 0.0) or 0.0) or 50.0
         thr_s = float(_cfg.get("grav_short_min_bear_pressure", 0.0) or 0.0) or 50.0
+        min_score = float(_cfg.get("grav_boost_min_score", 80.0) or 80.0)
+        max_pct = float(_cfg.get("grav_boost_max_pct", 0.25) or 0.25)
+        curve = float(_cfg.get("grav_boost_curve", 1.5) or 1.5)
     except Exception as exc:
-        log.debug(f"grav amplify: pembacaan ambang gagal ({type(exc).__name__}: {exc}); pakai 50/50")
-        thr_l = thr_s = 50.0
-    bull = float(grav)
+        log.debug(f"grav amplify: pembacaan ambang gagal ({type(exc).__name__}: {exc}); pakai 50/50, 80, 25%, ^1.5")
+    bull = max(0.0, min(100.0, float(grav)))
     bear = 100.0 - bull
-    aligned = (opp.side == "long" and bull >= thr_l) or (opp.side == "short" and bear >= thr_s)
-    if aligned:
-        boosted = round(min(1.10, mult * 1.10), 4) if mult > 0 else mult
-        return verdict, f"{reason} | 🧲 struktur searah AI ({bull:.1f}/100 bull) → conviction +10%", boosted
+    side_score = bull if opp.side == "long" else bear
+    direction_thr = thr_l if opp.side == "long" else thr_s
+    if side_score < direction_thr:
+        return (
+            verdict,
+            f"{reason} | 🧲 struktur tak searah ({bull:.1f}/100 bull) → tanpa boost; keputusan tetap milik riset AI",
+            mult,
+        )
+    if side_score <= min_score:
+        return (
+            verdict,
+            f"{reason} | 🧲 struktur searah namun skor {side_score:.1f} ≤ ambang pengaruh {min_score:.0f} → tanpa boost",
+            mult,
+        )
+    span = max(1e-6, 100.0 - min_score)
+    frac = max(0.0, min(1.0, (side_score - min_score) / span))
+    boost_pct = round(max_pct * (frac ** max(1.0, curve)), 6)
+    boosted = round(min(1.0 + max_pct, mult * (1.0 + boost_pct)), 4) if mult > 0 else mult
     return (
         verdict,
-        f"{reason} | 🧲 struktur tak searah ({bull:.1f}/100 bull) → tanpa boost; keputusan tetap milik riset AI",
-        mult,
+        f"{reason} | 🧲 struktur kuat searah AI (skor {side_score:.1f}/100, kurva ^{curve:g}) "
+        f"→ conviction +{boost_pct * 100:.1f}%",
+        boosted,
     )
 
 

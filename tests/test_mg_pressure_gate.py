@@ -32,9 +32,15 @@ def _stretched(candles, factor, tail=8, vol=4000.0):
     return candles
 
 
-def _cfg_gates(monkeypatch, lt, st):
-    monkeypatch.setenv("STRATEGY_CONFIG_JSON", json.dumps(
-        {"grav_long_min_bull_pressure": lt, "grav_short_min_bear_pressure": st}))
+def _cfg_gates(monkeypatch, lt, st, min_s=None, max_p=None, curve=None):
+    payload = {"grav_long_min_bull_pressure": lt, "grav_short_min_bear_pressure": st}
+    if min_s is not None:
+        payload["grav_boost_min_score"] = min_s
+    if max_p is not None:
+        payload["grav_boost_max_pct"] = max_p
+    if curve is not None:
+        payload["grav_boost_curve"] = curve
+    monkeypatch.setenv("STRATEGY_CONFIG_JSON", json.dumps(payload))
     monkeypatch.setattr(pf, "_MG_GATES_CACHE", (0.0, 0.0, 0.0))
 
 
@@ -102,38 +108,51 @@ def _opp_e2(side="long", grav=None):
                        forecast_setup="V5_4H_REJ_COMFORT", grav_bull_pressure=grav)
 
 
-def test_go_nogo_amplifies_conviction_only_when_aligned(monkeypatch):
+def test_go_nogo_boost_only_above_score_80_and_grows_with_score(monkeypatch):
     _cfg_gates(monkeypatch, 52.0, 55.0)
-    # LONG & struktur bullish 64.6 -> GO dengan conviction +10%
-    v, r, m = walt_bot.decide_go_nogo(_opp_e2("long", 64.6), _research_neutral())
-    assert v == "GO" and m == pytest.approx(1.10) and "🧲" in r and "searah" in r
-    # LONG & struktur bearish 40 -> verdict TETAP milik AI, tanpa penalti/boost
+    # 64.6 searah tapi <= 80 -> TANPA boost (pengaruh belum aktif)
+    v0, r0, m0 = walt_bot.decide_go_nogo(_opp_e2("long", 64.6), _research_neutral())
+    assert v0 == "GO" and m0 == pytest.approx(1.0) and "≤ ambang pengaruh 80" in r0
+    # Kurva monoton naik: 85 -> +3.125%, 90 -> +8.84%, 100 -> +25% (cap)
+    m85 = walt_bot.decide_go_nogo(_opp_e2("long", 85.0), _research_neutral())[2]
+    m90 = walt_bot.decide_go_nogo(_opp_e2("long", 90.0), _research_neutral())[2]
+    m100 = walt_bot.decide_go_nogo(_opp_e2("long", 100.0), _research_neutral())[2]
+    assert m85 == pytest.approx(1.03125, rel=1e-3)
+    assert m90 == pytest.approx(1.0884, rel=1e-3)
+    assert m100 == pytest.approx(1.25, rel=1e-6)
+    assert m85 < m90 < m100  # "semakin kuat pengaruhnya"
+    # SHORT: bear 80 persis -> belum > 80 (tanpa boost); bear 85 -> boost kurva
+    m_b80 = walt_bot.decide_go_nogo(_opp_e2("short", 20.0), _research_neutral())[2]
+    m_b85 = walt_bot.decide_go_nogo(_opp_e2("short", 15.0), _research_neutral())[2]
+    assert m_b80 == pytest.approx(1.0)
+    assert m_b85 == pytest.approx(1.03125, rel=1e-3)
+    # tak searah -> tanpa penalti, AI tetap pemutus
     v2, r2, m2 = walt_bot.decide_go_nogo(_opp_e2("long", 40.0), _research_neutral())
     assert v2 == "GO" and m2 == pytest.approx(1.0) and "tak searah" in r2
-    # SHORT & bear 80 (bull 20) -> +10%
-    v3, _r3, m3 = walt_bot.decide_go_nogo(_opp_e2("short", 20.0), _research_neutral())
-    assert v3 == "GO" and m3 == pytest.approx(1.10)
-    # SHORT & bear 40 (bull 60) -> tanpa boost
-    _v4, _r4, m4 = walt_bot.decide_go_nogo(_opp_e2("short", 60.0), _research_neutral())
-    assert m4 == pytest.approx(1.0)
     # tanpa data gravity -> perilaku lama utuh
     _v5, r5, m5 = walt_bot.decide_go_nogo(_opp_e2("long", None), _research_neutral())
     assert m5 == pytest.approx(1.0) and "🧲" not in r5
 
 
-def test_go_nogo_halves_case_amplified_but_skip_untouched(monkeypatch):
+def test_go_nogo_curve_configurable_half_and_skip_guards(monkeypatch):
+    # Konfigurasi kustom: min 60, max 40%, kurva linear -> skor 80 = tengah = +20%
+    _cfg_gates(monkeypatch, 52.0, 55.0, min_s=60.0, max_p=0.40, curve=1.0)
+    _v, _r, m_custom = walt_bot.decide_go_nogo(_opp_e2("long", 80.0), _research_neutral())
+    assert m_custom == pytest.approx(1.20, rel=1e-6)
+
+    # HALF (SPLIT) + skor 100 -> 0.5 * 1.25 = 0.625
     _cfg_gates(monkeypatch, 52.0, 55.0)
-    # SPLIT -> HALF (0.5) lalu struktur searah -> 0.55
-    _v, r, m = walt_bot.decide_go_nogo(_opp_e2("long", 70.0), _research_neutral(consensus="SPLIT"))
-    assert m == pytest.approx(0.55) and "🧲" in r
-    # SKIP (P5 tinggi) TIDAK boleh dinaikkan apa pun
+    _v2, r_half, m_half = walt_bot.decide_go_nogo(_opp_e2("long", 100.0), _research_neutral(consensus="SPLIT"))
+    assert m_half == pytest.approx(0.625, rel=1e-6) and "🧲" in r_half
+
+    # SKIP (P5 tinggi) TIDAK boleh dinaikkan apa pun meski skor 100
     res_bad = llm_research.Research(
         ticker="SOL", days_to_earnings=None, news_sentiment="neutral", narrative="x",
         confidence=0.7, fetched_at="2026-11-24T00:00:00+00:00", consensus="STRONG",
         overall_consensus_level="STRONG", vendor_alignment="aligned", final_score=0.05,
         p1_to_p7_scores={"P5_risk_catalysts": 0.9})
-    v, r2, m2 = walt_bot.decide_go_nogo(_opp_e2("long", 70.0), res_bad)
-    assert v == "SKIP" and m2 == 0.0 and "🧲" not in r2
+    v3, r3, m3 = walt_bot.decide_go_nogo(_opp_e2("long", 100.0), res_bad)
+    assert v3 == "SKIP" and m3 == 0.0 and "🧲" not in r3
 
 
 def test_context_block_carries_pressure_and_gates_as_ai_material(monkeypatch):
@@ -145,6 +164,8 @@ def test_context_block_carries_pressure_and_gates_as_ai_material(monkeypatch):
     assert "pemutus UTAMA" in txt          # AI (berita+OAK MCP) = pemutus utama
     assert "PENGUAT keputusan, bukan penentu" in txt
     assert "LONG bila bull >= 52" in txt
+    assert "BARU aktif bila skor > 80" in txt
+    assert "kurva ^1.5" in txt
     plain = llm_research._build_strategy_context_block(
         "SOL", funding_daily=0.0005, recommended_side="long")
     assert "Market Gravity" not in plain

@@ -707,13 +707,20 @@ def _build_strategy_context_block(
             _cfg = load_strategy_config()
             _lt = float(_cfg.get("grav_long_min_bull_pressure", 0.0) or 0.0)
             _st = float(_cfg.get("grav_short_min_bear_pressure", 0.0) or 0.0)
+            _min_s = float(_cfg.get("grav_boost_min_score", 80.0) or 80.0)
+            _max_p = float(_cfg.get("grav_boost_max_pct", 0.25) or 0.25)
+            _curve = float(_cfg.get("grav_boost_curve", 1.5) or 1.5)
         except Exception:
             _lt = _st = 0.0
+            _min_s, _max_p, _curve = 80.0, 0.25, 1.5
         bias = "BULLISH (magnet atas dominan)" if grav_pressure >= 55.0 else (
             "BEARISH (magnet bawah dominan)" if grav_pressure <= 45.0 else "SEIMBANG")
         gate_txt = (
-            f"Ambang keselarasan: LONG bila bull >= {_lt:.0f}, SHORT bila bear >= {_st:.0f}."
-            if (_lt > 0 or _st > 0) else "Ambang keselarasan default 50/100."
+            f"Ambang arah: LONG bila bull >= {_lt:.0f}, SHORT bila bear >= {_st:.0f}. "
+            f"Pengaruh struktur BARU aktif bila skor > {_min_s:.0f}, lalu menguat mengikuti kurva "
+            f"^{_curve:g} hingga maksimum +{_max_p * 100:.0f}% keyakinan pada skor 100."
+            if (_lt > 0 or _st > 0) else
+            f"Ambang arah default 50/100; pengaruh baru aktif bila skor > {_min_s:.0f} (kurva ^{_curve:g})."
         )
         grav_txt = (
             f" Data Market Gravity terkini: bullish_pressure={grav_pressure:.1f}/100 "

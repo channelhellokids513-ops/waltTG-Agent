@@ -48,8 +48,13 @@ DEFAULT_STRATEGY_CONFIG: dict[str, Any] = {
     # Nilai spesifik (mis. 52/55) diaktifkan lewat STRATEGY_CONFIG_JSON — see price_forecast gates.
     # Poin selalu netral-100 (bull+bear=100). Dipakai sebagai PENGUAT keyakinan bila struktur
     # searah verdict riset AI (Berita + OAK MCP) — bukan gerbang veto. 0 = default 50.
-    "grav_long_min_bull_pressure": 0.0,   # ambang bull >= X agar LONG mendapat boost conviction
-    "grav_short_min_bear_pressure": 0.0,  # ambang bear >= X agar SHORT mendapat boost conviction
+    "grav_long_min_bull_pressure": 0.0,   # ambang arah LONG (bull >= X); 0 -> default 50
+    "grav_short_min_bear_pressure": 0.0,  # ambang arah SHORT (bear >= X); 0 -> default 50
+    # Kurva pengaruh: baru berpengaruh bila skor > min_score, makin tinggi skor makin kuat.
+    # boost = max_pct * ((score - min_score) / (100 - min_score)) ** curve   (cap = max_pct)
+    "grav_boost_min_score": 80.0,   # skor struktur harus > ini agar boost aktif
+    "grav_boost_max_pct": 0.25,     # boost maksimum pada skor 100 (0.25 = +25% conviction)
+    "grav_boost_curve": 1.5,        # eksponen kurva (>1 = makin tajam di skor ekstrem)
     "dry_run": False,
 }
 
@@ -67,8 +72,11 @@ STRATEGY_PARAM_SPECS: dict[str, dict[str, Any]] = {
     "max_entries_per_day": {"type": "int", "min": 1, "max": 30, "desc": "Maksimal total entry dalam 24 jam"},
     "daily_loss_limit_pct": {"type": "float", "min": 0.01, "max": 0.25, "desc": "Batas penurunan ekuitas harian UTC untuk circuit breaker (mis. 0.05 = 5%)"},
     "expected_hold_hours": {"type": "float", "min": 1.0, "max": 168.0, "desc": "Target durasi tahan posisi (jam) untuk gerbang ekonomi funding vs fee"},
-    "grav_long_min_bull_pressure": {"type": "float", "min": 0.0, "max": 80.0, "desc": "Ambang bull-pressure (dari 100) agar LONG dikuatkan +10% ketika searah riset AI (0 = default 50; 52 = moderat). Bukan veto."},
-    "grav_short_min_bear_pressure": {"type": "float", "min": 0.0, "max": 80.0, "desc": "Ambang bear-pressure (dari 100) agar SHORT dikuatkan +10% ketika searah riset AI (0 = default 50; 55 = moderat). Bukan veto."},
+    "grav_long_min_bull_pressure": {"type": "float", "min": 0.0, "max": 80.0, "desc": "Ambang arah bull (dari 100) agar LONG dianggap searah struktur (0 = default 50; 52 = moderat). Bukan veto."},
+    "grav_short_min_bear_pressure": {"type": "float", "min": 0.0, "max": 80.0, "desc": "Ambang arah bear (dari 100) agar SHORT dianggap searah struktur (0 = default 50; 55 = moderat). Bukan veto."},
+    "grav_boost_min_score": {"type": "float", "min": 50.0, "max": 95.0, "desc": "Skor struktur harus LEBIH BESAR dari ini agar pengaruh boost aktif (default 80)"},
+    "grav_boost_max_pct": {"type": "float", "min": 0.05, "max": 0.50, "desc": "Boost conviction maksimum saat skor struktur 100 (0.25 = +25%)"},
+    "grav_boost_curve": {"type": "float", "min": 1.0, "max": 3.0, "desc": "Eksponen kurva boost; >1 membuat pengaruh makin kuat tajam mendekati skor 100"},
     "dry_run": {"type": "bool", "desc": "Mode simulasi tanpa order riil (true/false)"},
 }
 
