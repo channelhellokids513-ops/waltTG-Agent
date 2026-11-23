@@ -31,6 +31,7 @@ log = logging.getLogger("walt_bot")
 CRYPTO_SYMBOLS: frozenset[str] = frozenset({
     "BTC", "ETH", "SOL", "BNB", "XRP", "AVAX", "SUI", "LINK", "NEAR", "AAVE",
     "ARB", "OP", "DOGE", "ADA", "DOT", "ATOM", "LTC", "UNI", "APT", "SEI", "HYPE",
+    "MON",
 })
 COMMODITY_SYMBOLS: frozenset[str] = frozenset({"XAU", "XAG", "BRENTOIL"})
 NON_CRYPTO_SYMBOLS: frozenset[str] = frozenset({
@@ -748,6 +749,69 @@ def evaluate_crypto_live_fade_signal(
                     "reason": (
                         f"V5 4h Fade {side4.upper()} (Rejected->Comfort, z={d4.z_move_24h:+.2f}, "
                         f"RSI={d4.rsi_14:.1f}, SL={sl_pct*100:.2f}%, TP={tp_pct*100:.2f}%, hold=72h)"
+                    ),
+                }
+
+    # Prioritas 3: V6_GRAVITY_VOL_DIP (konfluensi Volume Surge + RSI ekstrem + Diskon VWAP + Magnet Gravity)
+    if candidate is None and candles_1h and len(candles_1h) >= 75 and candles_4h and len(candles_4h) >= 75:
+        d1 = compute_price_delta_24h(sym, candles_1h, interval="1h", asset_class="crypto")
+        d4 = compute_price_delta_24h(sym, candles_4h, interval="4h", asset_class="crypto")
+        if d1 is not None and d4 is not None:
+            cp1, _, _, _, _ = _extract_gravity_fade_state(candles_1h)
+            cp4, _, _, _, _ = _extract_gravity_fade_state(candles_4h)
+            bull1 = _gravity_bull_pressure(candles_1h)
+            bull4 = _gravity_bull_pressure(candles_4h)
+            vol_surge = max(d1.vol_ratio_24h, d4.vol_ratio_24h) >= 1.50
+            eff_bull = max(bull4 or 0.0, bull1 or 0.0)
+            eff_bear = max(
+                (100.0 - bull4) if bull4 is not None else 0.0,
+                (100.0 - bull1) if bull1 is not None else 0.0,
+            )
+            side6: Optional[Literal["long", "short"]] = None
+            if (
+                vol_surge
+                and (d4.rsi_14 <= 36.0 or d1.rsi_14 <= 35.0)
+                and d1.range_pos_24h <= 0.20
+                and d1.vwap_dev_pct <= -0.025
+                and d1.z_move_24h <= -0.70
+                and eff_bull >= 75.0
+                and cp4 > d4.close * 1.025
+                and cp1 > d1.close * 1.015
+            ):
+                side6 = "long"
+            elif (
+                vol_surge
+                and (d4.rsi_14 >= 68.0 or d1.rsi_14 >= 70.0)
+                and d1.range_pos_24h >= 0.80
+                and d1.vwap_dev_pct >= 0.025
+                and d1.z_move_24h >= 0.70
+                and eff_bear >= 75.0
+                and cp4 < d4.close * 0.975
+                and cp1 < d1.close * 0.985
+            ):
+                side6 = "short"
+            if side6 is not None:
+                bull6 = bull4 if bull4 is not None else bull1
+                _al6, _note6 = _mg_pressure_gate_ok(side6, bull6)
+                if not _al6:
+                    log.info(f"  🧲 {sym}: {_note6} — diteruskan ke AI (struktur hanya penguat, bukan veto)")
+                sl_pct = round(_clamp(0.85 * d4.atr_24h_pct, 0.015, FORECAST_SL_CAP_PCT), 4)
+                tp_pct = round(max(0.020, 1.25 * sl_pct), 4)
+                candidate = {
+                    "asset": sym,
+                    "side": side6,
+                    "setup": "V6_GRAVITY_VOL_DIP",
+                    "sl_pct": sl_pct,
+                    "tp_pct": tp_pct,
+                    "max_hold_hours": 48.0,
+                    "expected_gross_pct": 0.0065,
+                    "z_move_24h": round(d4.z_move_24h, 3),
+                    "rsi_14": round(d4.rsi_14, 2),
+                    "bull_pressure": None if bull6 is None else round(bull6, 1),
+                    "reason": (
+                        f"V6 Gravity Vol Dip {side6.upper()} (vol={max(d1.vol_ratio_24h, d4.vol_ratio_24h):.2f}x, "
+                        f"RSI4h={d4.rsi_14:.1f}, pos={d1.range_pos_24h:.2f}, vwap={d1.vwap_dev_pct*100:+.1f}%, "
+                        f"SL={sl_pct*100:.2f}%, TP={tp_pct*100:.2f}%, hold=48h)"
                     ),
                 }
 

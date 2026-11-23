@@ -716,3 +716,72 @@ def test_fetch_crypto_candles_never_calls_yahoo_and_supports_meme_alias(monkeypa
     assert hl_calls == ["1000PEPE", "kPEPE"]
     assert yahoo_calls == []
     assert bn_calls == []
+
+
+def test_mon_in_crypto_universe_and_v6_gravity_vol_dip(monkeypatch):
+    import market_chart
+
+    assert "MON" in walt_bot.ALLOWED_CRYPTO
+    assert "MON" in market_chart.CRYPTO_ASSETS
+    assert "MON" in price_forecast.CRYPTO_SYMBOLS
+    assert price_forecast.infer_asset_class("MON") == "crypto"
+
+    def _dip_candles(n: int = 160, vol_tail: float = 7000.0) -> list[dict]:
+        rows = []
+        px = 100.0
+        for i in range(n):
+            step = 0.012 if i % 2 == 0 else -0.0115
+            o = px
+            c = o * (1.0 + step)
+            rows.append({
+                "t": 1763500000000 + i * 3_600_000,
+                "o": o,
+                "h": max(o, c) * 1.006,
+                "l": min(o, c) * 0.994,
+                "c": c,
+                "v": 2000.0,
+            })
+            px = c
+        # Turunkan perlahan 10 bar terakhir (~ -6%, high-volume dip, RSI ~28-32, z sekitar -1.3)
+        factors = [0.992, 0.993, 1.002, 0.991, 0.993, 1.001, 0.991, 0.992, 0.991, 0.992]
+        for k, factor in zip(range(n - 10, n), factors):
+            o = rows[k - 1]["c"]
+            c = o * factor
+            rows[k] = {
+                "t": rows[k]["t"],
+                "o": o,
+                "h": max(o, c) * 1.002,
+                "l": min(o, c) * 0.998,
+                "c": c,
+                "v": vol_tail,
+            }
+        return rows
+
+    c4 = _dip_candles(160, vol_tail=7000.0)
+    c1 = _dip_candles(160, vol_tail=7000.0)
+
+    monkeypatch.setattr(
+        price_forecast,
+        "_extract_gravity_fade_state",
+        lambda candles: (float(candles[-1]["c"]) * 1.15, False, False, [], []),
+    )
+    monkeypatch.setattr(price_forecast, "_gravity_bull_pressure", lambda candles: 85.0)
+
+    sig = price_forecast.evaluate_crypto_live_fade_signal(
+        "MON", c4, c1, funding_daily=-0.000365
+    )
+    assert sig is not None
+    assert sig["setup"] == "V6_GRAVITY_VOL_DIP"
+    assert sig["side"] == "long"
+    assert sig["max_hold_hours"] == 48.0
+    assert sig["expected_net_edge_pct"] > 0.0
+
+    # Ditolak jika gravity < 75
+    monkeypatch.setattr(price_forecast, "_gravity_bull_pressure", lambda candles: 60.0)
+    assert price_forecast.evaluate_crypto_live_fade_signal("MON", c4, c1, funding_daily=-0.000365) is None
+
+    # Ditolak jika tidak ada volume surge (< 1.5x)
+    monkeypatch.setattr(price_forecast, "_gravity_bull_pressure", lambda candles: 85.0)
+    c4_low = _dip_candles(160, vol_tail=2000.0)
+    c1_low = _dip_candles(160, vol_tail=2000.0)
+    assert price_forecast.evaluate_crypto_live_fade_signal("MON", c4_low, c1_low, funding_daily=-0.000365) is None

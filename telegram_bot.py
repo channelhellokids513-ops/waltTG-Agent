@@ -1191,8 +1191,27 @@ def run_polling() -> None:
         except KeyboardInterrupt:
             print("[INFO] Bot dihentikan.")
             break
+        except httpx.HTTPStatusError as e:
+            err_txt = str(e).replace(api.token, "***")
+            if e.response is not None and e.response.status_code == 429:
+                retry_after = 30
+                try:
+                    body = e.response.json()
+                    retry_after = int((body.get("parameters") or {}).get("retry_after") or e.response.headers.get("Retry-After") or 30)
+                except Exception:
+                    try:
+                        retry_after = int(e.response.headers.get("Retry-After") or 30)
+                    except Exception:
+                        retry_after = 30
+                wait_s = max(3, retry_after + 1)
+                print(f"[WARN] Telegram 429 rate-limit: menunggu {wait_s}s ({err_txt})")
+                time.sleep(wait_s)
+            else:
+                print(f"[WARN] Polling HTTP error: {err_txt}")
+                time.sleep(5)
         except Exception as e:
-            print(f"[WARN] Polling error: {e}")
+            err_txt = str(e).replace(api.token, "***")
+            print(f"[WARN] Polling error: {err_txt}")
             time.sleep(3)
 
 

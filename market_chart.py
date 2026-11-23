@@ -34,7 +34,7 @@ CRYPTO_ASSETS = {
     "RENDER", "FET", "INJ", "TIA", "JUP", "PYTH", "WLD", "ONDO", "TRX", "BCH",
     "ETC", "XLM", "FIL", "ICP", "STX", "RUNE", "MKR", "LDO", "CRV", "SNX",
     "COMP", "PENGU", "VIRTUAL", "FARTCOIN", "TRUMP", "BERA", "IP", "KAITO",
-    "ZEC", "XMR", "WLFI", "PUMP",
+    "ZEC", "XMR", "WLFI", "PUMP", "MON",
 }
 
 SPARK_CHARS = "▁▂▃▄▅▆▇█"

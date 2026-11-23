@@ -59,6 +59,7 @@ ALLOWED_CRYPTO = {
     "BTC", "ETH", "SOL",            # Bluechip
     "BNB", "XRP", "AVAX",           # Tier-1 Large Cap
     "SUI", "LINK", "NEAR", "AAVE",  # High-Liquidity Ecosystem Leaders
+    "MON",                          # Monad L1 (Hyperliquid perpetual)
 }
 ALLOWED_ASSETS = ALLOWED_STOCKS | ALLOWED_COMMODITIES | ALLOWED_CRYPTO
 
