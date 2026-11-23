@@ -610,6 +610,7 @@ OFF_HOURS_HOLD_POLICY_ENV = "OFF_HOURS_HOLD_POLICY"
 CRYPTO_FORECAST_ENGINE_ENV = "CRYPTO_FORECAST_ENGINE"
 CRYPTO_FORECAST_UNIVERSE_ENV = "CRYPTO_FORECAST_UNIVERSE"
 STOCK_FORECAST_ENGINE_ENV = "STOCK_FORECAST_ENGINE"
+RESEARCH_MODE_ENV = "RESEARCH_MODE"
 FORECAST_ADVERSE_FUNDING_CLOSE_THRESHOLD = 0.0030  # 0.30%/hari batas funding merugikan untuk Engine 2 Crypto
 STOCK_FORECAST_ADVERSE_FUNDING_CLOSE_THRESHOLD = 0.0025  # 0.25%/hari batas funding merugikan Engine 2 Saham AS
 
@@ -620,6 +621,7 @@ CI_ENV_KNOBS: tuple[str, ...] = (
     CRYPTO_FORECAST_UNIVERSE_ENV,
     STOCK_FORECAST_ENGINE_ENV,
     DYNAMIC_SL_MODE_ENV,
+    RESEARCH_MODE_ENV,
 )
 MONITOR_ENV_KNOBS: tuple[str, ...] = (OFF_HOURS_HOLD_POLICY_ENV,)
 ENTRY_WORKFLOWS: tuple[str, ...] = ("crypto-execute.yml", "market-execute.yml", "daily-scan.yml")
@@ -4565,10 +4567,14 @@ def format_summary_telegram(
             earn_str = f"{days}d" if days is not None else "—"
             lines.append(f"   Earnings: {earn_str} | Sentiment: *{research.news_sentiment}* (Score: `{research.final_score:+.2f}`)")
             if research.consensus and research.consensus not in ("NONE", "NO_DATA"):
-                lines.append(f"   🤖 Swarm AI: `{research.overall_consensus_level}` (Vendor: `{research.vendor_alignment}`)")
-                if research.qwen_sentiment and research.gemini_sentiment:
-                    sec_label = "GLM" if getattr(research, "secondary_provider", "gemini") == "glm" else "Gemini"
-                    lines.append(f"   ├ Qwen: `{research.qwen_sentiment}` | {sec_label}: `{research.gemini_sentiment}`")
+                sec_prov = getattr(research, "secondary_provider", "gemini")
+                if sec_prov == "oak_single":
+                    lines.append(f"   🤖 OAK Deep Analyst: `{research.overall_consensus_level}` (Single-Pass)")
+                else:
+                    lines.append(f"   🤖 Swarm AI: `{research.overall_consensus_level}` (Vendor: `{research.vendor_alignment}`)")
+                    if research.qwen_sentiment and research.gemini_sentiment:
+                        sec_label = "GLM" if sec_prov == "glm" else "Gemini"
+                        lines.append(f"   ├ Qwen: `{research.qwen_sentiment}` | {sec_label}: `{research.gemini_sentiment}`")
                 p1_7 = research.p1_to_p7_scores
                 if p1_7:
                     lines.append(
@@ -4645,20 +4651,26 @@ def scan_with_research(
         go_count=opp_count,
         category="market",
     )
+    research_mode = _lr.get_research_mode()
     full_research_gear3 = is_gear3_full_research(scan_gear)
     scan_is_idle = scan_gear.startswith("GEAR_0") or opp_count <= 1
-    use_glm_routing = _lr.should_use_glm_for_secondary_voters(
+    use_glm_routing = (research_mode == "swarm") and _lr.should_use_glm_for_secondary_voters(
         opportunity_count=opp_count, is_idle=scan_is_idle
+    )
+    ai_mode_label = (
+        "OAK-First Single Deep Analyst"
+        if research_mode == "oak_single"
+        else ("GLM (DashScope)" if use_glm_routing else "Gemini (Idle)")
     )
     log.info(
         f"⚙️ [SCAN GEAR] {scan_gear}: {scan_gear_reason} | "
-        f"AI Secondary={'GLM (DashScope)' if use_glm_routing else 'Gemini (Idle)'} (peluang={opp_count})"
+        f"AI Mode={ai_mode_label} (peluang={opp_count})"
     )
 
     qwen = QwenClient() if os.getenv("DASHSCOPE_API_KEY") else None
     gemini = (
         GeminiClient()
-        if (not use_glm_routing or qwen is None)
+        if (research_mode == "oak_single" or not use_glm_routing or qwen is None)
         and (os.getenv("DASHSCOPE_API_GEMINI_KEY") or os.getenv("GEMINI_API_KEY"))
         else None
     )
@@ -4673,14 +4685,12 @@ def scan_with_research(
         log.info(f"  🧠 riset AI crypto/komoditas dibatasi {CRYPTO_RESEARCH_TOP_N} |funding| "
                  f"terbesar: {', '.join(sorted(crypto_research))}")
 
+    eligible_opps: list[dict] = []
+    seen_research_assets: set[str] = set()
     for opp in summary["top_opportunities"]:
-        if not has_enough_job_time(2.5):
-            log.warning(
-                f"⏳ Sisa waktu job tinggal {get_job_remaining_minutes():.1f} menit; "
-                "hentikan loop riset AI agar kandidat yang sudah diriset sempat dieksekusi & dilog."
-            )
-            break
         asset = opp["asset"]
+        if asset in seen_research_assets:
+            continue
         is_forecast = opp.get("signal_source") == "price_forecast"
         # Gear 3: setiap kandidat keputusan trading boleh diteliti AI; selain itu saham + top-N crypto + Engine 2.
         worth_calling = (
@@ -4690,24 +4700,47 @@ def scan_with_research(
             or is_forecast
         )
         if (asset in RESEARCH_ELIGIBLE or is_forecast) and worth_calling and (qwen or gemini):
-            try:
-                researches[asset] = research_stock(
-                    asset,
+            seen_research_assets.add(asset)
+            eligible_opps.append(opp)
+
+    if eligible_opps:
+        if not has_enough_job_time(2.5):
+            log.warning(
+                f"⏳ Sisa waktu job tinggal {get_job_remaining_minutes():.1f} menit; "
+                "hentikan loop riset AI agar kandidat yang sudah diriset sempat dieksekusi & dilog."
+            )
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            max_w = min(4, len(eligible_opps))
+            log.info(f"  ⚡ Riset paralel {len(eligible_opps)} aset (workers={max_w}, mode={research_mode})...")
+
+            def _run_one_asset(item: dict) -> Research:
+                return research_stock(
+                    item["asset"],
                     qwen=qwen,
                     gemini=gemini,
-                    funding_daily=opp.get("funding_daily", float(opp.get("funding_daily_pct", 0.0) or 0.0) / 100.0),
-                    recommended_side=opp.get("recommended_side") or opp.get("side"),
+                    funding_daily=item.get("funding_daily", float(item.get("funding_daily_pct", 0.0) or 0.0) / 100.0),
+                    recommended_side=item.get("recommended_side") or item.get("side"),
                     opportunity_count=opp_count,
                     is_idle=scan_is_idle,
                 )
-                record_research_health(asset, researches[asset])
-                log.info(
-                    f"  ✓ research {asset}: {researches[asset].news_sentiment} "
-                    f"(Consensus: {researches[asset].consensus}, Secondary: {researches[asset].secondary_provider})"
-                )
-            except Exception as e:
-                record_input_failure("input.riset_error", f"{asset}:{type(e).__name__}")
-                log.warning(f"  ✗ research {asset} failed: {e}")
+
+            with ThreadPoolExecutor(max_workers=max_w) as pool:
+                fut_map = {pool.submit(_run_one_asset, item): item["asset"] for item in eligible_opps}
+                for fut in as_completed(fut_map):
+                    asset = fut_map[fut]
+                    try:
+                        res_obj = fut.result()
+                        researches[asset] = res_obj
+                        record_research_health(asset, res_obj)
+                        log.info(
+                            f"  ✓ research {asset}: {res_obj.news_sentiment} "
+                            f"(Consensus: {res_obj.consensus}, Mode: {res_obj.secondary_provider})"
+                        )
+                    except Exception as e:
+                        record_input_failure("input.riset_error", f"{asset}:{type(e).__name__}")
+                        log.warning(f"  ✗ research {asset} failed: {e}")
 
     # Eksekusi instan jika auto_execute aktif
     executions = []

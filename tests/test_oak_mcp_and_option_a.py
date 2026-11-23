@@ -181,6 +181,7 @@ def test_oak_mcp_fetch_global_and_asset_uses_verified_schemas(monkeypatch):
 
 
 def test_research_stock_enriches_context_and_headlines_from_oak_mcp(monkeypatch):
+    monkeypatch.setenv("RESEARCH_MODE", "swarm")
     oak_mcp_client.reset_oak_cache()
     captured_contexts = []
     captured_headlines = []

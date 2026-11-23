@@ -107,13 +107,18 @@ def _classify_quality_tier(
     consensus: str,
     narrative: str,
     is_backfill: bool = False,
+    is_oak_single: bool = False,
+    has_oak_context: bool = False,
 ) -> str:
     cons = str(consensus or "").strip().upper()
     nar_len = len(str(narrative or "").strip())
+    strong_evidence = (
+        (has_headlines and voters_count >= 4)
+        or (is_oak_single and (has_oak_context or has_headlines))
+    )
     if (
         not is_backfill
-        and has_headlines
-        and voters_count >= 4
+        and strong_evidence
         and cons in ("UNANIMOUS", "STRONG")
         and nar_len >= 120
     ):
@@ -133,6 +138,7 @@ def _build_user_prompt(
     headlines: list[str],
     p1_to_p7: dict[str, float],
     mg_context: Optional[dict[str, Any]] = None,
+    oak_context_block: str = "",
     is_backfill: bool = False,
 ) -> str:
     lines = [
@@ -155,6 +161,8 @@ def _build_user_prompt(
             mg_parts.append(f"net_gravity={mg_context['mg_net_gravity']}")
         if mg_parts:
             lines.append(f"- Struktur Likuiditas (Market Gravity): {', '.join(mg_parts)}")
+    if oak_context_block:
+        lines.append(f"\n{oak_context_block}")
 
     clean_headlines = [str(h).strip() for h in (headlines or []) if str(h).strip()]
     if clean_headlines:
@@ -196,6 +204,7 @@ def _build_think_block(
     days_to_earnings: Optional[int],
     voter_verdicts: Optional[dict[str, Any]] = None,
     disagreement_summary: Optional[list[str]] = None,
+    analyst_thinking: str = "",
 ) -> str:
     steps = [
         f"1. Konteks Strategi: Rencana {side} {asset} dengan funding {_format_funding_pct(funding_decimal)} "
@@ -233,6 +242,8 @@ def _build_think_block(
                 voter_notes.append(f"{vk}: {note[:140]}")
         if voter_notes:
             steps.append("3. Perspektif Multi-Voter: " + " | ".join(voter_notes[:4]))
+    elif analyst_thinking:
+        steps.append(f"3. Analisis Kuantitatif Deep Analyst (OAK MCP): {analyst_thinking[:600]}")
 
     guard_notes = []
     if days_to_earnings is not None:
@@ -356,7 +367,14 @@ def build_training_sample(
     voter_verdicts = getattr(research, "voter_verdicts", None) or {}
     disagreements = getattr(research, "disagreement_summary", None) or []
     sec_provider = str(getattr(research, "secondary_provider", "gemini") or "gemini").strip().lower()
-    source = "live_swarm_glm" if sec_provider == "glm" else "live_swarm_gemini"
+    oak_ctx_block = str(getattr(research, "oak_context_block", "") or "").strip()
+    analyst_think = str(getattr(research, "analyst_thinking", "") or "").strip()
+    if sec_provider == "oak_single":
+        source = "live_oak_single"
+    elif sec_provider == "glm":
+        source = "live_swarm_glm"
+    else:
+        source = "live_swarm_gemini"
 
     ts_iso = str(timestamp_utc or getattr(research, "fetched_at", "") or datetime.now(timezone.utc).isoformat()).strip()
     funding_dec = _safe_float(funding_daily, default=None)
@@ -385,6 +403,7 @@ def build_training_sample(
         headlines=headlines,
         p1_to_p7=p1_to_p7,
         mg_context=mg_context,
+        oak_context_block=oak_ctx_block,
         is_backfill=False,
     )
     think_text = _build_think_block(
@@ -401,6 +420,7 @@ def build_training_sample(
         days_to_earnings=days_earnings,
         voter_verdicts=voter_verdicts,
         disagreement_summary=disagreements,
+        analyst_thinking=analyst_think,
     )
     answer_text = _build_assistant_answer(
         asset=ticker,
@@ -434,6 +454,8 @@ def build_training_sample(
         consensus=consensus,
         narrative=narrative,
         is_backfill=False,
+        is_oak_single=(sec_provider == "oak_single"),
+        has_oak_context=bool(oak_ctx_block),
     )
     sample_id = _make_sample_id(ts_iso, ticker, side_u, final_score, narrative)
 

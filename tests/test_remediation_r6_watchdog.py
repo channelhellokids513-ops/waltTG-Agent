@@ -101,7 +101,7 @@ def test_ambang_cadence_terjejak_ke_dokumentasi():
         "risk-monitor.yml": ("*/10 * * * *", 10),
         "market-execute.yml": ("43 */2 * * *", 120),
         "crypto-execute.yml": ("11 */2 * * *", 120),
-        "daily-scan.yml": ("17 0,12 * * *", 720),
+        "daily-scan.yml": ("33 14,18 * * *", 1200),
     }
     for workflow, (cron, cadence) in expect.items():
         assert cron in doc, f"cron {cron!r} untuk {workflow} tidak ditemukan di STRATEGY.md"

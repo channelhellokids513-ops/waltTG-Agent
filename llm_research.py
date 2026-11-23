@@ -134,6 +134,31 @@ for _candidate in [MODEL_AGGREGATOR] + [
 AGGREGATOR_CALL_TIMEOUT_SEC = 35.0
 AGGREGATOR_TOTAL_BUDGET_SEC = 75.0
 
+RESEARCH_MODE_ENV = "RESEARCH_MODE"
+SINGLE_ANALYST_CALL_TIMEOUT_SEC = 30.0
+SINGLE_ANALYST_TOTAL_BUDGET_SEC = 45.0
+
+SINGLE_ANALYST_CLASSAI_CHAIN: list[str] = []
+for _m in (MODEL_AGG_CLASSAI, MODEL_AGG_CLASSAI_FALLBACK, MODEL_V4):
+    if _m and _m not in SINGLE_ANALYST_CLASSAI_CHAIN:
+        SINGLE_ANALYST_CLASSAI_CHAIN.append(_m)
+
+SINGLE_ANALYST_DASHSCOPE_FALLBACK: list[str] = ["glm-5.2-fast-preview", "qwen-plus", "qwen-flash"]
+
+_NO_EARNINGS_TICKERS = {
+    "SPY", "QQQ", "IWM", "DIA", "XAU", "XAG", "CL", "HG", "NG",
+    "BTC", "ETH", "SOL", "XRP", "BNB", "LINK", "AVAX", "AAVE",
+    "SUI", "NEAR", "HYPE", "VVV", "DOGE", "ADA", "LIT",
+}
+
+
+def get_research_mode() -> Literal["oak_single", "swarm"]:
+    """Mode riset aktif: default `oak_single` (OAK-First + Single Deep Analyst), opsional `swarm` (4-Voter)."""
+    raw = os.getenv(RESEARCH_MODE_ENV, "oak_single").strip().lower()
+    if raw in ("swarm", "4voter", "multi_voter"):
+        return "swarm"
+    return "oak_single"
+
 # P1-P7 Weights
 PARAM_WEIGHTS: dict[str, float] = {
     "P1_sentiment_polarity": 0.25,
@@ -176,8 +201,10 @@ class Research:
     # siklus 3/4 voter tidak lagi dilaporkan sebagai siklus sehat.
     voter_failures: list[str] = field(default_factory=list)
     earnings_status: str = "unknown"  # unknown | ok | no_data | past_only | http_error:<kode> | exception:<tipe> | no_crumb
-    secondary_provider: str = "gemini"  # "gemini" (Idle) | "glm" (multi-opportunity > 1)
+    secondary_provider: str = "gemini"  # "oak_single" | "gemini" (Idle) | "glm" (multi-opportunity > 1)
     headlines: list[str] = field(default_factory=list)
+    oak_context_block: str = ""
+    analyst_thinking: str = ""
 
 
 # =============================================================================
@@ -1129,6 +1156,125 @@ def run_meta_aggregator(
     }
 
 
+SINGLE_ANALYST_PROMPT = """
+Kamu adalah Chief Risk Officer & Quantitative Research Analyst untuk strategi perpetual 24-72 jam.
+Evaluasi aset `{ticker}` berdasarkan [DATA REAL-TIME OAK RESEARCH MCP], konteks taktis strategi, dan headlines berita.
+
+Lakukan penalaran kuantitatif terstruktur pada 7 parameter P1-P7 (tanpa bias positif):
+- P1_sentiment_polarity (-1.0 bearish s/d +1.0 bullish): arah katalis & berita dominan.
+- P2_signal_strength (0.0 s/d 1.0): kekuatan bukti & materialitas berita/metrik OAK.
+- P3_source_credibility (0.0 s/d 1.0): kredibilitas & kepadatan sumber data.
+- P4_momentum_direction (-1.0 bearish s/d +1.0 bullish): bias arah pergerakan harga/likuiditas 24-72 jam.
+- P5_risk_catalysts (0.0 aman s/d 1.0 bahaya): risiko event mendadak (earnings, token unlock, regulasi, makro FOMC/CPI).
+- P6_contrarian_check (0.0 aman s/d 1.0 crowded): risiko posisi pasar terlalu searah / short-long squeeze.
+- P7_historical_pattern (-1.0 bearish s/d +1.0 bullish): preseden pergerakan pasca katalis serupa.
+
+Tentukan `overall_consensus_level` ("unanimous" bila semua sinyal sangat searah, "strong" bila mayoritas jelas, "mixed" bila bercampur, "split" bila sinyal saling bertabrakan tajam).
+
+Output HANYA JSON valid dengan skema:
+{{
+  "thinking": "Penalaran kuantitatif 3-5 poin ringkas mencakup data OAK, katalis risiko P5, crowdedness P6, dan prospek 24-72 jam.",
+  "per_parameter_final": {{
+    "P1_sentiment_polarity": {{"final_score": 0.0, "rationale": "..."}},
+    "P2_signal_strength": {{"final_score": 0.0, "rationale": "..."}},
+    "P3_source_credibility": {{"final_score": 0.0, "rationale": "..."}},
+    "P4_momentum_direction": {{"final_score": 0.0, "rationale": "..."}},
+    "P5_risk_catalysts": {{"final_score": 0.0, "rationale": "..."}},
+    "P6_contrarian_check": {{"final_score": 0.0, "rationale": "..."}},
+    "P7_historical_pattern": {{"final_score": 0.0, "rationale": "..."}}
+  }},
+  "overall_confidence": 0.0,
+  "overall_consensus_level": "unanimous|strong|mixed|split",
+  "most_influential_parameter": "P1_sentiment_polarity|P4_momentum_direction|P5_risk_catalysts|...",
+  "justification": "Paragraf Bahasa Indonesia padat (1-2 paragraf) tentang kelayakan horizon 24-72 jam.",
+  "disagreement_summary": ["faktor risiko/kontra 1", "faktor risiko/kontra 2"]
+}}
+"""
+
+
+def run_single_deep_analyst(
+    ticker: str,
+    headlines: list[str],
+    strategy_context: str = "",
+    gemini: Optional[GeminiClient] = None,
+    qwen: Optional[QwenClient] = None,
+) -> Optional[dict[str, Any]]:
+    """Single-Pass Deep Analyst berbasis OAK MCP (1 call cepat via ClassAI -> fallback DashScope fast)."""
+    if gemini is None and qwen is None:
+        return None
+    sys_msg = (
+        "Kamu adalah Chief Risk Officer dan Quantitative Research Analyst independen. "
+        "Output HANYA JSON valid sesuai skema."
+    )
+    headline_lines = "\n".join(f"- {h}" for h in (headlines or []))
+    prompt = (
+        f"Ticker: {ticker}\n"
+        f"{strategy_context}\n\n"
+        f"Headlines Berita Relevan:\n{headline_lines}\n\n"
+        + SINGLE_ANALYST_PROMPT.format(ticker=ticker)
+    )
+    ds_msgs = [{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}]
+    deadline = time.monotonic() + SINGLE_ANALYST_TOTAL_BUDGET_SEC
+    last_error = ""
+
+    def _finish_single(res_obj: Any, model_name: str) -> Optional[dict[str, Any]]:
+        if not isinstance(res_obj, dict) or not isinstance(res_obj.get("per_parameter_final"), dict):
+            return None
+        res_obj["final_score"] = compute_directional_final_score(res_obj["per_parameter_final"])
+        res_obj["vendor_alignment"] = "oak_single_analyst"
+        res_obj["analyst_model"] = model_name
+        return res_obj
+
+    if gemini is not None:
+        for candidate in SINGLE_ANALYST_CLASSAI_CHAIN:
+            rem = deadline - time.monotonic()
+            if rem <= 4.0:
+                last_error = "budget waktu Single Deep Analyst habis"
+                break
+            try:
+                call_t = min(SINGLE_ANALYST_CALL_TIMEOUT_SEC, rem)
+                res = (
+                    gemini.chat_json(prompt, system_instruction=sys_msg, model=candidate, timeout=call_t)
+                    if isinstance(gemini, GeminiClient)
+                    else gemini.chat_json(prompt, system_instruction=sys_msg, model=candidate)
+                )
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                log.warning(f"Single Deep Analyst ClassAI {candidate} gagal {ticker}: {last_error[:150]}")
+                continue
+            done = _finish_single(res, candidate)
+            if done is not None:
+                return done
+            last_error = f"respons {candidate} tidak lengkap"
+            log.warning(f"Single Deep Analyst ClassAI {candidate} {ticker}: {last_error}")
+
+    if qwen is not None:
+        for candidate in SINGLE_ANALYST_DASHSCOPE_FALLBACK:
+            rem = deadline - time.monotonic()
+            if rem <= 4.0:
+                last_error = "budget waktu Single Deep Analyst habis"
+                break
+            try:
+                call_t = min(SINGLE_ANALYST_CALL_TIMEOUT_SEC, rem)
+                res = (
+                    qwen.chat_json(ds_msgs, model=candidate, timeout=call_t)
+                    if isinstance(qwen, QwenClient)
+                    else qwen.chat_json(ds_msgs, model=candidate)
+                )
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+                log.warning(f"Single Deep Analyst DashScope {candidate} gagal {ticker}: {last_error[:150]}")
+                continue
+            done = _finish_single(res, candidate)
+            if done is not None:
+                return done
+            last_error = f"respons {candidate} tidak lengkap"
+            log.warning(f"Single Deep Analyst DashScope {candidate} {ticker}: {last_error}")
+
+    log.warning(f"Single Deep Analyst {ticker} gagal seluruh rantai ({last_error[:160]})")
+    return None
+
+
 # =============================================================================
 # SYNTHESIS & ORCHESTRATION LAYER
 # =============================================================================
@@ -1141,24 +1287,181 @@ def research_stock(
     recommended_side: Optional[str] = None,
     opportunity_count: int = 0,
     is_idle: Optional[bool] = None,
+    mode: Optional[str] = None,
 ) -> Research:
     """
-    Eksekusi pipeline riset saham lengkap:
-      1. Ambil data pasar & headlines berita 7 hari
-      2. Jalankan 4 Voter Swarm secara independen dengan konteks taktis 24-72 jam:
-         - Kondisi Idle (opportunity_count <= 1 / is_idle=True): 2 Qwen + 2 Gemini (Flash & Pro)
-         - Banyak peluang (opportunity_count > 1): 2 Qwen + 2 GLM (glm-5.2-fast-preview & glm-5.3-prime)
-           via DashScope (DASHSCOPE_API_KEY) untuk menghemat/mengalihkan beban API Gemini.
-      3. Analisis varians & konsensus P1-P7
-      4. Eksekusi Meta-Aggregator (Qwen-Max) dengan skor arah murni (bebas bias positif)
-      5. Kembalikan objek Research terstandarisasi
+    Eksekusi pipeline riset aset lengkap:
+      - Mode default `oak_single` (RESEARCH_MODE=oak_single):
+          1. OAK-First (`fetch_oak_market_context`: overview, calendar, news, crypto/tradfi metrics)
+          2. Skip Yahoo headlines bila OAK sudah menyuplai >= 2 berita; skip Yahoo earnings untuk crypto/ETF
+          3. Single Deep Analyst 1-pass (ClassAI `claude-opus-5.5`/`gpt-6.1-sol` -> fallback DashScope fast)
+      - Mode `swarm` (RESEARCH_MODE=swarm): 4-Voter Swarm + Meta-Aggregator.
     """
     now_iso = datetime.now(timezone.utc).isoformat()
+    active_mode = (mode or get_research_mode()).strip().lower()
+    if active_mode not in ("oak_single", "swarm"):
+        active_mode = "oak_single"
+
     strategy_context = _build_strategy_context_block(
         ticker,
         funding_daily=funding_daily,
         recommended_side=recommended_side,
     )
+
+    # OAK-First: tarik konteks makro, kalender, berita, & metrik aset dari OAK MCP lebih dulu
+    oak_block = ""
+    oak_news: list[str] = []
+    oak_asset_type = ""
+    try:
+        import oak_mcp_client
+
+        if oak_mcp_client.is_oak_mcp_configured():
+            oak_ctx = oak_mcp_client.fetch_oak_market_context(ticker)
+            oak_asset_type = str(oak_ctx.get("asset_type") or "").strip().lower()
+            oak_block = oak_mcp_client.format_oak_context_for_prompt(oak_ctx)
+            if oak_block:
+                strategy_context = f"{strategy_context}\n\n{oak_block}"
+            oak_news = [str(h).strip() for h in (oak_ctx.get("headlines") or []) if str(h).strip()]
+    except Exception as exc:
+        log.warning(f"OAK MCP enrichment dilewati untuk {ticker}: {exc}")
+
+    # Earnings check: lewati untuk crypto/ETF agar bebas 404 latency; saham individual tetap dicek untuk guard H-7
+    sym_u = str(ticker or "").strip().upper()
+    if active_mode == "oak_single" and (oak_asset_type == "crypto" or sym_u in _NO_EARNINGS_TICKERS):
+        days_earnings, earnings_status = None, "not_applicable"
+    else:
+        days_earnings, earnings_status = fetch_earnings_days_with_status(ticker)
+
+    # Headlines: OAK-first pada mode oak_single bila sudah cukup (>= 2), selain itu lengkapi dari Yahoo
+    if active_mode == "oak_single" and len(oak_news) >= 2:
+        headlines = oak_news[:10]
+    else:
+        headlines = fetch_headlines(ticker)
+        if oak_news:
+            merged_h: list[str] = []
+            seen_h: set[str] = set()
+            for h in oak_news + list(headlines or []):
+                k = h.lower()
+                if k and k not in seen_h:
+                    seen_h.add(k)
+                    merged_h.append(h)
+            headlines = merged_h[:12]
+
+    if not headlines and oak_block:
+        headlines = [
+            f"[OAK Research MCP Real-Time Data untuk {ticker}] "
+            "Analisa berdasarkan blok [DATA REAL-TIME OAK RESEARCH MCP] pada konteks strategi."
+        ]
+        log.info(
+            f"🌳 {ticker}: Yahoo headlines kosong, lanjutkan riset memakai data real-time OAK Research MCP."
+        )
+
+    if active_mode == "oak_single":
+        if not headlines:
+            return Research(
+                ticker=ticker,
+                days_to_earnings=days_earnings,
+                news_sentiment="unknown",
+                narrative="Tidak ada berita/headlines yang ditemukan.",
+                confidence=0.0,
+                fetched_at=now_iso,
+                consensus="NO_DATA",
+                overall_consensus_level="NO_DATA",
+                vendor_alignment="oak_single_analyst",
+                earnings_status=earnings_status,
+                secondary_provider="oak_single",
+                oak_context_block=oak_block,
+            )
+
+        if gemini is None and (os.getenv("DASHSCOPE_API_GEMINI_KEY") or os.getenv("GEMINI_API_KEY")):
+            try:
+                gemini = GeminiClient()
+            except Exception as e:
+                log.warning(f"Inisialisasi Gemini (Single Analyst) gagal: {e}")
+        if qwen is None and os.getenv("DASHSCOPE_API_KEY"):
+            try:
+                qwen = QwenClient()
+            except Exception as e:
+                log.warning(f"Inisialisasi Qwen (fallback Single Analyst) gagal: {e}")
+
+        agg_result = run_single_deep_analyst(
+            ticker, headlines, strategy_context, gemini=gemini, qwen=qwen
+        )
+        if not agg_result:
+            return Research(
+                ticker=ticker,
+                days_to_earnings=days_earnings,
+                news_sentiment="unknown",
+                narrative="Single Deep Analyst gagal memberikan evaluasi.",
+                confidence=0.0,
+                fetched_at=now_iso,
+                consensus="NONE",
+                overall_consensus_level="NONE",
+                vendor_alignment="oak_single_analyst",
+                earnings_status=earnings_status,
+                voter_failures=["single_deep_analyst"],
+                secondary_provider="oak_single",
+                headlines=list(headlines),
+                oak_context_block=oak_block,
+            )
+
+        final_score = float(agg_result.get("final_score", 0.0))
+        overall_conf = float(agg_result.get("overall_confidence", 0.5))
+        raw_cons = str(agg_result.get("overall_consensus_level", "")).strip().upper()
+        if raw_cons in ("UNANIMOUS", "STRONG", "MIXED", "SPLIT"):
+            consensus_level = raw_cons
+        elif overall_conf >= 0.70:
+            consensus_level = "STRONG"
+        elif overall_conf >= 0.45:
+            consensus_level = "MIXED"
+        else:
+            consensus_level = "SPLIT"
+
+        if final_score > 0.15:
+            sentiment: Literal["bullish", "bearish", "neutral", "unknown"] = "bullish"
+        elif final_score < -0.15:
+            sentiment = "bearish"
+        else:
+            sentiment = "neutral"
+
+        p1_to_p7 = {}
+        for p in PARAM_WEIGHTS.keys():
+            p_data = agg_result.get("per_parameter_final", {}).get(p, {})
+            p1_to_p7[p] = float(p_data.get("final_score", 0.0))
+
+        thinking_txt = str(agg_result.get("thinking") or "").strip()
+        justification = str(agg_result.get("justification", "")).strip()
+        influential_param = str(agg_result.get("most_influential_parameter", "P1_sentiment_polarity"))
+        disagreements = agg_result.get("disagreement_summary", [])
+
+        return Research(
+            ticker=ticker,
+            days_to_earnings=days_earnings,
+            news_sentiment=sentiment,
+            narrative=justification,
+            confidence=overall_conf,
+            fetched_at=now_iso,
+            consensus=consensus_level,
+            qwen_sentiment=sentiment,
+            gemini_sentiment=sentiment,
+            final_score=final_score,
+            overall_consensus_level=consensus_level,
+            vendor_alignment="oak_single_analyst",
+            most_influential_parameter=influential_param,
+            disagreement_summary=disagreements if isinstance(disagreements, list) else [],
+            p1_to_p7_scores=p1_to_p7,
+            voters_count=1,
+            voter_verdicts={},
+            aggregator_details=agg_result,
+            earnings_status=earnings_status,
+            voter_failures=[],
+            secondary_provider="oak_single",
+            headlines=list(headlines),
+            oak_context_block=oak_block,
+            analyst_thinking=thinking_txt,
+        )
+
+    # --- LEGACY SWARM MODE (4-VOTER + META-AGGREGATOR) ---
     use_glm = should_use_glm_for_secondary_voters(
         opportunity_count=opportunity_count,
         is_idle=is_idle,
@@ -1186,41 +1489,6 @@ def research_stock(
         f"(opportunity_count={opportunity_count}, is_idle={is_idle})"
     )
 
-    days_earnings, earnings_status = fetch_earnings_days_with_status(ticker)
-    headlines = fetch_headlines(ticker)
-
-    # Perkaya konteks riset & berita dari OAK Research MCP Server (fail-safe bila belum dikonfigurasi)
-    oak_block = ""
-    try:
-        import oak_mcp_client
-
-        if oak_mcp_client.is_oak_mcp_configured():
-            oak_ctx = oak_mcp_client.fetch_oak_market_context(ticker)
-            oak_block = oak_mcp_client.format_oak_context_for_prompt(oak_ctx)
-            if oak_block:
-                strategy_context = f"{strategy_context}\n\n{oak_block}"
-            oak_news = list(oak_ctx.get("headlines") or [])
-            if oak_news:
-                merged_h: list[str] = []
-                seen_h: set[str] = set()
-                for h in oak_news + list(headlines or []):
-                    k = str(h).strip().lower()
-                    if k and k not in seen_h:
-                        seen_h.add(k)
-                        merged_h.append(str(h).strip())
-                headlines = merged_h[:12]
-    except Exception as exc:
-        log.warning(f"OAK MCP enrichment dilewati untuk {ticker}: {exc}")
-
-    if not headlines and oak_block:
-        headlines = [
-            f"[OAK Research MCP Real-Time Data untuk {ticker}] "
-            "Analisa berdasarkan blok [DATA REAL-TIME OAK RESEARCH MCP] pada konteks strategi."
-        ]
-        log.info(
-            f"🌳 {ticker}: Yahoo headlines kosong, lanjutkan Swarm AI memakai data real-time OAK Research MCP."
-        )
-
     if not headlines:
         return Research(
             ticker=ticker,
@@ -1233,6 +1501,7 @@ def research_stock(
             overall_consensus_level="NO_DATA",
             earnings_status=earnings_status,
             secondary_provider=active_secondary,
+            oak_context_block=oak_block,
         )
 
     # 1. Jalankan 4 Voters secara Paralel (Swarm Voting)
@@ -1372,6 +1641,7 @@ def research_stock(
         voter_failures=voter_failures,
         secondary_provider=active_secondary,
         headlines=list(headlines),
+        oak_context_block=oak_block,
     )
 
 

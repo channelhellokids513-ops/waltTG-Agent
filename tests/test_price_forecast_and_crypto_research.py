@@ -68,6 +68,8 @@ def test_fetch_headlines_crypto_tries_usd_suffix_first(monkeypatch):
 def test_research_stock_uses_oak_mcp_when_yahoo_headlines_empty(monkeypatch):
     import oak_mcp_client
 
+    monkeypatch.setenv("RESEARCH_MODE", "swarm")
+
     monkeypatch.setattr(llm_research, "fetch_earnings_days_with_status", lambda t: (None, "no_data"))
     monkeypatch.setattr(llm_research, "fetch_headlines", lambda t, limit=10: [])
     monkeypatch.setattr(oak_mcp_client, "is_oak_mcp_configured", lambda: True)

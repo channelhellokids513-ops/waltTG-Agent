@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -212,6 +213,7 @@ class OakMCPClient:
         self.session_id: Optional[str] = None
         self._initialized: bool = False
         self._req_id: int = 0
+        self._lock = threading.RLock()
         self.client = httpx.Client(timeout=timeout)
 
     def _next_id(self) -> int:
@@ -267,53 +269,55 @@ class OakMCPClient:
         return h
 
     def _rpc(self, method: str, params: Optional[dict[str, Any]] = None, is_notification: bool = False) -> dict[str, Any]:
-        payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
-        if not is_notification:
-            payload["id"] = self._next_id()
-        if params is not None:
-            payload["params"] = params
+        with self._lock:
+            payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+            if not is_notification:
+                payload["id"] = self._next_id()
+            if params is not None:
+                payload["params"] = params
 
-        r = self.client.post(self.mcp_url, json=payload, headers=self._headers())
-        # Retry 1x jika access_token kadaluarsa (401) dan refresh_token tersedia
-        if r.status_code == 401 and self.client_id and self.refresh_token:
-            log.info("OAK MCP access_token kadaluarsa (401) -> refresh token & coba ulang...")
-            self.refresh_access_token()
-            self.session_id = None
             r = self.client.post(self.mcp_url, json=payload, headers=self._headers())
+            # Retry 1x jika access_token kadaluarsa (401) dan refresh_token tersedia
+            if r.status_code == 401 and self.client_id and self.refresh_token:
+                log.info("OAK MCP access_token kadaluarsa (401) -> refresh token & coba ulang...")
+                self.refresh_access_token()
+                self.session_id = None
+                r = self.client.post(self.mcp_url, json=payload, headers=self._headers())
 
-        if r.status_code == 202 and is_notification:
-            return {}
-        r.raise_for_status()
+            if r.status_code == 202 and is_notification:
+                return {}
+            r.raise_for_status()
 
-        sid = r.headers.get("mcp-session-id") or r.headers.get("Mcp-Session-Id")
-        if sid:
-            self.session_id = sid.strip()
-        if is_notification or not r.text.strip():
-            return {}
-        data = _parse_mcp_http_body(r.headers.get("content-type", ""), r.text)
-        if isinstance(data, dict) and data.get("error"):
-            err = data["error"]
-            raise RuntimeError(f"OAK MCP RPC error ({method}): {err}")
-        return data
+            sid = r.headers.get("mcp-session-id") or r.headers.get("Mcp-Session-Id")
+            if sid:
+                self.session_id = sid.strip()
+            if is_notification or not r.text.strip():
+                return {}
+            data = _parse_mcp_http_body(r.headers.get("content-type", ""), r.text)
+            if isinstance(data, dict) and data.get("error"):
+                err = data["error"]
+                raise RuntimeError(f"OAK MCP RPC error ({method}): {err}")
+            return data
 
     def initialize(self) -> dict[str, Any]:
         """Handshake MCP initialize + notifications/initialized."""
-        if self._initialized:
-            return {"already_initialized": True}
-        res = self._rpc(
-            "initialize",
-            {
-                "protocolVersion": _MCP_PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": {"name": "walt-trading-bot", "version": "1.0.0"},
-            },
-        )
-        try:
-            self._rpc("notifications/initialized", is_notification=True)
-        except Exception:
-            pass
-        self._initialized = True
-        return res
+        with self._lock:
+            if self._initialized:
+                return {"already_initialized": True}
+            res = self._rpc(
+                "initialize",
+                {
+                    "protocolVersion": _MCP_PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": {"name": "walt-trading-bot", "version": "1.0.0"},
+                },
+            )
+            try:
+                self._rpc("notifications/initialized", is_notification=True)
+            except Exception:
+                pass
+            self._initialized = True
+            return res
 
     def list_tools(self) -> list[dict[str, Any]]:
         """Daftar seluruh tool read-only yang tersedia di OAK Research MCP Server."""

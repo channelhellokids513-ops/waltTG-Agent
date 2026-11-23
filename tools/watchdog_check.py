@@ -13,7 +13,7 @@ README §113-116), bukan angka karangan:
     risk-monitor.yml   */10 menit (10m)           30m     nilai lama yang sudah terbukti, dipertahankan
     market-execute.yml 43 */2  (120m)            300m     2x cadence + grace 60m
     crypto-execute.yml 11 */2  (120m)            300m     2x cadence + grace 60m
-    daily-scan.yml     17 0,12 (720m)            840m     1x cadence + grace 120m (slot berikut ±12h)
+    daily-scan.yml     33 14,18 (1200m)          1320m    jeda maks 20j (18:33->14:33 UTC) + grace 120m
 
 Hanya memakai API GitHub (`gh`). Tidak ada akses Walt API di sini.
 """
@@ -52,9 +52,9 @@ SPECS: list[dict] = [
     {
         "workflow": "daily-scan.yml",
         "label": "Daily Walt Perps Funding Scan",
-        "cadence_min": 720,
-        "threshold_min": 840,
-        "source": "STRATEGY §7.1 `17 0,12 * * *`; README §113; cadence + grace 120m",
+        "cadence_min": 1200,
+        "threshold_min": 1320,
+        "source": "STRATEGY §7.1 `33 14,18 * * *`; README §113; jeda maks 20j + grace 120m",
     },
 ]
 

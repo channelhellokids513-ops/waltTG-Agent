@@ -87,6 +87,7 @@ jobs:
           CRYPTO_FORECAST_UNIVERSE: ${{ vars.CRYPTO_FORECAST_UNIVERSE || 'all' }}
           STOCK_FORECAST_ENGINE: ${{ vars.STOCK_FORECAST_ENGINE || 'on' }}
           DYNAMIC_SL_MODE: ${{ vars.DYNAMIC_SL_MODE || 'atr' }}
+          RESEARCH_MODE: ${{ vars.RESEARCH_MODE || 'oak_single' }}
           AUTO_EXECUTE_ON_SCAN: ${{ github.event.inputs.auto_execute || vars.AUTO_EXECUTE_ON_SCAN || 'true' }}
           DRY_RUN: ${{ github.event.inputs.dry_run || vars.DRY_RUN || 'false' }}
           WALT_STATE_WARM: ${{ steps.state_probe.outputs.warm }}

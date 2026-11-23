@@ -41,6 +41,7 @@ def _research(ticker="NVDA", failures=(), earnings_status="ok", voters=3):
 # research_stock: kegagalan voter tercatat, bukan ditelan
 # ------------------------------------------------------------------------------
 def test_research_stock_mencatat_voter_yang_balik_none_dan_yang_meledak(monkeypatch):
+    monkeypatch.setenv("RESEARCH_MODE", "swarm")
     verdict = {
         "params": {"P1_sentiment_polarity": {"score": 0.4, "reasoning": "x"}},
         "overall_voter_confidence": 0.7,
@@ -75,6 +76,7 @@ def test_research_stock_mencatat_voter_yang_balik_none_dan_yang_meledak(monkeypa
 
 
 def test_research_stock_semua_voter_gagal_tetap_membawa_status_input(monkeypatch):
+    monkeypatch.setenv("RESEARCH_MODE", "swarm")
     monkeypatch.setattr(llm_research, "fetch_earnings_days_with_status", lambda t: (None, "http_error:401"))
     monkeypatch.setattr(llm_research, "fetch_headlines", lambda t, limit=10: ["judul"])
     monkeypatch.setattr(llm_research, "run_voter_1", lambda *a, **k: None)

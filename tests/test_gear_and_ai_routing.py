@@ -86,6 +86,7 @@ def test_ai_routing_policy_helper(monkeypatch):
 
 
 def test_research_stock_uses_gemini_when_idle(monkeypatch):
+    monkeypatch.setenv("RESEARCH_MODE", "swarm")
     monkeypatch.setattr(llm_research, "fetch_earnings_days_with_status", lambda t: (25, "ok"))
     monkeypatch.setattr(llm_research, "fetch_headlines", lambda t, limit=10: ["Headline 1", "Headline 2"])
 
@@ -109,6 +110,7 @@ def test_research_stock_uses_gemini_when_idle(monkeypatch):
 
 
 def test_research_stock_switches_to_glm_when_many_opportunities(monkeypatch):
+    monkeypatch.setenv("RESEARCH_MODE", "swarm")
     monkeypatch.setenv("MULTI_OPP_GLM_FALLBACK", "true")
     monkeypatch.setattr(llm_research, "fetch_earnings_days_with_status", lambda t: (25, "ok"))
     monkeypatch.setattr(llm_research, "fetch_headlines", lambda t, limit=10: ["Headline 1", "Headline 2"])

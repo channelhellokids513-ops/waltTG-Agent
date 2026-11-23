@@ -316,7 +316,7 @@ Sistem beroperasi 100% secara otonom di cloud GitHub Actions runners dengan nol 
 └────────────────────────────────────────────────────────────────────────────────────────┘
 
     GitHub & Google Cloud Scheduler (Precision Triggers)
-    ├── daily-scan.yml      (07:17 & 19:17 WIB / 2x sehari) → Master Scan + OAK MCP + Swarm AI + Sheet
+    ├── daily-scan.yml      (14:33 & 18:33 UTC / 21:33 & 01:33 WIB) → Master Scan + OAK-First Deep Analyst + Sheet
     ├── risk-monitor.yml    (Tiap 10 menit WIB)              → Pengawas 4-lapis risiko intensif + Smart Fast-Exit Idle
     ├── market-execute.yml  (Tiap 2 jam di menit 43 WIB)     → Saham US (13:30–21:00 UTC) & Komoditas 24/7 (Gear 0–3)
     └── crypto-execute.yml  (Tiap 2 jam di menit 11 WIB)     → Eksekusi Crypto Tier-1 (10 aset 24/7, Gear 0–3)
@@ -339,8 +339,8 @@ Sistem beroperasi 100% secara otonom di cloud GitHub Actions runners dengan nol 
      │        walt_bot.py        │
      │  - token_manager.py       │ ──> Auto-refresh Bearer token & auto-sync Secret
      │  - oak_mcp_client.py      │ ──> Live macro, calendar, news & metric OAK MCP
-     │  - llm_research.py        │ ──> GLM-5.2/5.3 + MiniMax M3 + Haiku 5.5 + GLM-5.3 CRO
-     │  - training_data.py       │ ──> Simpan <think> SFT JSONL ke tab Data Training
+     │  - llm_research.py        │ ──> OAK-First Single Deep Analyst paralel (RESEARCH_MODE=oak_single) / Swarm fallback
+     │  - training_data.py       │ ──> Simpan <think> SFT JSONL + konteks OAK ke tab Data Training
      │  - Walt MCP Relay API     │ ──> Eksekusi order & data market Walt Perps
      │  - notifier.py            │ ──> Notifikasi laporan terstruktur Telegram
      └─────────────┬─────────────┘
@@ -358,7 +358,7 @@ Sistem beroperasi dengan arsitektur hibrida: cron internal GitHub Actions diduku
 
 | Workflow File | Jadwal Scheduler (WIB) | Jadwal Cron (UTC) | Target Cloud Scheduler | Fungsi Utama |
 |---|---|---|---|---|
-| [daily-scan.yml](file:///.github/workflows/daily-scan.yml) | **07:17 & 19:17 WIB** (2x Sehari) | `17 0,12 * * *` | `walt-daily-scan` | Master Scan 31 aset Engine 1 + **Engine 2 Crypto (`CRYPTO_FORECAST_ENGINE=on`)** & **Engine 2 Saham AS (`STOCK_FORECAST_ENGINE=on`, saat jam bursa AS `13:30–21:00 UTC`)**, pengayaan OAK Research MCP, Swarm AI (`GLM-5.3` CRO), eksekusi GO/HALF, simpan 5 tab Google Sheets (`Daily_Scans` 30 kolom & `Data Training`). |
+| [daily-scan.yml](file:///.github/workflows/daily-scan.yml) | **21:33 & 01:33 WIB** (2x Sehari, Jam Bursa AS) | `33 14,18 * * *` | `walt-daily-scan` | Master Scan 31 aset Engine 1 + **Engine 2 Crypto (`CRYPTO_FORECAST_ENGINE=on`)** & **Engine 2 Saham AS (`STOCK_FORECAST_ENGINE=on`, saat jam bursa AS `13:30–21:00 UTC`)**, riset **OAK-First + Single Deep Analyst paralel antar-aset (`RESEARCH_MODE=oak_single`, fallback `swarm`)**, eksekusi GO/HALF, simpan 5 tab Google Sheets (`Daily_Scans` 30 kolom & `Data Training`). |
 | [risk-monitor.yml](file:///.github/workflows/risk-monitor.yml) | **Dinamis 5–10 Menit** (6x–12x/Jam + Smart Idle) | `*/10 * * * *` | `walt-risk-monitor` | Evaluasi risiko adaptif 24/7 (True Zero-Risk Trailing & Asymmetric R:R). Fast-exit <2 detik saat 0 posisi; otomatis mempercepat ke **tiap ~5 menit (12x/jam)** jika $\ge 3$ posisi aktif, kategori `HALF`, atau dekat TP ($\ge +0.70\%$) / SL ($\le -1.00\%$); dan stabil **10 menit** untuk posisi `GO` tenang. |
 | [market-execute.yml](file:///.github/workflows/market-execute.yml) | **4-Tier Gear 0–3** (Dinamis) | `43 */2 * * *` | `walt-market-execute` | Eksekusi Saham US (**Engine 1 Funding Carry** + **Engine 2 LONG-ONLY Dip-Buy `STOCK_FORECAST_ENGINE=on`** saat `13:30–21:00 UTC`) & Komoditas (24/7 Engine 1) dengan **4-Tier Execution Gear**: **Gear 0 (`0` GO)** = maks 2x selama jam bursa AS (`225m`); **Gear 1 (`< 2` GO)** = `120m` (2 jam); **Gear 2 (`2..5` GO)** = `60m` (1 jam); **Gear 3 (`> 5` GO / `GEAR_3_FULL_RESEARCH=true`)** = `60m` + izin riset AI penuh untuk setiap keputusan trading. |
 | [crypto-execute.yml](file:///.github/workflows/crypto-execute.yml) | **4-Tier Gear 0–3** (Dinamis) | `11 */2 * * *` | `walt-crypto-execute` | Eksekusi mandiri Crypto (24/7) memakai **Engine 1 Funding Carry** (`10` Bluechip Tier-1) + **Engine 2 Price Forecast Mean-Reversion Fade** (`CRYPTO_FORECAST_ENGINE=on`, `CRYPTO_FORECAST_UNIVERSE=all` seluruh kontrak Crypto likuid: `V4_1H_EXTREME_FADE` & `V5_4H_REJ_COMFORT`) dengan **4-Tier Execution Gear** (`Gear 0` `720m` / 2x sehari; `Gear 1` `120m`; `Gear 2` `60m`; `Gear 3` `60m` Full AI Research) + *3-hour re-entry cooldown*. |
