@@ -1442,6 +1442,28 @@ def rank_opportunities(
             f"0 opps lolos filter (MIN_VOL=${MIN_VOL_24H:,.0f}, MIN_FR={MIN_FUNDING_DAILY*100:.2f}%/hari). "
             f"Top kandidat: {[(a, f'vol=${v:,.0f}', f'fr={fr*100:+.3f}%/hari') for a, v, fr in candidates[:5]]}"
         )
+    # Penajaman pemeriksaan (keputusan pemilik 2026-11-24): SELURUH kontrak Walt dievaluasi
+    # filter funding/volume — termasuk yang berada DI LUAR whitelist — supaya peluang yang
+    # sengaja diabaikan tetap terlihat di log (bukan tersembunyi).
+    outside: list[tuple[str, float, float]] = []
+    for c in contracts:
+        asset = str(c.get("base_asset") or "").strip().upper()
+        if not asset or asset in target_assets:
+            continue
+        try:
+            v = float(c.get("volume_24h_usd") or 0.0)
+            frd = float(c.get("funding_rate_hourly") or 0.0) * 24.0
+        except (TypeError, ValueError):
+            continue
+        if v >= MIN_VOL_24H and abs(frd) >= MIN_FUNDING_DAILY:
+            outside.append((asset, v, frd))
+    if outside:
+        outside.sort(key=lambda x: abs(x[2]), reverse=True)
+        log.info(
+            f"🔎 [ENGINE 1] {len(outside)} kontrak lolos filter funding DI LUAR whitelist "
+            f"(dari {len(contracts)} kontrak Walt diperiksa); top: "
+            + ", ".join(f"{a} {fr*100:+.2f}%/hari vol=${v:,.0f}" for a, v, fr in outside[:5])
+        )
     return opps
 
 
@@ -1553,6 +1575,17 @@ def research_stock(
 CRYPTO_RESEARCH_TOP_N = 5
 
 
+def _cfg_int(key: str, default: int) -> int:
+    """Baca parameter int dari STRATEGY_CONFIG_JSON dengan fallback aman (tanpa cache, murah)."""
+    try:
+        from strategy_config import load_strategy_config
+        val = int(float(load_strategy_config().get(key, default)))
+        return val
+    except Exception as exc:
+        log.debug(f"_cfg_int({key}) gagal ({type(exc).__name__}); pakai default {default}")
+        return int(default)
+
+
 def crypto_research_set(pairs, limit: Optional[int] = None) -> set[str]:
     """Aset crypto/komoditas yang boleh diteliti AI: |funding| terbesar, dibatasi `limit`.
 
@@ -1563,8 +1596,8 @@ def crypto_research_set(pairs, limit: Optional[int] = None) -> set[str]:
             if abs(funding or 0.0) >= MIN_FUNDING_DAILY
             and str(asset).upper() in (ALLOWED_CRYPTO | ALLOWED_COMMODITIES)]
     rows.sort(key=lambda row: row[1], reverse=True)
-    cap = CRYPTO_RESEARCH_TOP_N if limit is None else limit
-    return {asset for asset, _f in rows[:cap]}
+    cap = _cfg_int("crypto_research_top_n", CRYPTO_RESEARCH_TOP_N) if limit is None else limit
+    return {asset for asset, _f in rows[:max(1, cap)]}
 
 
 def _grav_amplify_decision(
@@ -4382,12 +4415,24 @@ def _scan_crypto_engine2_opportunities(
 
         universe_mode = get_crypto_forecast_universe_mode()
         scan_allowed: Optional[set[str]] = None if universe_mode == "all" else target_universe
+        ep_crypto = {
+            str(c.get("base_asset") or "").strip().upper() for c in contracts
+        } - {str(x).strip().upper() for x in exclude_assets} - (ALLOWED_STOCKS | ALLOWED_COMMODITIES)
+        ep_crypto.discard("")
+        if scan_allowed is not None:
+            ep_crypto &= scan_allowed
+        scan_cap = max(0, _cfg_int("forecast_max_scan_assets", 50))
         fc_raw = price_forecast.scan_crypto_price_opportunities(
             contracts,
             allowed_assets=scan_allowed,
             exclude_assets=exclude_assets,
             exclude_non_crypto=(ALLOWED_STOCKS | ALLOWED_COMMODITIES),
             min_vol_24h=MIN_VOL_24H,
+            max_candidates=scan_cap,
+        )
+        log.info(
+            f"🔎 [COVERAGE {log_label}] kandidat crypto likuid diperiksa: {len(ep_crypto)} "
+            f"(scan_max={'ALL' if scan_cap == 0 else scan_cap}, mode={universe_mode}) → {len(fc_raw)} sinyal"
         )
         return _convert_forecast_dicts_to_opps(fc_raw, log_label)
     except Exception as exc:
@@ -4408,11 +4453,21 @@ def _scan_stock_engine2_opportunities(
     try:
         import price_forecast
 
+        target_syms = {str(x).strip().upper() for x in target_stocks}
+        ep_stock = {
+            str(c.get("base_asset") or "").strip().upper() for c in contracts
+        } & target_syms - {str(x).strip().upper() for x in exclude_assets}
+        sig_cap = max(1, _cfg_int("stock_forecast_max_signals", 3))
         fc_raw = price_forecast.scan_stock_price_opportunities(
             contracts,
             allowed_assets=target_stocks,
             exclude_assets=exclude_assets,
             min_vol_24h=MIN_VOL_24H,
+            max_signals=sig_cap,
+        )
+        log.info(
+            f"🔎 [COVERAGE {log_label}] kandidat saham diperiksa: {len(ep_stock)} "
+            f"(max_signals={sig_cap}) → {len(fc_raw)} sinyal"
         )
         return _convert_forecast_dicts_to_opps(fc_raw, log_label)
     except Exception as exc:
@@ -4427,6 +4482,7 @@ def daily_scan(client: WaltClient, now_utc: Optional[datetime] = None) -> dict:
     positions = client.list_positions(statuses=["open"])
     contracts = client.list_contracts()
 
+    log.info(f"🔎 [COVERAGE] {len(contracts.get('contracts') or [])} kontrak Walt dimuat untuk daily_scan")
     opps = rank_opportunities(contracts["contracts"])
     market_opps = rank_opportunities(contracts["contracts"], allowed_assets=(ALLOWED_STOCKS | ALLOWED_COMMODITIES))
     crypto_opps = rank_opportunities(contracts["contracts"], allowed_assets=ALLOWED_CRYPTO)
@@ -4755,7 +4811,8 @@ def scan_with_research(
     if full_research_gear3:
         log.info("  🧠 [GEAR 3] Izin riset & analisa AI aktif untuk SETIAP kandidat keputusan trading.")
     elif crypto_research:
-        log.info(f"  🧠 riset AI crypto/komoditas dibatasi {CRYPTO_RESEARCH_TOP_N} |funding| "
+        _cap_txt = _cfg_int("crypto_research_top_n", CRYPTO_RESEARCH_TOP_N)
+        log.info(f"  🧠 riset AI crypto/komoditas dibatasi {_cap_txt} |funding| "
                  f"terbesar: {', '.join(sorted(crypto_research))}")
 
     eligible_opps: list[dict] = []
@@ -5193,6 +5250,7 @@ def market_execute(
 
     # Scan + rank
     contracts_data = client.list_contracts()
+    log.info(f"🔎 [COVERAGE] {len(contracts_data.get('contracts') or [])} kontrak Walt dimuat untuk eksekusi")
     opps = rank_opportunities(contracts_data["contracts"], allowed_assets=target_universe)
 
     category_key: Literal["market", "crypto"] = "crypto" if target_universe == ALLOWED_CRYPTO else "market"

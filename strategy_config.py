@@ -55,6 +55,10 @@ DEFAULT_STRATEGY_CONFIG: dict[str, Any] = {
     "grav_boost_min_score": 80.0,   # skor struktur harus > ini agar boost aktif
     "grav_boost_max_pct": 0.25,     # boost maksimum pada skor 100 (0.25 = +25% conviction)
     "grav_boost_curve": 1.5,        # eksponen kurva (>1 = makin tajam di skor ekstrem)
+    # CAKUPAN PEMERIKSAAN (keputusan pemilik 2026-11-24: tajamkan agar semua ticker Walt tersentuh).
+    "forecast_max_scan_assets": 50,  # Engine 2: kandidat yang diperiksa; 0 = SELURUH kontrak likuid
+    "crypto_research_top_n": 5,      # batas riset AI crypto/komoditas (|funding| terbesar)
+    "stock_forecast_max_signals": 3, # jumlah maksimum sinyal dip-buy saham AS per siklus
     "dry_run": False,
 }
 
@@ -77,6 +81,9 @@ STRATEGY_PARAM_SPECS: dict[str, dict[str, Any]] = {
     "grav_boost_min_score": {"type": "float", "min": 50.0, "max": 95.0, "desc": "Skor struktur harus LEBIH BESAR dari ini agar pengaruh boost aktif (default 80)"},
     "grav_boost_max_pct": {"type": "float", "min": 0.05, "max": 0.50, "desc": "Boost conviction maksimum saat skor struktur 100 (0.25 = +25%)"},
     "grav_boost_curve": {"type": "float", "min": 1.0, "max": 3.0, "desc": "Eksponen kurva boost; >1 membuat pengaruh makin kuat tajam mendekati skor 100"},
+    "forecast_max_scan_assets": {"type": "int", "min": 0, "max": 200, "desc": "Engine 2 crypto: jumlah kandidat yang diperiksa per scan; 0 = seluruh kontrak likuid Walt"},
+    "crypto_research_top_n": {"type": "int", "min": 1, "max": 30, "desc": "Batas aset crypto/komoditas yang diriset AI per scan (|funding| terbesar)"},
+    "stock_forecast_max_signals": {"type": "int", "min": 1, "max": 10, "desc": "Jumlah maksimum sinyal dip-buy saham AS yang diproses per siklus"},
     "dry_run": {"type": "bool", "desc": "Mode simulasi tanpa order riil (true/false)"},
 }
 
