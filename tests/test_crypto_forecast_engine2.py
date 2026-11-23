@@ -152,6 +152,7 @@ def test_crypto_execute_opens_engine2_trade_and_saves_meta(monkeypatch):
             fetched_at=datetime.now(timezone.utc).isoformat(),
             consensus="STRONG",
             overall_consensus_level="STRONG",
+            vendor_alignment="aligned",
             final_score=0.05,
         ),
     )
@@ -317,3 +318,210 @@ def test_risk_monitor_engine2_respects_atr_sl_adverse_funding_and_time_stop(monk
     res4 = evaluate_and_apply_position_risk(c4, p4, current_funding_daily=0.0, now_utc=now_dt)
     assert res4 is not None and res4["action"] == "UPDATE_AUTO_CLOSE"
     assert res4["sl"] == pytest.approx(100.35)
+
+
+# ---------------------------------------------------------------------------
+# 4. Integrasi daily_scan, sheet_logger.log_scan_to_csv, & scan_with_research
+# ---------------------------------------------------------------------------
+
+
+def test_daily_scan_includes_engine2_crypto_and_respects_toggle(monkeypatch):
+    import sheet_logger
+
+    monkeypatch.setattr(sheet_logger, "get_closed_funding_current_month", lambda **kw: 0.0)
+    monkeypatch.setattr(walt_bot, "send_telegram", lambda *a, **kw: True)
+    monkeypatch.setattr(
+        price_forecast,
+        "scan_crypto_price_opportunities",
+        lambda contracts, **kw: [
+            {
+                "contract_id": 55,
+                "asset": "SOL",
+                "side": "short",
+                "setup": "V5_4H_REJ_COMFORT",
+                "sl_pct": 0.032,
+                "tp_pct": 0.032,
+                "max_hold_hours": 72.0,
+                "expected_net_edge_pct": 0.0022,
+                "funding_daily": 0.0008,
+                "volume_24h": 30_000_000.0,
+                "max_leverage": 2,
+                "min_size_base": 0.01,
+                "price_slippage": 0.0005,
+                "reason": "V5 4h Fade SHORT",
+            }
+        ],
+    )
+
+    client = _make_mock_client()
+    client.readiness.return_value = {"ok": True}
+    client.balance.return_value = {"accounts": [{"balance_available": "25.0", "currency": "USDC"}]}
+    client.list_positions.return_value = {"positions": []}
+    client.latest_rate.return_value = {"rate": "150.0"}
+    client.list_contracts.return_value = {
+        "contracts": [
+            {
+                "contract_id": 55,
+                "base_asset": "SOL",
+                "volume_24h_usd": "30000000",
+                "funding_rate_hourly": "0.0000333",
+                "max_leverage": 2,
+                "min_size_base": "0.01",
+                "price_slippage": "0.0005",
+            }
+        ]
+    }
+
+    monkeypatch.setenv("CRYPTO_FORECAST_ENGINE", "on")
+    summary_on = walt_bot.daily_scan(client)
+    fc_items = [o for o in summary_on["top_opportunities"] if o.get("signal_source") == "price_forecast"]
+    assert len(fc_items) == 1
+    assert fc_items[0]["asset"] == "SOL"
+    assert fc_items[0]["forecast_setup"] == "V5_4H_REJ_COMFORT"
+    assert fc_items[0]["expected_net_edge_pct"] == pytest.approx(0.0022)
+
+    monkeypatch.setenv("CRYPTO_FORECAST_ENGINE", "off")
+    summary_off = walt_bot.daily_scan(client)
+    assert all(o.get("signal_source") != "price_forecast" for o in summary_off["top_opportunities"])
+
+
+def test_sheet_logger_log_scan_to_csv_engine2_row_has_30_cols_and_go(monkeypatch, tmp_path):
+    import sheet_logger
+
+    monkeypatch.setattr(sheet_logger, "gravity_diagnostics", lambda asset: {k: "" for k in sheet_logger.MG_COLUMNS})
+    summary = {
+        "ts": "2026-11-23T12:00:00+00:00",
+        "balance": [{"balance_available": "25.0"}],
+        "positions_count": 0,
+        "top_opportunities": [
+            {
+                "contract_id": 55,
+                "asset": "SOL",
+                "side": "short",
+                "funding_daily_pct": 0.08,
+                "price": 150.0,
+                "signal_source": "price_forecast",
+                "forecast_setup": "V5_4H_REJ_COMFORT",
+                "expected_net_edge_pct": 0.0022,
+                "forecast_reason": "V5 4h Fade SHORT",
+                "planned_sl_pct": 0.032,
+                "planned_tp_pct": 0.032,
+                "max_hold_hours": 72.0,
+            }
+        ],
+    }
+    res_obj = llm_research.Research(
+        ticker="SOL",
+        days_to_earnings=None,
+        news_sentiment="neutral",
+        narrative="Netral",
+        confidence=0.70,
+        fetched_at=datetime.now(timezone.utc).isoformat(),
+        consensus="STRONG",
+        overall_consensus_level="STRONG",
+        vendor_alignment="aligned",
+        final_score=0.05,
+    )
+    rows = sheet_logger.log_scan_to_csv(
+        summary, {"SOL": res_obj}, filepath=str(tmp_path / "scan_history.csv")
+    )
+    assert len(rows) == 1
+    assert len(rows[0]) == len(sheet_logger.DAILY_SCANS_HEADERS) == 30
+    verdict_idx = sheet_logger.DAILY_SCANS_HEADERS.index("verdict")
+    reason_idx = sheet_logger.DAILY_SCANS_HEADERS.index("reason")
+    assert rows[0][verdict_idx] == "GO"
+    assert "V5_4H_REJ_COMFORT" in rows[0][reason_idx]
+
+
+def test_scan_with_research_executes_and_logs_engine2_to_daily_scans(monkeypatch):
+    import sheet_logger
+
+    monkeypatch.setenv("CRYPTO_FORECAST_ENGINE", "on")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dummy_key")
+    monkeypatch.setattr(walt_bot, "has_enough_job_time", lambda *a, **kw: True)
+    monkeypatch.setattr(walt_bot, "check_daily_circuit_breaker", lambda *a, **kw: (False, "OK"))
+    monkeypatch.setattr(walt_bot, "check_cold_state_entry_gate", lambda *a, **kw: (True, "OK"))
+    monkeypatch.setattr(walt_bot, "_is_asset_in_cooldown", lambda *a, **kw: (False, 0.0))
+    monkeypatch.setattr(walt_bot, "check_entry_frequency_limits", lambda *a, **kw: (True, "OK"))
+    monkeypatch.setattr(walt_bot, "record_entry_execution", lambda *a, **kw: None)
+    monkeypatch.setattr(walt_bot, "send_telegram", lambda *a, **kw: True)
+    monkeypatch.setattr(sheet_logger, "get_closed_funding_current_month", lambda **kw: 0.0)
+
+    logged_scan_summaries = []
+    monkeypatch.setattr(
+        sheet_logger,
+        "log_scan",
+        lambda summary, researches: logged_scan_summaries.append(summary) or {"rows_count": len(summary.get("top_opportunities", []))},
+    )
+    monkeypatch.setattr(sheet_logger, "log_pnl_tracker", lambda summary: {"ok": True})
+    monkeypatch.setattr(sheet_logger, "log_execution", lambda execs: {"executions_count": len(execs)})
+
+    monkeypatch.setattr(
+        walt_bot,
+        "research_stock",
+        lambda asset, **kw: llm_research.Research(
+            ticker=asset,
+            days_to_earnings=None,
+            news_sentiment="neutral",
+            narrative="Netral",
+            confidence=0.70,
+            fetched_at=datetime.now(timezone.utc).isoformat(),
+            consensus="STRONG",
+            overall_consensus_level="STRONG",
+            vendor_alignment="aligned",
+            final_score=0.05,
+        ),
+    )
+    monkeypatch.setattr(
+        price_forecast,
+        "scan_crypto_price_opportunities",
+        lambda contracts, **kw: [
+            {
+                "contract_id": 55,
+                "asset": "SOL",
+                "side": "short",
+                "setup": "V5_4H_REJ_COMFORT",
+                "sl_pct": 0.032,
+                "tp_pct": 0.032,
+                "max_hold_hours": 72.0,
+                "expected_net_edge_pct": 0.0022,
+                "funding_daily": 0.0008,
+                "volume_24h": 30_000_000.0,
+                "max_leverage": 2,
+                "min_size_base": 0.01,
+                "price_slippage": 0.0005,
+                "reason": "V5 4h Fade SHORT",
+            }
+        ],
+    )
+
+    client = _make_mock_client()
+    client.readiness.return_value = {"ok": True}
+    client.balance.return_value = {"accounts": [{"balance_available": "25.0", "currency": "USDC"}]}
+    client.list_positions.return_value = {"positions": []}
+    client.latest_rate.return_value = {"rate": "150.0"}
+    client.list_contracts.return_value = {
+        "contracts": [
+            {
+                "contract_id": 55,
+                "base_asset": "SOL",
+                "volume_24h_usd": "30000000",
+                "funding_rate_hourly": "0.0000333",
+                "max_leverage": 2,
+                "min_size_base": "0.01",
+                "price_slippage": "0.0005",
+            }
+        ]
+    }
+
+    res = walt_bot.scan_with_research(client, auto_execute=True, dry_run=False)
+    execs = [e for e in res["executions"] if e["asset"] == "SOL" and e["verdict"] == "EXECUTED"]
+    assert len(execs) == 1
+    assert "V5_4H_REJ_COMFORT" in execs[0]["reason"]
+    meta = walt_bot._load_forecast_position_meta()
+    assert "55" in meta and meta["55"]["setup"] == "V5_4H_REJ_COMFORT"
+    assert len(logged_scan_summaries) == 1
+    assert any(
+        o["asset"] == "SOL" and o.get("signal_source") == "price_forecast"
+        for o in logged_scan_summaries[0]["top_opportunities"]
+    )

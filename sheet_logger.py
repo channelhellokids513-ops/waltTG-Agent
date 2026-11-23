@@ -377,7 +377,18 @@ def log_scan_to_csv(summary: dict, researches: dict[str, Any], filepath: str = "
         # Decision
         from walt_bot import decide_go_nogo, DEFAULT_MARGIN
         from types import SimpleNamespace
-        pseudo_opp = SimpleNamespace(base_asset=asset, side=opp["side"], funding_daily=funding/100)
+        pseudo_opp = SimpleNamespace(
+            base_asset=asset,
+            side=opp["side"],
+            funding_daily=funding / 100,
+            signal_source=opp.get("signal_source", "funding"),
+            forecast_setup=opp.get("forecast_setup", ""),
+            expected_net_edge_pct=float(opp.get("expected_net_edge_pct") or 0.0),
+            forecast_reason=opp.get("forecast_reason", ""),
+            planned_sl_pct=float(opp.get("planned_sl_pct") or 0.0),
+            planned_tp_pct=float(opp.get("planned_tp_pct") or 0.0),
+            max_hold_hours=float(opp.get("max_hold_hours") or 0.0),
+        )
         verdict, reason, mult = decide_go_nogo(pseudo_opp, res)
         margin = DEFAULT_MARGIN * mult
 

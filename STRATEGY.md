@@ -317,7 +317,7 @@ Sistem beroperasi dengan arsitektur hibrida: cron internal GitHub Actions diduku
 
 | Workflow File | Jadwal Scheduler (WIB) | Jadwal Cron (UTC) | Target Cloud Scheduler | Fungsi Utama |
 |---|---|---|---|---|
-| [daily-scan.yml](file:///.github/workflows/daily-scan.yml) | **07:17 & 19:17 WIB** (2x Sehari) | `17 0,12 * * *` | `walt-daily-scan` | Master Scan 31 aset diizinkan (Saham US hanya di jam reguler AS `13:30–21:00 UTC`), pengayaan OAK Research MCP, Swarm AI (`GLM-5.3` CRO), eksekusi GO/HALF, simpan 5 tab Google Sheets (`Daily_Scans` 30 kolom & `Data Training`). |
+| [daily-scan.yml](file:///.github/workflows/daily-scan.yml) | **07:17 & 19:17 WIB** (2x Sehari) | `17 0,12 * * *` | `walt-daily-scan` | Master Scan 31 aset diizinkan (Saham US hanya di jam reguler AS `13:30–21:00 UTC`) + pemindaian **Crypto Engine 2 (`CRYPTO_FORECAST_ENGINE=on`)**, pengayaan OAK Research MCP, Swarm AI (`GLM-5.3` CRO), eksekusi GO/HALF, simpan 5 tab Google Sheets (`Daily_Scans` 30 kolom & `Data Training`). |
 | [risk-monitor.yml](file:///.github/workflows/risk-monitor.yml) | **Dinamis 5–10 Menit** (6x–12x/Jam + Smart Idle) | `*/10 * * * *` | `walt-risk-monitor` | Evaluasi risiko adaptif 24/7 (True Zero-Risk Trailing & Asymmetric R:R). Fast-exit <2 detik saat 0 posisi; otomatis mempercepat ke **tiap ~5 menit (12x/jam)** jika $\ge 3$ posisi aktif, kategori `HALF`, atau dekat TP ($\ge +0.70\%$) / SL ($\le -1.00\%$); dan stabil **10 menit** untuk posisi `GO` tenang. |
 | [market-execute.yml](file:///.github/workflows/market-execute.yml) | **4-Tier Gear 0–3** (Dinamis) | `43 */2 * * *` | `walt-market-execute` | Eksekusi Saham US (`13:30–21:00 UTC`) & Komoditas (24/7) dengan **4-Tier Execution Gear**: **Gear 0 (`0` GO)** = maks 2x selama jam bursa AS (`225m`); **Gear 1 (`< 2` GO)** = `120m` (2 jam); **Gear 2 (`2..5` GO)** = `60m` (1 jam); **Gear 3 (`> 5` GO / `GEAR_3_FULL_RESEARCH=true`)** = `60m` + izin riset AI penuh untuk setiap keputusan trading. |
 | [crypto-execute.yml](file:///.github/workflows/crypto-execute.yml) | **4-Tier Gear 0–3** (Dinamis) | `11 */2 * * *` | `walt-crypto-execute` | Eksekusi mandiri Crypto Bluechip (10 Tier-1, 24/7) memakai **Engine 1 Funding Carry** + **Engine 2 Price Forecast Mean-Reversion Fade** (`CRYPTO_FORECAST_ENGINE=on`: `V4_1H_EXTREME_FADE` & `V5_4H_REJ_COMFORT`) dengan **4-Tier Execution Gear** (`Gear 0` `720m` / 2x sehari; `Gear 1` `120m`; `Gear 2` `60m`; `Gear 3` `60m` Full AI Research) + *3-hour re-entry cooldown*. |
@@ -383,12 +383,9 @@ Sistem beroperasi dengan arsitektur hibrida: cron internal GitHub Actions diduku
 - [PRD.md](file:///PRD.md) — Dokumen spesifikasi kebutuhan produk untuk Roadmap Evolusi SaaS Fase 1 & Fase 2.
 - [AUDIT.md](file:///AUDIT.md) — Log audit independen dan rekam jejak verifikasi teknis Ronde 2–9+.
 
-## 10. USULAN strategi berbasis struktur likuiditas (Ronde 8) - **BELUM AKTIF**
+## 10. Arsip Usulan Struktur Likuiditas 1D (Ronde 8) — **DIADOPSI OLEH ENGINE 2 (4H/1H, §6.2)**
 
-Status: **usulan**. Tidak ada satu pun parameter di `strategy_config.py` yang diubah untuk
-ini. Angka-angkanya berasal dari `tools/gravity_strategy.py` (in-sample, 20 koin perps,
-750 bar harian, resolusi intrabar konservatif, satu posisi per aset) dan detailnya ada di
-`AUDIT.md` 3l-3m.
+Status: **diadopsi & digantikan (*superseded*) oleh §6.2 Crypto Engine 2 per keputusan Owner (Opsi A, 2026-11-23)**. Prinsip inti usulan ini (`market_gravity Rejected -> Fade` + `Comfort Point`) tetap dipakai, namun diturunkan ke timeframe **`4h`/`1h`** khusus **10 Crypto Tier-1** agar Stop Loss jauh lebih aman (`<= 4,5%` ATR dibanding rata-rata `10,87%` pada `1d`) dan terintegrasi paralel dengan Engine 1 (*Funding Carry*). Varian `1d` di bawah disimpan sebagai arsip historis audit `tools/gravity_strategy.py` (`AUDIT.md` 3l-3m) dan tidak diaktifkan terpisah.
 
 ### 10.1 Aturan yang diusulkan
 
@@ -440,11 +437,7 @@ ini. Angka-angkanya berasal dari `tools/gravity_strategy.py` (in-sample, 20 koin
   mean-reversion, tetapi TP aturan ini diambil dari jarak stop, bukan dari Comfort Point,
   karena pada pengukuran di atas target Comfort Point terlalu dekat untuk membayar biaya.
 
-### 10.4 Kriteria promosi (biarkan angka yang memutuskan, bukan narasi)
+### 10.4 Keputusan Promosi (Opsi A — Diselesaikan 2026-11-23)
 
-Walk-forward sudah lolos (10.2 butir 2). Yang tersisa sebelum aturan ini boleh menembus
-jalur entry: (a) biaya round-trip nyata terukur di Walt untuk clip kita, (b) kualitas fill
-Walt diuji pada beberapa sinyal pertama dengan `DRY_RUN=true`, dan (c) keputusan pemilik
-tentang hubungan aturan ini dengan E5 - diganti perannya, dijalankan paralel sebagai
-jalur kedua, atau ditolak. Tanpa ketiganya, `strategy_config` tetap tidak disentuh.
+Pemilik memilih **Opsi A**: konsep struktur likuiditas (`Rejected -> Fade` ke arah `Comfort Point`) resmi diadopsi melalui **Crypto Engine 2 (`V5_4H_REJ_COMFORT` 4H + `V4_1H_EXTREME_FADE` 1H)** pada **§6.2** dengan batas risiko `SL ATR <= 4,5%`, Time-Stop `24h`/`72h`, dan filter *adverse funding* `<= 0,30%/hari`. Varian `1d` (SL rata-rata `10,87%`) tetap diarsipkan dan tidak diaktifkan terpisah di `strategy_config.py`.
 

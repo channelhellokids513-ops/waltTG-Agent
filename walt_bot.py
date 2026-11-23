@@ -4017,6 +4017,56 @@ def risk_monitor_run(
 # DAILY SCAN — rekomendasi + income tracker
 # =============================================================================
 
+def _scan_crypto_engine2_opportunities(
+    contracts: list[dict],
+    target_universe: set[str],
+    exclude_assets: set[str],
+    *,
+    log_label: str = "ENGINE 2 CRYPTO",
+) -> list[Opportunity]:
+    """Pindai kandidat Engine 2 Crypto (V5 4h + V4 1h) jika toggle CRYPTO_FORECAST_ENGINE aktif."""
+    if not is_crypto_forecast_engine_enabled():
+        return []
+    fc_opps_out: list[Opportunity] = []
+    try:
+        import price_forecast
+
+        fc_raw = price_forecast.scan_crypto_price_opportunities(
+            contracts,
+            allowed_assets=target_universe,
+            exclude_assets=exclude_assets,
+            min_vol_24h=MIN_VOL_24H,
+        )
+        for fc in fc_raw:
+            fc_opps_out.append(Opportunity(
+                contract_id=int(fc["contract_id"]),
+                base_asset=str(fc["asset"]),
+                funding_daily=float(fc.get("funding_daily") or 0.0),
+                volume_24h=float(fc.get("volume_24h") or MIN_VOL_24H),
+                max_leverage=int(fc.get("max_leverage") or MAX_LEVERAGE),
+                side=fc["side"],
+                min_size_base=float(fc.get("min_size_base") or 0.0),
+                max_size_base=float(fc.get("max_size_base") or 0.0),
+                max_size_quote=float(fc.get("max_size_quote") or 0.0),
+                price_slippage=float(fc.get("price_slippage") or 0.0),
+                signal_source="price_forecast",
+                forecast_setup=str(fc.get("setup") or ""),
+                planned_sl_pct=float(fc["sl_pct"]),
+                planned_tp_pct=float(fc["tp_pct"]),
+                max_hold_hours=float(fc["max_hold_hours"]),
+                expected_net_edge_pct=float(fc["expected_net_edge_pct"]),
+                forecast_reason=str(fc.get("reason") or ""),
+            ))
+        if fc_raw:
+            log.info(
+                f"📈 [{log_label}] Menambahkan {len(fc_raw)} kandidat fade OOS: "
+                + ", ".join(f"{x['asset']}({x['setup']}/{x['side']})" for x in fc_raw)
+            )
+    except Exception as exc:
+        log.warning(f"Engine 2 Crypto scan dilewati: {exc}")
+    return fc_opps_out
+
+
 def daily_scan(client: WaltClient) -> dict:
     """Scan harian — return summary untuk Calendar event / push notif."""
     readiness = client.readiness()
@@ -4027,13 +4077,28 @@ def daily_scan(client: WaltClient) -> dict:
     opps = rank_opportunities(contracts["contracts"])
     market_opps = rank_opportunities(contracts["contracts"], allowed_assets=(ALLOWED_STOCKS | ALLOWED_COMMODITIES))
     crypto_opps = rank_opportunities(contracts["contracts"], allowed_assets=ALLOWED_CRYPTO)
+    fc_crypto_opps = _scan_crypto_engine2_opportunities(
+        contracts["contracts"],
+        ALLOWED_CRYPTO,
+        exclude_assets={o.base_asset for o in opps},
+        log_label="DAILY_SCAN ENGINE 2",
+    )
+    if fc_crypto_opps:
+        opps.extend(fc_crypto_opps)
+        crypto_opps.extend(fc_crypto_opps)
     m_gear, m_int, m_reason = _update_regime_state("market", market_opps, mark_executed=False)
     c_gear, c_int, c_reason = _update_regime_state("crypto", crypto_opps, mark_executed=False)
     log.info(f"⚙️ [EXECUTION GEAR] Market: {m_gear} ({m_int}m) | Crypto: {c_gear} ({c_int}m)")
 
     total_equity = get_total_equity(balance, positions)
     scan_limit = max(5, get_dynamic_max_slots(total_equity))
-    top_candidates = opps[:scan_limit]
+    top_candidates = list(opps[:scan_limit])
+    if fc_crypto_opps:
+        seen_top = {o.base_asset for o in top_candidates}
+        for fc_opp in fc_crypto_opps:
+            if fc_opp.base_asset not in seen_top:
+                top_candidates.append(fc_opp)
+                seen_top.add(fc_opp.base_asset)
 
     # Fetch live price untuk top candidates (agregasi kegagalan per-kandidat menjadi 1 ringkasan)
     rate_failures: list[str] = []
@@ -4078,9 +4143,17 @@ def daily_scan(client: WaltClient) -> dict:
                 "contract_id": o.contract_id,
                 "asset": o.base_asset,
                 "side": o.side,
+                "funding_daily": o.funding_daily,
                 "funding_daily_pct": o.funding_daily * 100,
                 "price": getattr(o, "live_price", 0),
                 "min_margin_2x": o.min_margin_2x,
+                "signal_source": getattr(o, "signal_source", "funding"),
+                "forecast_setup": getattr(o, "forecast_setup", ""),
+                "planned_sl_pct": getattr(o, "planned_sl_pct", 0.0),
+                "planned_tp_pct": getattr(o, "planned_tp_pct", 0.0),
+                "max_hold_hours": getattr(o, "max_hold_hours", 0.0),
+                "expected_net_edge_pct": getattr(o, "expected_net_edge_pct", 0.0),
+                "forecast_reason": getattr(o, "forecast_reason", ""),
             }
             for o in top_candidates
         ],
@@ -4133,7 +4206,13 @@ def format_summary_telegram(
 
     # Top opportunities + research + execution
     lines.append(f"\n*🎯 Top Peluang & Prosedur Eksekusi*")
-    for i, opp in enumerate(summary["top_opportunities"][:5], 1):
+    top_opps_tg = list(summary["top_opportunities"][:5])
+    seen_tg = {o["asset"] for o in top_opps_tg}
+    for o in summary["top_opportunities"][5:]:
+        if o.get("signal_source") == "price_forecast" and o["asset"] not in seen_tg and len(top_opps_tg) < 8:
+            top_opps_tg.append(o)
+            seen_tg.add(o["asset"])
+    for i, opp in enumerate(top_opps_tg, 1):
         asset = opp["asset"]
         side = opp["side"].upper()
         funding = opp["funding_daily_pct"]
@@ -4143,8 +4222,16 @@ def format_summary_telegram(
         # Decision
         from types import SimpleNamespace
         pseudo_opp = SimpleNamespace(
-            base_asset=asset, side=opp["side"],
+            base_asset=asset,
+            side=opp["side"],
             funding_daily=funding / 100,
+            signal_source=opp.get("signal_source", "funding"),
+            forecast_setup=opp.get("forecast_setup", ""),
+            expected_net_edge_pct=float(opp.get("expected_net_edge_pct") or 0.0),
+            forecast_reason=opp.get("forecast_reason", ""),
+            planned_sl_pct=float(opp.get("planned_sl_pct") or 0.0),
+            planned_tp_pct=float(opp.get("planned_tp_pct") or 0.0),
+            max_hold_hours=float(opp.get("max_hold_hours") or 0.0),
         )
         verdict, reason, mult = decide_go_nogo(pseudo_opp, research)  # type: ignore
 
@@ -4162,7 +4249,13 @@ def format_summary_telegram(
             badge = {"GO": "✅ GO", "HALF": "⚠️ HALF", "SKIP": "❌ SKIP"}.get(verdict, "❓")
 
         lines.append(f"\n{i}. *{badge}* • *{side} {asset}* @ `${price:.4f}`")
-        lines.append(f"   Funding: `{funding:+.3f}%/hari`")
+        if opp.get("signal_source") == "price_forecast":
+            lines.append(
+                f"   Engine 2: `{opp.get('forecast_setup', 'FADE')}` "
+                f"(net `{float(opp.get('expected_net_edge_pct') or 0.0)*100:+.2f}%`) | Funding: `{funding:+.3f}%/hari`"
+            )
+        else:
+            lines.append(f"   Funding: `{funding:+.3f}%/hari`")
         if ex and ex.get("verdict") == "EXECUTED":
             order_id = ex.get("order_id")
             order_str = f" | Order: `{order_id[:8]}...`" if order_id else ""
@@ -4248,7 +4341,8 @@ def scan_with_research(
 
     active_top_opps = [
         o for o in summary["top_opportunities"]
-        if abs(float(o.get("funding_daily", 0.0) or 0.0)) >= MIN_FUNDING_DAILY
+        if abs(float(o.get("funding_daily", float(o.get("funding_daily_pct", 0.0) or 0.0) / 100.0) or 0.0)) >= MIN_FUNDING_DAILY
+        or o.get("signal_source") == "price_forecast"
     ]
     opp_count = len(active_top_opps)
     scan_gear, _, scan_gear_reason = evaluate_execution_gear(
@@ -4286,16 +4380,21 @@ def scan_with_research(
 
     for opp in summary["top_opportunities"]:
         asset = opp["asset"]
-        # Gear 3: setiap kandidat keputusan trading boleh diteliti AI; selain itu saham + top-N crypto.
-        worth_calling = full_research_gear3 or asset in ALLOWED_STOCKS or asset in crypto_research
+        # Gear 3: setiap kandidat keputusan trading boleh diteliti AI; selain itu saham + top-N crypto + Engine 2.
+        worth_calling = (
+            full_research_gear3
+            or asset in ALLOWED_STOCKS
+            or asset in crypto_research
+            or opp.get("signal_source") == "price_forecast"
+        )
         if asset in RESEARCH_ELIGIBLE and worth_calling and (qwen or gemini):
             try:
                 researches[asset] = research_stock(
                     asset,
                     qwen=qwen,
                     gemini=gemini,
-                    funding_daily=opp.get("funding_daily"),
-                    recommended_side=opp.get("recommended_side"),
+                    funding_daily=opp.get("funding_daily", float(opp.get("funding_daily_pct", 0.0) or 0.0) / 100.0),
+                    recommended_side=opp.get("recommended_side") or opp.get("side"),
                     opportunity_count=opp_count,
                     is_idle=scan_is_idle,
                 )
@@ -4409,17 +4508,29 @@ def scan_with_research(
                     })
                     continue
 
-                econ_ok, _exp_fr, _cost, econ_note = check_funding_vs_fee_gate(
-                    opp.funding_daily, effective_price_slippage(opp.price_slippage))
-                if not econ_ok:
-                    skip_msg = f"gerbang ekonomi funding vs fee gagal ({econ_note})"
-                    log.info(f"  SKIP {asset}: {skip_msg}")
-                    executions.append({
-                        "asset": asset, "side": opp.side, "leverage": MAX_LEVERAGE, "verdict": "SKIP",
-                        "reason": skip_msg,
-                    })
-                    continue
-                reason = f"{reason} | {econ_note}"
+                if getattr(opp, "signal_source", "funding") == "price_forecast":
+                    net_edge_fc = float(getattr(opp, "expected_net_edge_pct", 0.0) or 0.0)
+                    if net_edge_fc < 0.0015:
+                        skip_msg = f"gerbang ekonomi Engine 2 gagal (net_edge={net_edge_fc*100:+.2f}% < +0.15%)"
+                        log.info(f"  SKIP {asset}: {skip_msg}")
+                        executions.append({
+                            "asset": asset, "side": opp.side, "leverage": MAX_LEVERAGE, "verdict": "SKIP",
+                            "reason": skip_msg,
+                        })
+                        continue
+                    reason = f"{reason} | {opp.forecast_setup} net_edge={net_edge_fc*100:+.2f}%"
+                else:
+                    econ_ok, _exp_fr, _cost, econ_note = check_funding_vs_fee_gate(
+                        opp.funding_daily, effective_price_slippage(opp.price_slippage))
+                    if not econ_ok:
+                        skip_msg = f"gerbang ekonomi funding vs fee gagal ({econ_note})"
+                        log.info(f"  SKIP {asset}: {skip_msg}")
+                        executions.append({
+                            "asset": asset, "side": opp.side, "leverage": MAX_LEVERAGE, "verdict": "SKIP",
+                            "reason": skip_msg,
+                        })
+                        continue
+                    reason = f"{reason} | {econ_note}"
 
                 margin = calculate_dynamic_margin(
                     available_balance=available,
@@ -4516,6 +4627,8 @@ def scan_with_research(
                         _record_open_position_verdict(
                             opp.contract_id, asset, opp.side, verdict, actual_margin, order_price
                         )
+                        if getattr(opp, "signal_source", "funding") == "price_forecast":
+                            _record_forecast_position_meta(opp.contract_id, opp)
                         record_entry_execution(asset)
                         deployed += actual_margin
                         existing_contracts.add(opp.contract_id)
@@ -4573,7 +4686,18 @@ def scan_with_research(
             if not res_obj:
                 continue
             funding_dec = float(opp.get("funding_daily", opp.get("funding_daily_pct", 0.0) / 100.0))
-            pseudo = SimpleNamespace(base_asset=asset, side=opp["side"], funding_daily=funding_dec)
+            pseudo = SimpleNamespace(
+                base_asset=asset,
+                side=opp["side"],
+                funding_daily=funding_dec,
+                signal_source=opp.get("signal_source", "funding"),
+                forecast_setup=opp.get("forecast_setup", ""),
+                expected_net_edge_pct=float(opp.get("expected_net_edge_pct") or 0.0),
+                forecast_reason=opp.get("forecast_reason", ""),
+                planned_sl_pct=float(opp.get("planned_sl_pct") or 0.0),
+                planned_tp_pct=float(opp.get("planned_tp_pct") or 0.0),
+                max_hold_hours=float(opp.get("max_hold_hours") or 0.0),
+            )
             v_str, r_str, _ = decide_go_nogo(pseudo, res_obj)
             sample = build_training_sample(
                 timestamp_utc=ts_scan,
@@ -4651,43 +4775,15 @@ def market_execute(
     category_key: Literal["market", "crypto"] = "crypto" if target_universe == ALLOWED_CRYPTO else "market"
 
     # Engine 2 (khusus Crypto 24/7): pindai sinyal OOS V5 4h + V4 1h ketika funding < 0.50%/hari
-    if category_key == "crypto" and is_crypto_forecast_engine_enabled():
-        try:
-            import price_forecast
-
-            fc_opps = price_forecast.scan_crypto_price_opportunities(
-                contracts_data["contracts"],
-                allowed_assets=target_universe,
-                exclude_assets={o.base_asset for o in opps},
-                min_vol_24h=MIN_VOL_24H,
-            )
-            for fc in fc_opps:
-                opps.append(Opportunity(
-                    contract_id=int(fc["contract_id"]),
-                    base_asset=str(fc["asset"]),
-                    funding_daily=float(fc.get("funding_daily") or 0.0),
-                    volume_24h=float(fc.get("volume_24h") or MIN_VOL_24H),
-                    max_leverage=int(fc.get("max_leverage") or MAX_LEVERAGE),
-                    side=fc["side"],
-                    min_size_base=float(fc.get("min_size_base") or 0.0),
-                    max_size_base=float(fc.get("max_size_base") or 0.0),
-                    max_size_quote=float(fc.get("max_size_quote") or 0.0),
-                    price_slippage=float(fc.get("price_slippage") or 0.0),
-                    signal_source="price_forecast",
-                    forecast_setup=str(fc.get("setup") or ""),
-                    planned_sl_pct=float(fc["sl_pct"]),
-                    planned_tp_pct=float(fc["tp_pct"]),
-                    max_hold_hours=float(fc["max_hold_hours"]),
-                    expected_net_edge_pct=float(fc["expected_net_edge_pct"]),
-                    forecast_reason=str(fc.get("reason") or ""),
-                ))
-            if fc_opps:
-                log.info(
-                    f"📈 [ENGINE 2 CRYPTO] Menambahkan {len(fc_opps)} kandidat fade OOS: "
-                    + ", ".join(f"{x['asset']}({x['setup']}/{x['side']})" for x in fc_opps)
-                )
-        except Exception as exc:
-            log.warning(f"Engine 2 Crypto scan dilewati: {exc}")
+    if category_key == "crypto":
+        fc_opps = _scan_crypto_engine2_opportunities(
+            contracts_data["contracts"],
+            target_universe,
+            exclude_assets={o.base_asset for o in opps},
+            log_label="ENGINE 2 CRYPTO",
+        )
+        if fc_opps:
+            opps.extend(fc_opps)
 
     gear_label, gear_interval_min, gear_reason = _update_regime_state(
         category_key, opps, mark_executed=True
