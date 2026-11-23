@@ -50,6 +50,8 @@ _NON_CRYPTO_META_HINTS: tuple[str, ...] = (
 
 FORECAST_MAX_SCAN_ASSETS = 50
 FORECAST_MAX_SIGNALS = 5
+STOCK_FORECAST_MAX_ADVERSE_FUNDING_DAILY = 0.0015  # 0.15%/hari batas adverse funding masuk Saham AS
+STOCK_FORECAST_MAX_SIGNALS = 3
 
 DEFAULT_ROUND_TRIP_COST_PCT = 0.0028  # 0.18% round-trip taker + 0.10% floor slippage terukur
 DEFAULT_MIN_NET_EDGE_PCT = 0.0080     # +0.80% minimal net expected edge 24h
@@ -739,25 +741,52 @@ def scan_crypto_price_opportunities(
         )
         if sig is None:
             return None
+        return _attach_contract_metadata(sig, c, fr_daily=fr_daily, vol=vol, slip=slip)
 
-        sig.update({
-            "contract_id": c["contract_id"],
-            "funding_daily": fr_daily,
-            "volume_24h": vol,
-            "max_leverage": int(c.get("max_leverage") or 2),
-            "min_size_base": float(c.get("min_size_base") or 0.0),
-            "max_size_base": float(c.get("max_size_base") or 0.0),
-            "max_size_quote": float(c.get("max_size_quote") or 0.0),
-            "price_slippage": slip,
-        })
-        return sig
+    return _execute_forecast_scan(
+        ordered,
+        _eval_candidate,
+        use_pool=(fetcher is None),
+        max_scan_seconds=max_scan_seconds,
+        max_signals=max_signals,
+    )
 
+
+def _attach_contract_metadata(
+    sig: dict[str, Any],
+    contract: Mapping[str, Any],
+    *,
+    fr_daily: float,
+    vol: float,
+    slip: float,
+) -> dict[str, Any]:
+    sig.update({
+        "contract_id": contract["contract_id"],
+        "funding_daily": fr_daily,
+        "volume_24h": vol,
+        "max_leverage": int(contract.get("max_leverage") or 2),
+        "min_size_base": float(contract.get("min_size_base") or 0.0),
+        "max_size_base": float(contract.get("max_size_base") or 0.0),
+        "max_size_quote": float(contract.get("max_size_quote") or 0.0),
+        "price_slippage": slip,
+    })
+    return sig
+
+
+def _execute_forecast_scan(
+    ordered: Sequence[Any],
+    eval_fn: Any,
+    *,
+    use_pool: bool,
+    max_scan_seconds: float,
+    max_signals: int,
+) -> list[dict[str, Any]]:
     found: list[dict[str, Any]] = []
-    if fetcher is None and len(ordered) > 1:
+    if use_pool and len(ordered) > 1:
         deadline = time.monotonic() + max(1.0, float(max_scan_seconds))
         pool = ThreadPoolExecutor(max_workers=6)
         try:
-            futures = {pool.submit(_eval_candidate, item): item[1] for item in ordered}
+            futures = {pool.submit(eval_fn, item): item[1] for item in ordered}
             for fut in as_completed(futures, timeout=max(1.0, deadline - time.monotonic())):
                 try:
                     res = fut.result(timeout=max(0.1, deadline - time.monotonic()))
@@ -771,7 +800,7 @@ def scan_crypto_price_opportunities(
             pool.shutdown(wait=False, cancel_futures=True)
     else:
         for item in ordered:
-            res = _eval_candidate(item)
+            res = eval_fn(item)
             if res is not None:
                 found.append(res)
 
@@ -779,3 +808,166 @@ def scan_crypto_price_opportunities(
     if max_signals > 0:
         return found[: int(max_signals)]
     return found
+
+
+def evaluate_stock_live_dip_signal(
+    asset: str,
+    candles_1h: Optional[Sequence[Mapping[str, Any]]] = None,
+    candles_1d: Optional[Sequence[Mapping[str, Any]]] = None,
+    *,
+    funding_daily: float = 0.0,
+    round_trip_cost_pct: float = DEFAULT_ROUND_TRIP_COST_PCT,
+) -> Optional[dict[str, Any]]:
+    """Evaluasi sinyal Engine 2 teruji OOS khusus Saham AS (**LONG-ONLY Dip-Buy**):
+    1) `S1_1H_LONG_DIP`: 1h (`z <= -1.8` & `RSI <= 32`, hold maks `48h`, 4/4 fold positif).
+    2) `S2_1D_LONG_DIP`: 1d (`z <= -1.8` & `RSI <= 32`, hold maks `120h`).
+    Tidak pernah mengeluarkan `short` karena uji OOS membuktikan SHORT fade saham AS negatif.
+    """
+    sym = str(asset or "").strip().upper()
+    candidate: Optional[dict[str, Any]] = None
+
+    # Prioritas 1: S1_1H_LONG_DIP (OOS 1h 456 bar: 29 trade, 58.6% win, +0.677% gross, PF 1.57, 4/4 fold+)
+    if candles_1h and len(candles_1h) >= 80:
+        d1 = compute_price_delta_24h(sym, candles_1h, interval="1h", asset_class="stock")
+        if d1 is not None and d1.z_move_24h <= -1.8 and d1.rsi_14 <= 32.0:
+            sl_pct = round(_clamp(1.0 * d1.atr_24h_pct, 0.015, FORECAST_SL_CAP_PCT), 4)
+            tp_pct = round(max(0.020, 1.3 * sl_pct), 4)
+            candidate = {
+                "asset": sym,
+                "side": "long",
+                "setup": "S1_1H_LONG_DIP",
+                "sl_pct": sl_pct,
+                "tp_pct": tp_pct,
+                "max_hold_hours": 48.0,
+                "expected_gross_pct": 0.0068,
+                "z_move_24h": round(d1.z_move_24h, 3),
+                "rsi_14": round(d1.rsi_14, 2),
+                "reason": (
+                    f"S1 1h Stock Dip LONG (z={d1.z_move_24h:+.2f}, RSI={d1.rsi_14:.1f}, "
+                    f"SL={sl_pct*100:.2f}%, TP={tp_pct*100:.2f}%, hold=48h)"
+                ),
+            }
+
+    # Prioritas 2: S2_1D_LONG_DIP (OOS 1d 501 bar: 24 trade, 50.0% win, +0.817% gross, PF 1.55)
+    if candidate is None and candles_1d and len(candles_1d) >= 80:
+        d_day = compute_price_delta_24h(sym, candles_1d, interval="1d", asset_class="stock")
+        if d_day is not None and d_day.z_move_24h <= -1.8 and d_day.rsi_14 <= 32.0:
+            sl_pct = round(_clamp(1.0 * d_day.atr_24h_pct, 0.015, FORECAST_SL_CAP_PCT), 4)
+            tp_pct = round(max(0.020, 1.3 * sl_pct), 4)
+            candidate = {
+                "asset": sym,
+                "side": "long",
+                "setup": "S2_1D_LONG_DIP",
+                "sl_pct": sl_pct,
+                "tp_pct": tp_pct,
+                "max_hold_hours": 120.0,
+                "expected_gross_pct": 0.0082,
+                "z_move_24h": round(d_day.z_move_24h, 3),
+                "rsi_14": round(d_day.rsi_14, 2),
+                "reason": (
+                    f"S2 1d Stock Dip LONG (z={d_day.z_move_24h:+.2f}, RSI={d_day.rsi_14:.1f}, "
+                    f"SL={sl_pct*100:.2f}%, TP={tp_pct*100:.2f}%, hold=120h)"
+                ),
+            }
+
+    if candidate is None:
+        return None
+
+    # Posisi selalu LONG: biaya inap (adverse funding) muncul jika funding_daily > 0
+    favorable_funding = -float(funding_daily or 0.0)
+    adverse_funding = max(0.0, -favorable_funding)
+    if adverse_funding > STOCK_FORECAST_MAX_ADVERSE_FUNDING_DAILY:
+        return None
+
+    expected_net = round(candidate["expected_gross_pct"] - float(round_trip_cost_pct) - adverse_funding, 6)
+    if expected_net <= 0.0:
+        return None
+
+    candidate["adverse_funding_daily"] = round(adverse_funding, 6)
+    candidate["expected_net_edge_pct"] = expected_net
+    return candidate
+
+
+def scan_stock_price_opportunities(
+    contracts: Sequence[Mapping[str, Any]],
+    *,
+    allowed_assets: set[str] | frozenset[str],
+    exclude_assets: Optional[set[str]] = None,
+    min_vol_24h: float = 1_000_000.0,
+    max_signals: int = STOCK_FORECAST_MAX_SIGNALS,
+    max_scan_seconds: float = 35.0,
+    fetcher: Optional[Any] = None,
+) -> list[dict[str, Any]]:
+    """Pindai kontrak Saham AS (`ALLOWED_STOCKS`) yang tidak lolos Engine 1 memakai LONG-ONLY Dip-Buy."""
+    from market_chart import _fetch_yahoo_candles
+
+    target = {str(a).strip().upper() for a in allowed_assets}
+    excluded = {str(a).strip().upper() for a in (exclude_assets or set())}
+    candidates_by_asset: dict[str, tuple[float, float, float, Mapping[str, Any]]] = {}
+
+    for c in contracts:
+        asset = str(c.get("base_asset") or "").strip().upper()
+        if not asset or asset not in target or asset in excluded:
+            continue
+        try:
+            vol = float(c.get("volume_24h_usd") or 0.0)
+        except (TypeError, ValueError):
+            vol = 0.0
+        if vol < min_vol_24h:
+            continue
+        try:
+            fr_daily = float(c.get("funding_rate_hourly") or 0.0) * 24.0
+        except (TypeError, ValueError):
+            fr_daily = 0.0
+        try:
+            slip = float(c.get("price_slippage") or 0.0)
+        except (TypeError, ValueError):
+            slip = 0.0
+        prev = candidates_by_asset.get(asset)
+        if prev is None or vol > prev[0]:
+            candidates_by_asset[asset] = (vol, fr_daily, slip, c)
+
+    ordered = sorted(
+        ((vol, asset, fr_daily, slip, c) for asset, (vol, fr_daily, slip, c) in candidates_by_asset.items()),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+
+    def _eval_stock(item: tuple[float, str, float, float, Mapping[str, Any]]) -> Optional[dict[str, Any]]:
+        vol, asset, fr_daily, slip, c = item
+        rt_cost = max(DEFAULT_ROUND_TRIP_COST_PCT, 0.0018 + min(max(0.0, slip), 0.0020))
+        try:
+            candles_1h = (
+                fetcher(asset, "1h", 400) if fetcher is not None else _fetch_yahoo_candles(asset, "1h", 400)
+            )
+            if isinstance(candles_1h, tuple):
+                candles_1h = candles_1h[0]
+        except Exception:
+            candles_1h = []
+        try:
+            candles_1d = (
+                fetcher(asset, "1d", 300) if fetcher is not None else _fetch_yahoo_candles(asset, "1d", 300)
+            )
+            if isinstance(candles_1d, tuple):
+                candles_1d = candles_1d[0]
+        except Exception:
+            candles_1d = []
+
+        sig = evaluate_stock_live_dip_signal(
+            asset,
+            candles_1h,
+            candles_1d,
+            funding_daily=fr_daily,
+            round_trip_cost_pct=rt_cost,
+        )
+        if sig is None:
+            return None
+        return _attach_contract_metadata(sig, c, fr_daily=fr_daily, vol=vol, slip=slip)
+
+    return _execute_forecast_scan(
+        ordered,
+        _eval_stock,
+        use_pool=(fetcher is None),
+        max_scan_seconds=max_scan_seconds,
+        max_signals=max_signals,
+    )

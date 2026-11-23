@@ -263,6 +263,48 @@ Selain Engine 1 (*Funding Carry*, ambang `MIN_FUNDING_DAILY = 0.50%/hari`, tetap
   - Setup `MOMENTUM_BREAKOUT` (1h) dan `STOCK` (1h) terbukti negatif OOS sehingga **tidak** diaktifkan.
 - **Filter Carry Masuk & Keluar:** Sinyal Engine 2 hanya lolos jika *adverse funding* `<= 0.30%/hari` (`FORECAST_MAX_ADVERSE_FUNDING_DAILY`). Saat posisi Engine 2 aktif (`logs/market_regime.json`), `risk-monitor` tetap menerapkan **Lapis 4 Trailing/Profit Lock**, namun mengganti batas pengaman dengan **Time-Stop (`24h`/`72h`)**, **ATR Stop Loss adaptif (`<= 4.5%` / `FORECAST_SL_CAP_PCT`)**, dan **penutupan paksa bila *adverse funding* `>= 0.30%/hari`** (`FORECAST_ADVERSE_FUNDING_CLOSE_THRESHOLD`). Engine 1 (*Funding Carry*) beserta Saham AS & Komoditas tetap terisolasi tanpa perubahan.
 
+### 6.3 Engine 2 Saham AS: LONG-ONLY Dip-Buy (`STOCK_FORECAST_ENGINE=on`)
+
+Berbeda dari Crypto, saham AS memiliki bias tren jangka panjang naik (*structural equity drift*), sehingga *SHORT fade* melawan reli sering tergilas oleh kelanjutan tren. Pengujian *walk-forward out-of-sample* (4 fold kronologis, 16 saham `ALLOWED_STOCKS`, data intraday `1h` 456 bar / ~3 bulan dan harian `1d` 501 bar / ~2 tahun, cek SL sebelum TP) membuktikan hal ini secara numerik:
+
+- **Mengapa Varian 2-Arah (`V5` & `V4 SHORT`) Ditolak untuk Saham AS:**
+  - `V5_REJ_COMFORT` negatif bersih di kedua *timeframe* (`1h`: `37` trade, win `43.2%`, gross `-0.795%`, net biaya `0.28%` `-1.075%`, PF `0.58`; `1d`: `131` trade, win `45.0%`, gross `-0.229%`, net biaya `0.28%` `-0.509%`, PF `0.87`).
+  - `V4_CRYPTO_z2.2_r78` juga rugi (`1h`: `-0.977%` net `0.28%`; `1d`: `-2.312%` net `0.28%`, didominasi kaki SHORT yang rata-rata `-2.83%`).
+- **Setup Saham AS yang Lolos OOS & Diaktifkan (`LONG-ONLY Dip-Buy`):**
+  - **Prioritas 1 — `S1_1H_LONG_DIP` (`1h`, `z_move_24h <= -1.8` & `RSI(14) <= 32`, Hold Maks `48h`):** `29` trade OOS, win `58.6%`, gross `+0.677%`, net (biaya `0.28%`) `+0.397%`, net (biaya `0.45%`) `+0.227%`, PF `1.57`, **positif di 4/4 fold** (mengalahkan `NULL_LONG_DIP` `-0.894%` / PF `0.54` / `1/4` fold).
+  - **Prioritas 2 — `S2_1D_LONG_DIP` (`1d`, `z_move_24h <= -1.8` & `RSI(14) <= 32`, Hold Maks `120h`):** `24` trade OOS, win `50.0%`, gross `+0.817%`, net (biaya `0.28%`) `+0.537%`, net (biaya `0.45%`) `+0.367%`, PF `1.55`, `2/4` fold vs `NULL_LONG_DIP` `-1.233%` (PF `0.48`).
+- **Aturan Eksekusi & Manajemen Risiko Khusus Engine 2 Saham AS:**
+  - **Arah Terkunci `LONG`:** `evaluate_stock_live_dip_signal()` dan `decide_go_nogo()` menolak setiap sinyal `SHORT` pada jalur Engine 2 Saham AS.
+  - **Jendela Buka Bursa:** Pemindaian & entry hanya berjalan saat jam reguler bursa AS (`Sen–Jum 13:30–21:00 UTC`).
+  - **SL/TP Adaptif ATR:** SL `clamp(1.0 * atr_24h_pct, 1.5%, 4.5%)` dan TP `max(2.0%, 1.3 * SL)`.
+  - **Batas Biaya Inap & Kebijakan Overnight/Weekend:** Maksimal *adverse funding* saat entry **`<= 0.15%/hari`**, tutup paksa di `risk-monitor` bila biaya inap membengkak **`>= 0.25%/hari`**. Saat *overnight* (`Sen–Kam 20:35–13:30 UTC`), posisi diizinkan bertahan 1–2 hari (dalam batas Time-Stop `48h`/`120h`) dengan *Early Lock SL* `+0.25%` saat profit `>= +0.40%`; menjelang akhir pekan (*weekend* `Jum 20:35 UTC`), posisi belum *profit-locked* **wajib ditutup** menghindari gap 64,5 jam.
+  - **Komoditas (`XAU`, `XAG`, `BRENTOIL`):** Tetap eksklusif di Engine 1 (tidak diaktifkan di Engine 2 karena belum ada bukti walk-forward positif).
+
+### 6.4 Perbandingan Lengkap Engine 1 vs Engine 2 & Prasyarat Aktivasi
+
+| Aspek | Engine 1 (*Funding Carry*) | Engine 2 Crypto (*Mean-Reversion Fade*) | Engine 2 Saham AS (*LONG-ONLY Dip-Buy*) |
+|---|---|---|---|
+| **Filosofi Profit** | Panen bunga inap (`funding rate` harian) dari kontrak timpang | Pantulan balik ekstrem/penolakan magnet likuiditas saat funding rendah | Beli saat koreksi *oversold* jangka pendek (*dip-buy*) searah tren naik saham AS |
+| **Cakupan Aset** | `31` aset terkurasi (`ALLOWED_ASSETS`: 18 Saham + 3 Komoditas + 10 Crypto) | **Seluruh kontrak Crypto likuid** (`CRYPTO_FORECAST_UNIVERSE=all`, vol >= $1M, top 50, maks 5/siklus) | `18` Saham AS terkurasi (`ALLOWED_STOCKS`, vol >= $1M, maks 3/siklus) |
+| **Arah Posisi** | 2 Arah (melawan mayoritas / panen funding positif) | 2 Arah (`LONG` maupun `SHORT` fade) | **Hanya `LONG`** (`SHORT` ditolak keras) |
+| **Syarat Pemicu Utama** | `abs(funding_daily) >= 0.50%/hari` | `V4 1h` (`z >= 2.2 & RSI >= 78` / `Rejected + z >= 1.5`) atau `V5 4h` (`Rejected->Comfort + RSI`) | `S1 1h` (`z <= -1.8 & RSI <= 32`, 48h) atau `S2 1d` (`z <= -1.8 & RSI <= 32`, 120h) |
+| **Gerbang Ekonomi** | `expected_funding >= 1.5x (fee + slippage)` | Net expected edge pasca biaya (`0.28%+`) + adverse funding `>= +0.15%` | Net expected edge pasca biaya (`0.28%+`) + adverse funding `>= +0.15%` |
+| **Syarat Riset AI** | Saham wajib riset segar (E3); Crypto/Komoditas riset hilang tetap boleh jalan | AI hanya filter pengaman (`P5 >= 0.70`/berita berlawanan $\to$ SKIP; `SPLIT` $\to$ HALF) | **Wajib riset segar (E3)** + blokir `NO_DATA`/`unknown` + blokir berita `bearish` (*falling knife*) |
+| **Earnings Guard** | Wajib aman **H-7** sebelum laporan keuangan | N/A | Wajib aman **H-7** sebelum laporan keuangan |
+| **SL / TP** | SL seragam **`1.5%`**; TP `+2.0%` s.d. `+2.5%` | SL **ATR `1.5%–4.5%`**; TP `>= 2.0%` (`1.0x–1.2x SL`) | SL **ATR `1.5%–4.5%`**; TP `>= 2.0%` (`1.3x SL`) |
+| **Trailing & Time-Stop** | Trailing L4 (`+0.80% / +1.40% / +2.00%`); tanpa Time-Stop jam | Trailing L4 + **Time-Stop `24h` (1h) / `72h` (4h)** bila profit `< +0.80%` | Trailing L4 + **Time-Stop `48h` (1h) / `120h` (1d)** bila profit `< +0.80%` |
+| **Batas Biaya Inap (*Adverse*)** | L2 tutup seketika bila flip `>= 0.10%/hari` (off-hours `< 0%`) | Tolak entry `> 0.30%/hari`; tutup di monitor bila **`>= 0.30%/hari`** | Tolak entry `> 0.15%/hari`; tutup di monitor bila **`>= 0.25%/hari`** |
+| **Jam Aktif & Off-Hours** | Saham AS di jam bursa + Hybrid Off-Hours; Crypto/Komoditas 24/7 | **24/7** | Entry hanya jam reguler AS (`13:30–21:00 UTC`); boleh tahan *overnight* `Sen–Kam` + Early Lock `+0.25%`; **wajib tutup akhir pekan** bila belum *profit-locked* |
+| **Workflow & Sheets** | `daily-scan`, `market-execute`, `crypto-execute`, `risk-monitor` $\to$ 5 tab Sheets | `crypto-execute` & `daily-scan` $\to$ 5 tab Sheets (`Daily_Scans` 30 kolom) | `market-execute` & `daily-scan` (jam AS) $\to$ 5 tab Sheets (`Daily_Scans` 30 kolom) |
+| **Kill Switch Env/Vars** | `DRY_RUN=true` / `MAINTENANCE_MODE=on` | `CRYPTO_FORECAST_ENGINE=off`, `CRYPTO_FORECAST_UNIVERSE=tier1` | `STOCK_FORECAST_ENGINE=off` |
+
+#### Prasyarat Aktivasi & Pagar Pengaman Engine 2
+Sebelum atau saat menjalankan Engine 2 secara penuh di akun live (`DRY_RUN=false`), prasyarat berikut ditegakkan oleh kode & operator:
+1. **Variabel Lingkungan / GitHub Variables Aktif:** `CRYPTO_FORECAST_ENGINE=on` (default), `CRYPTO_FORECAST_UNIVERSE=all` (default; ubah ke `tier1` jika ingin kembali ke 10 bluechip), dan `STOCK_FORECAST_ENGINE=on` (default).
+2. **Keandalan Sumber Data Riset untuk Saham AS (Khusus Engine 2 Saham AS):** Karena Engine 2 Saham AS memberlakukan aturan **E3 ketat (riset basi / `NO_DATA` / `bearish` = `SKIP`)**, key AI (`DASHSCOPE_API_KEY`, `DASHSCOPE_API_GEMINI_KEY`) serta konektivitas OAK MCP / headline Yahoo harus aktif agar peluang saham tidak tertolak diam-diam.
+3. **Budget Eksekusi & Slot Elastis:** Slot tetap dibatasi oleh `get_dynamic_max_slots(total_equity)` dan `15%` *cash buffer* (`MIN_BUFFER_PCT`), serta Engine 2 hanya memindai aset yang belum terpilih oleh Engine 1 (`exclude_assets`). Pada modal kecil (`< 5` slot), peluang Engine 1 ber-funding tinggi tetap diprioritaskan lebih dahulu sebelum slot sisa diisi Engine 2.
+4. **Kepatuhan Cache & Monitor Kontinu:** `risk-monitor.yml` harus aktif normal tiap 5–10 menit dengan cache `logs/market_regime.json` (`forecast_positions`) hangat agar aturan **Time-Stop (`24h`/`48h`/`72h`/`120h`)**, **adverse funding close**, dan **weekend gap protection** berjalan tepat waktu.
+
 ---
 
 ## 7. Arsitektur Deployment & Jadwal Otomasi GitHub Actions
@@ -317,9 +359,9 @@ Sistem beroperasi dengan arsitektur hibrida: cron internal GitHub Actions diduku
 
 | Workflow File | Jadwal Scheduler (WIB) | Jadwal Cron (UTC) | Target Cloud Scheduler | Fungsi Utama |
 |---|---|---|---|---|
-| [daily-scan.yml](file:///.github/workflows/daily-scan.yml) | **07:17 & 19:17 WIB** (2x Sehari) | `17 0,12 * * *` | `walt-daily-scan` | Master Scan 31 aset diizinkan (Saham US hanya di jam reguler AS `13:30–21:00 UTC`) + pemindaian **Crypto Engine 2 (`CRYPTO_FORECAST_ENGINE=on`)**, pengayaan OAK Research MCP, Swarm AI (`GLM-5.3` CRO), eksekusi GO/HALF, simpan 5 tab Google Sheets (`Daily_Scans` 30 kolom & `Data Training`). |
+| [daily-scan.yml](file:///.github/workflows/daily-scan.yml) | **07:17 & 19:17 WIB** (2x Sehari) | `17 0,12 * * *` | `walt-daily-scan` | Master Scan 31 aset Engine 1 + **Engine 2 Crypto (`CRYPTO_FORECAST_ENGINE=on`)** & **Engine 2 Saham AS (`STOCK_FORECAST_ENGINE=on`, saat jam bursa AS `13:30–21:00 UTC`)**, pengayaan OAK Research MCP, Swarm AI (`GLM-5.3` CRO), eksekusi GO/HALF, simpan 5 tab Google Sheets (`Daily_Scans` 30 kolom & `Data Training`). |
 | [risk-monitor.yml](file:///.github/workflows/risk-monitor.yml) | **Dinamis 5–10 Menit** (6x–12x/Jam + Smart Idle) | `*/10 * * * *` | `walt-risk-monitor` | Evaluasi risiko adaptif 24/7 (True Zero-Risk Trailing & Asymmetric R:R). Fast-exit <2 detik saat 0 posisi; otomatis mempercepat ke **tiap ~5 menit (12x/jam)** jika $\ge 3$ posisi aktif, kategori `HALF`, atau dekat TP ($\ge +0.70\%$) / SL ($\le -1.00\%$); dan stabil **10 menit** untuk posisi `GO` tenang. |
-| [market-execute.yml](file:///.github/workflows/market-execute.yml) | **4-Tier Gear 0–3** (Dinamis) | `43 */2 * * *` | `walt-market-execute` | Eksekusi Saham US (`13:30–21:00 UTC`) & Komoditas (24/7) dengan **4-Tier Execution Gear**: **Gear 0 (`0` GO)** = maks 2x selama jam bursa AS (`225m`); **Gear 1 (`< 2` GO)** = `120m` (2 jam); **Gear 2 (`2..5` GO)** = `60m` (1 jam); **Gear 3 (`> 5` GO / `GEAR_3_FULL_RESEARCH=true`)** = `60m` + izin riset AI penuh untuk setiap keputusan trading. |
+| [market-execute.yml](file:///.github/workflows/market-execute.yml) | **4-Tier Gear 0–3** (Dinamis) | `43 */2 * * *` | `walt-market-execute` | Eksekusi Saham US (**Engine 1 Funding Carry** + **Engine 2 LONG-ONLY Dip-Buy `STOCK_FORECAST_ENGINE=on`** saat `13:30–21:00 UTC`) & Komoditas (24/7 Engine 1) dengan **4-Tier Execution Gear**: **Gear 0 (`0` GO)** = maks 2x selama jam bursa AS (`225m`); **Gear 1 (`< 2` GO)** = `120m` (2 jam); **Gear 2 (`2..5` GO)** = `60m` (1 jam); **Gear 3 (`> 5` GO / `GEAR_3_FULL_RESEARCH=true`)** = `60m` + izin riset AI penuh untuk setiap keputusan trading. |
 | [crypto-execute.yml](file:///.github/workflows/crypto-execute.yml) | **4-Tier Gear 0–3** (Dinamis) | `11 */2 * * *` | `walt-crypto-execute` | Eksekusi mandiri Crypto (24/7) memakai **Engine 1 Funding Carry** (`10` Bluechip Tier-1) + **Engine 2 Price Forecast Mean-Reversion Fade** (`CRYPTO_FORECAST_ENGINE=on`, `CRYPTO_FORECAST_UNIVERSE=all` seluruh kontrak Crypto likuid: `V4_1H_EXTREME_FADE` & `V5_4H_REJ_COMFORT`) dengan **4-Tier Execution Gear** (`Gear 0` `720m` / 2x sehari; `Gear 1` `120m`; `Gear 2` `60m`; `Gear 3` `60m` Full AI Research) + *3-hour re-entry cooldown*. |
 
 ### 7.2 Otomasi Rotasi Token OAuth (`token_manager.py`)

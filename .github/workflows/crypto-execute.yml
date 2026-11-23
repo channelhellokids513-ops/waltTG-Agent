@@ -82,6 +82,7 @@ jobs:
           US_STOCK_HOURS_ONLY: ${{ vars.US_STOCK_HOURS_ONLY }}
           CRYPTO_FORECAST_ENGINE: ${{ vars.CRYPTO_FORECAST_ENGINE || 'on' }}
           CRYPTO_FORECAST_UNIVERSE: ${{ vars.CRYPTO_FORECAST_UNIVERSE || 'all' }}
+          STOCK_FORECAST_ENGINE: ${{ vars.STOCK_FORECAST_ENGINE || 'on' }}
           WALT_STATE_WARM: ${{ steps.state_probe.outputs.warm }}
         run: |
           mkdir -p logs

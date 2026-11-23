@@ -85,6 +85,7 @@ jobs:
           US_STOCK_HOURS_ONLY: ${{ vars.US_STOCK_HOURS_ONLY }}
           CRYPTO_FORECAST_ENGINE: ${{ vars.CRYPTO_FORECAST_ENGINE || 'on' }}
           CRYPTO_FORECAST_UNIVERSE: ${{ vars.CRYPTO_FORECAST_UNIVERSE || 'all' }}
+          STOCK_FORECAST_ENGINE: ${{ vars.STOCK_FORECAST_ENGINE || 'on' }}
           AUTO_EXECUTE_ON_SCAN: ${{ github.event.inputs.auto_execute || vars.AUTO_EXECUTE_ON_SCAN || 'true' }}
           DRY_RUN: ${{ github.event.inputs.dry_run || vars.DRY_RUN || 'false' }}
           WALT_STATE_WARM: ${{ steps.state_probe.outputs.warm }}

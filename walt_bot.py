@@ -585,13 +585,16 @@ US_STOCK_MARKET_CLOSE_UTC = (21, 0)   # sampai 21:00 UTC (EST close)
 OFF_HOURS_HOLD_POLICY_ENV = "OFF_HOURS_HOLD_POLICY"
 CRYPTO_FORECAST_ENGINE_ENV = "CRYPTO_FORECAST_ENGINE"
 CRYPTO_FORECAST_UNIVERSE_ENV = "CRYPTO_FORECAST_UNIVERSE"
-FORECAST_ADVERSE_FUNDING_CLOSE_THRESHOLD = 0.0030  # 0.30%/hari batas funding merugikan untuk Engine 2
+STOCK_FORECAST_ENGINE_ENV = "STOCK_FORECAST_ENGINE"
+FORECAST_ADVERSE_FUNDING_CLOSE_THRESHOLD = 0.0030  # 0.30%/hari batas funding merugikan untuk Engine 2 Crypto
+STOCK_FORECAST_ADVERSE_FUNDING_CLOSE_THRESHOLD = 0.0025  # 0.25%/hari batas funding merugikan Engine 2 Saham AS
 
 CI_ENV_KNOBS: tuple[str, ...] = (
     "E5_SLIPPAGE_BASIS",
     "US_STOCK_HOURS_ONLY",
     CRYPTO_FORECAST_ENGINE_ENV,
     CRYPTO_FORECAST_UNIVERSE_ENV,
+    STOCK_FORECAST_ENGINE_ENV,
 )
 MONITOR_ENV_KNOBS: tuple[str, ...] = (OFF_HOURS_HOLD_POLICY_ENV,)
 ENTRY_WORKFLOWS: tuple[str, ...] = ("crypto-execute.yml", "market-execute.yml", "daily-scan.yml")
@@ -600,6 +603,13 @@ ENTRY_WORKFLOWS: tuple[str, ...] = ("crypto-execute.yml", "market-execute.yml", 
 def is_crypto_forecast_engine_enabled() -> bool:
     """True bila Engine 2 Crypto Mean-Reversion Fade (V5 4h + V4 1h) aktif (default on)."""
     return os.getenv(CRYPTO_FORECAST_ENGINE_ENV, "on").strip().lower() not in (
+        "off", "false", "0", "no", "disabled"
+    )
+
+
+def is_stock_forecast_engine_enabled() -> bool:
+    """True bila Engine 2 Saham AS LONG-ONLY Dip-Buy (S1 1h + S2 1d) aktif (default on)."""
+    return os.getenv(STOCK_FORECAST_ENGINE_ENV, "on").strip().lower() not in (
         "off", "false", "0", "no", "disabled"
     )
 
@@ -732,7 +742,52 @@ def evaluate_off_hours_position_policy(
             existing_locked = pos.sl >= pos.entry_price * (1.0 + OFF_HOURS_EARLY_LOCK_OFFSET_PCT - 1e-6)
         else:
             existing_locked = pos.sl <= pos.entry_price * (1.0 - OFF_HOURS_EARLY_LOCK_OFFSET_PCT + 1e-6)
-    is_profit_locked = existing_locked or (early_lock_sl is not None)
+    if existing_locked or (early_lock_sl is not None):
+        is_profit_locked = True
+    else:
+        is_profit_locked = False
+
+    is_forecast_stock = (
+        getattr(pos, "signal_source", "funding") == "price_forecast"
+        and pos.base_asset in ALLOWED_STOCKS
+    )
+    if is_forecast_stock:
+        adverse_funding = max(0.0, -favorable_funding)
+        if adverse_funding >= STOCK_FORECAST_ADVERSE_FUNDING_CLOSE_THRESHOLD:
+            return {
+                "action": "CLOSE",
+                "session": session,
+                "early_lock_sl": None,
+                "favorable_funding_daily": favorable_funding,
+                "reason": (
+                    f"Engine 2 Saham AS Adverse Funding ({session}): "
+                    f"biaya inap {adverse_funding*100:.3f}%/hari >= "
+                    f"{STOCK_FORECAST_ADVERSE_FUNDING_CLOSE_THRESHOLD*100:.2f}%/hari"
+                ),
+            }
+        if session in ("PRE_CLOSE_WEEKEND", "CLOSED_WEEKEND"):
+            if not is_profit_locked:
+                return {
+                    "action": "CLOSE",
+                    "session": session,
+                    "early_lock_sl": None,
+                    "favorable_funding_daily": favorable_funding,
+                    "reason": "Pre-Close Weekend Engine 2 Saham AS: belum profit-locked, hindari weekend gap 64.5h",
+                }
+            return {
+                "action": "HOLD_PROTECT",
+                "session": session,
+                "early_lock_sl": early_lock_sl,
+                "favorable_funding_daily": favorable_funding,
+                "reason": session_note,
+            }
+        return {
+            "action": "HOLD_PROTECT",
+            "session": session,
+            "early_lock_sl": early_lock_sl,
+            "favorable_funding_daily": favorable_funding,
+            "reason": f"Engine 2 Saham AS overnight hold ({session_note})",
+        }
 
     if favorable_funding < -1e-9:
         return {
@@ -1495,15 +1550,43 @@ def decide_go_nogo(
     if not is_forecast and abs(opp.funding_daily) < MIN_FUNDING_DAILY:
         return "SKIP", "funding kurang (<0.5%/hari)", 0.0
 
-    # Whitelist check: Engine 1 tetap 31 aset terkurasi; Engine 2 terbuka untuk seluruh kontrak crypto
-    # likuid di Walt (kecuali saham/komoditas non-crypto).
+    # Whitelist check: Engine 1 tetap 31 aset terkurasi; Engine 2 mencakup kontrak crypto likuid
+    # dan Saham AS (`ALLOWED_STOCKS`, LONG-ONLY Dip-Buy); Komoditas tetap hanya di Engine 1.
     if not is_forecast:
         if opp.base_asset not in ALLOWED_ASSETS:
             return "SKIP", f"aset {opp.base_asset} tidak masuk whitelist", 0.0
-    elif opp.base_asset in ALLOWED_STOCKS or opp.base_asset in ALLOWED_COMMODITIES:
-        return "SKIP", f"Engine 2 hanya berlaku untuk aset crypto (bukan {opp.base_asset})", 0.0
+    elif opp.base_asset in ALLOWED_COMMODITIES:
+        return "SKIP", f"Engine 2 belum diaktifkan untuk komoditas ({opp.base_asset})", 0.0
 
-    # Engine 2: Crypto Mean-Reversion Fade terverifikasi OOS (AI sebagai filter P5/SPLIT/lawan arah)
+    # Engine 2 Saham AS: LONG-ONLY Dip-Buy terverifikasi OOS + wajib riset segar & Earnings H-7
+    if is_forecast and opp.base_asset in ALLOWED_STOCKS:
+        setup_lbl = opp.forecast_setup or "STOCK_DIP_LONG"
+        if opp.side != "long":
+            return "SKIP", f"Engine 2 Saham AS hanya mengizinkan LONG dip-buy ({opp.side.upper()} ditolak)", 0.0
+        if research is None:
+            return "SKIP", f"Engine 2 ({setup_lbl}): riset basi / tidak tersedia (E3 wajib untuk Saham AS)", 0.0
+        if research.days_to_earnings is not None and research.days_to_earnings <= 7:
+            return "SKIP", f"Engine 2 ({setup_lbl}): earnings H-{research.days_to_earnings} -> SKIP", 0.0
+        if research.consensus == "NO_DATA" or research.news_sentiment == "unknown":
+            return "SKIP", f"Engine 2 ({setup_lbl}): tidak ada data berita / sentimen unknown -> SKIP", 0.0
+        p5 = research.p1_to_p7_scores.get("P5_risk_catalysts", 0.0) if research.p1_to_p7_scores else 0.0
+        if p5 >= MAX_P5_RISK:
+            return "SKIP", f"Engine 2 ({setup_lbl}): katalis risiko tinggi (P5={p5:.2f} >= {MAX_P5_RISK:.2f}) -> SKIP", 0.0
+        if research.news_sentiment == "bearish":
+            return (
+                "SKIP",
+                f"Engine 2 ({setup_lbl}): berita `bearish` (skor {research.final_score:+.2f}) berisiko falling knife -> SKIP",
+                0.0,
+            )
+        if (
+            research.overall_consensus_level == "SPLIT"
+            or research.vendor_alignment == "split"
+            or research.consensus == "CONFLICT"
+        ):
+            return "HALF", f"Engine 2 ({setup_lbl}): swarm SPLIT -> proteksi HALF size", 0.5
+        return "GO", f"Engine 2 ({setup_lbl}) lolos filter AI ({research.news_sentiment} {research.final_score:+.2f})", 1.0
+
+    # Engine 2 Crypto: Mean-Reversion Fade 2 arah terverifikasi OOS (AI sebagai filter P5/SPLIT/lawan arah)
     if is_forecast:
         setup_lbl = opp.forecast_setup or "ENGINE2_FADE"
         if research is None:
@@ -2346,11 +2429,12 @@ def evaluate_and_apply_position_risk(
         }
 
     is_forecast_pos = getattr(pos, "signal_source", "funding") == "price_forecast"
-    flip_threshold = (
-        FORECAST_ADVERSE_FUNDING_CLOSE_THRESHOLD
-        if is_forecast_pos
-        else FUNDING_FLIP_CLOSE_THRESHOLD
-    )
+    if is_forecast_pos and pos.base_asset in ALLOWED_STOCKS:
+        flip_threshold = STOCK_FORECAST_ADVERSE_FUNDING_CLOSE_THRESHOLD
+    elif is_forecast_pos:
+        flip_threshold = FORECAST_ADVERSE_FUNDING_CLOSE_THRESHOLD
+    else:
+        flip_threshold = FUNDING_FLIP_CLOSE_THRESHOLD
 
     # --- 1. Lapis 2: Funding Flip Sign (dengan Hysteresis) -> Tutup Posisi Segera ---
     funding_flipped = (
@@ -4035,6 +4119,36 @@ def risk_monitor_run(
 # DAILY SCAN — rekomendasi + income tracker
 # =============================================================================
 
+def _convert_forecast_dicts_to_opps(fc_raw: list[dict], log_label: str) -> list[Opportunity]:
+    fc_opps_out: list[Opportunity] = []
+    for fc in fc_raw:
+        fc_opps_out.append(Opportunity(
+            contract_id=int(fc["contract_id"]),
+            base_asset=str(fc["asset"]),
+            funding_daily=float(fc.get("funding_daily") or 0.0),
+            volume_24h=float(fc.get("volume_24h") or MIN_VOL_24H),
+            max_leverage=int(fc.get("max_leverage") or MAX_LEVERAGE),
+            side=fc["side"],
+            min_size_base=float(fc.get("min_size_base") or 0.0),
+            max_size_base=float(fc.get("max_size_base") or 0.0),
+            max_size_quote=float(fc.get("max_size_quote") or 0.0),
+            price_slippage=float(fc.get("price_slippage") or 0.0),
+            signal_source="price_forecast",
+            forecast_setup=str(fc.get("setup") or ""),
+            planned_sl_pct=float(fc["sl_pct"]),
+            planned_tp_pct=float(fc["tp_pct"]),
+            max_hold_hours=float(fc["max_hold_hours"]),
+            expected_net_edge_pct=float(fc["expected_net_edge_pct"]),
+            forecast_reason=str(fc.get("reason") or ""),
+        ))
+    if fc_raw:
+        log.info(
+            f"📈 [{log_label}] Menambahkan {len(fc_raw)} kandidat Engine 2 OOS: "
+            + ", ".join(f"{x['asset']}({x['setup']}/{x['side']})" for x in fc_raw)
+        )
+    return fc_opps_out
+
+
 def _scan_crypto_engine2_opportunities(
     contracts: list[dict],
     target_universe: set[str],
@@ -4045,7 +4159,6 @@ def _scan_crypto_engine2_opportunities(
     """Pindai kandidat Engine 2 Crypto (`all` seluruh crypto likuid atau `tier1` 10 aset) bila aktif."""
     if not is_crypto_forecast_engine_enabled():
         return []
-    fc_opps_out: list[Opportunity] = []
     try:
         import price_forecast
 
@@ -4058,37 +4171,38 @@ def _scan_crypto_engine2_opportunities(
             exclude_non_crypto=(ALLOWED_STOCKS | ALLOWED_COMMODITIES),
             min_vol_24h=MIN_VOL_24H,
         )
-        for fc in fc_raw:
-            fc_opps_out.append(Opportunity(
-                contract_id=int(fc["contract_id"]),
-                base_asset=str(fc["asset"]),
-                funding_daily=float(fc.get("funding_daily") or 0.0),
-                volume_24h=float(fc.get("volume_24h") or MIN_VOL_24H),
-                max_leverage=int(fc.get("max_leverage") or MAX_LEVERAGE),
-                side=fc["side"],
-                min_size_base=float(fc.get("min_size_base") or 0.0),
-                max_size_base=float(fc.get("max_size_base") or 0.0),
-                max_size_quote=float(fc.get("max_size_quote") or 0.0),
-                price_slippage=float(fc.get("price_slippage") or 0.0),
-                signal_source="price_forecast",
-                forecast_setup=str(fc.get("setup") or ""),
-                planned_sl_pct=float(fc["sl_pct"]),
-                planned_tp_pct=float(fc["tp_pct"]),
-                max_hold_hours=float(fc["max_hold_hours"]),
-                expected_net_edge_pct=float(fc["expected_net_edge_pct"]),
-                forecast_reason=str(fc.get("reason") or ""),
-            ))
-        if fc_raw:
-            log.info(
-                f"📈 [{log_label}] Menambahkan {len(fc_raw)} kandidat fade OOS: "
-                + ", ".join(f"{x['asset']}({x['setup']}/{x['side']})" for x in fc_raw)
-            )
+        return _convert_forecast_dicts_to_opps(fc_raw, log_label)
     except Exception as exc:
         log.warning(f"Engine 2 Crypto scan dilewati: {exc}")
-    return fc_opps_out
+        return []
 
 
-def daily_scan(client: WaltClient) -> dict:
+def _scan_stock_engine2_opportunities(
+    contracts: list[dict],
+    target_stocks: set[str],
+    exclude_assets: set[str],
+    *,
+    log_label: str = "ENGINE 2 STOCK",
+) -> list[Opportunity]:
+    """Pindai kandidat Engine 2 Saham AS (`ALLOWED_STOCKS`, LONG-ONLY Dip-Buy) saat jam bursa AS buka."""
+    if not is_stock_forecast_engine_enabled():
+        return []
+    try:
+        import price_forecast
+
+        fc_raw = price_forecast.scan_stock_price_opportunities(
+            contracts,
+            allowed_assets=target_stocks,
+            exclude_assets=exclude_assets,
+            min_vol_24h=MIN_VOL_24H,
+        )
+        return _convert_forecast_dicts_to_opps(fc_raw, log_label)
+    except Exception as exc:
+        log.warning(f"Engine 2 Saham AS scan dilewati: {exc}")
+        return []
+
+
+def daily_scan(client: WaltClient, now_utc: Optional[datetime] = None) -> dict:
     """Scan harian — return summary untuk Calendar event / push notif."""
     readiness = client.readiness()
     balance = client.balance()
@@ -4104,9 +4218,24 @@ def daily_scan(client: WaltClient) -> dict:
         exclude_assets={o.base_asset for o in opps},
         log_label="DAILY_SCAN ENGINE 2",
     )
+    us_open_scan, _ = is_us_stock_market_open_utc(now_utc=now_utc)
+    fc_stock_opps = (
+        _scan_stock_engine2_opportunities(
+            contracts["contracts"],
+            ALLOWED_STOCKS,
+            exclude_assets={o.base_asset for o in opps} | {o.base_asset for o in fc_crypto_opps},
+            log_label="DAILY_SCAN ENGINE 2 STOCK",
+        )
+        if us_open_scan
+        else []
+    )
+    fc_all_opps = fc_crypto_opps + fc_stock_opps
     if fc_crypto_opps:
         opps.extend(fc_crypto_opps)
         crypto_opps.extend(fc_crypto_opps)
+    if fc_stock_opps:
+        opps.extend(fc_stock_opps)
+        market_opps.extend(fc_stock_opps)
     m_gear, m_int, m_reason = _update_regime_state("market", market_opps, mark_executed=False)
     c_gear, c_int, c_reason = _update_regime_state("crypto", crypto_opps, mark_executed=False)
     log.info(f"⚙️ [EXECUTION GEAR] Market: {m_gear} ({m_int}m) | Crypto: {c_gear} ({c_int}m)")
@@ -4114,9 +4243,9 @@ def daily_scan(client: WaltClient) -> dict:
     total_equity = get_total_equity(balance, positions)
     scan_limit = max(5, get_dynamic_max_slots(total_equity))
     top_candidates = list(opps[:scan_limit])
-    if fc_crypto_opps:
+    if fc_all_opps:
         seen_top = {o.base_asset for o in top_candidates}
-        for fc_opp in fc_crypto_opps:
+        for fc_opp in fc_all_opps:
             if fc_opp.base_asset not in seen_top:
                 top_candidates.append(fc_opp)
                 seen_top.add(fc_opp.base_asset)
@@ -4332,7 +4461,7 @@ def scan_with_research(
         dry_run = os.getenv("DRY_RUN", "false").lower() == "true"
 
     log.info(f"📊 Running daily scan + research (auto_execute={auto_execute}, dry_run={dry_run})...")
-    summary = daily_scan(client)
+    summary = daily_scan(client, now_utc=now_utc)
 
     us_stocks_open, us_stocks_note = is_us_stock_market_open_utc(now_utc=now_utc)
     summary["us_stock_market_open"] = us_stocks_open
@@ -4797,7 +4926,7 @@ def market_execute(
 
     category_key: Literal["market", "crypto"] = "crypto" if target_universe == ALLOWED_CRYPTO else "market"
 
-    # Engine 2 (khusus Crypto 24/7): pindai sinyal OOS V5 4h + V4 1h ketika funding < 0.50%/hari
+    # Engine 2 (Crypto 24/7 Mean-Reversion Fade + Saham AS LONG-ONLY Dip-Buy saat bursa AS buka)
     if category_key == "crypto":
         fc_opps = _scan_crypto_engine2_opportunities(
             contracts_data["contracts"],
@@ -4807,6 +4936,15 @@ def market_execute(
         )
         if fc_opps:
             opps.extend(fc_opps)
+    elif category_key == "market" and us_stocks_open and (target_universe & ALLOWED_STOCKS):
+        fc_stock_opps = _scan_stock_engine2_opportunities(
+            contracts_data["contracts"],
+            target_universe & ALLOWED_STOCKS,
+            exclude_assets={o.base_asset for o in opps},
+            log_label="ENGINE 2 STOCK",
+        )
+        if fc_stock_opps:
+            opps.extend(fc_stock_opps)
 
     gear_label, gear_interval_min, gear_reason = _update_regime_state(
         category_key, opps, mark_executed=True
