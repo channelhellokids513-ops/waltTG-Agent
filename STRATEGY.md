@@ -243,6 +243,16 @@ Manajemen risiko berjalan otomatis secara adaptif (dinamis 5–10 menit dengan *
    - **Tier 3 (Profit $\ge +2.00\%$):** Aktifkan Trailing Stop dinamis **0.60%** di bawah puncak harga berjalan.
    - **3-Hour Re-Entry Cooldown:** Setelah posisi ditutup (`_record_position_close` atau `_detect_and_log_exchange_closes`), aset dikunci selama 3 jam di `logs/market_regime.json` sebelum boleh dibuka ulang.
 
+### 6.1 Kebijakan Menahan Posisi Saat Pasar Tutup (*Hybrid Cost-Aware Off-Hours Policy*, Opsi B)
+
+Di Walt Perps, biaya atau pendapatan inap berasal dari `funding_rate_hourly` yang berjalan 24/7. Karena durasi bursa AS hanya **7,5 jam/hari** dan biaya *round-trip* tutup-lalu-buka mencapai **`0.28%–0.45%` notional** (`2 × 0.09%` taker + slippage min `0.10%`), menutup paksa setiap posisi setiap malam akan menimbulkan *fee bleed*. Sebaliknya, menahan posisi yang membayar biaya inap atau lemah menjelang libur akhir pekan berisiko tergerus carry negatif dan *opening gap*. Karena itu (`OFF_HOURS_HOLD_POLICY=hybrid`), berlaku aturan berikut pada `risk-monitor`:
+
+- **Cakupan Aset:** **Saham AS (`ALLOWED_STOCKS`)** pada *overnight* (Sen–Kam `21:00–13:30 UTC`) & *weekend* (Jum `21:00`–Sen `13:30 UTC`), serta **Komoditas (`XAU`, `XAG`, `BRENTOIL`)** khusus **akhir pekan** (Jum `21:00`–Min `22:00 UTC`). **Crypto Tier-1 tetap berjalan 24/7.**
+- **Zero-Tolerance Biaya Inap:** Begitu *funding* berubah menjadi beban biaya inap (`favorable_funding < 0%`, berapa pun nilainya) pada sesi *pre-close* maupun saat pasar tutup, posisi ditutup seketika tanpa menunggu ambang hysteresis `0.10%/hari`.
+- **Early Profit Lock (`>= +0.40%`):** Pada seluruh sesi *pre-close* & tutup pasar, jika profit harga mencapai `+0.40%` (sebelum Tier 1 `+0.80%`), SL otomatis dikunci lebih dini ke **`Entry +/- 0.25%`** (cukup menutup fee `0.18%` + buffer).
+- **Pre-Close Overnight (`20:35–21:00 UTC`, Sen–Kam, Saham AS):** Tetap ditahan jika *carry* searah `>= +0.20%/hari` atau posisi sudah terkunci profit (`SL >= Entry + 0.25%`); jika *carry* lemah `< +0.20%/hari` dan belum terkunci profit, posisi ditutup sebelum penutupan pasar.
+- **Pre-Close Weekend (`20:35–21:00 UTC`, Jum, Saham AS & Komoditas):** Posisi hanya diizinkan menginap melewati libur akhir pekan bila **sudah terkunci profit** ATAU *carry* searah kuat **`>= +0.50%/hari`** dengan floating PnL masih aman (`>= -0.50%`). Selain itu posisi ditutup aman menjelang akhir pekan.
+
 ---
 
 ## 7. Arsitektur Deployment & Jadwal Otomasi GitHub Actions

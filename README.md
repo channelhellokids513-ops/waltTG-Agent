@@ -81,6 +81,11 @@ Menghindari *fee bleed* (`0.18%` round-trip taker fee + spread) dengan *Risk-to-
 - **3-Hour Re-Entry Cooldown:** Setiap aset yang posisinya baru ditutup otomatis masuk jeda 3 jam (tercatat di `logs/market_regime.json`) agar bot tidak melakukan *churning* membuka ulang aset yang sama berkali-kali.
 - **Lapis 3 (Volatility Cut):** *Deprecated* (digantikan sepenuhnya oleh SL baseline 1.5%).
 - **Funding Flip Hysteresis (`0.1%/hari`):** Posisi hanya ditutup karena funding berbalik arah jika `abs(funding_daily) >= 0.1%/hari`. Jika berbalik arah tetapi `< 0.1%/hari`, SL digeser ke *breakeven* (`Entry`).
+- **Kebijakan Menahan Posisi Saat Pasar Tutup (`OFF_HOURS_HOLD_POLICY=hybrid`, Opsi B):**
+  - *Cakupan:* **Saham AS** (*overnight* Sen–Kam `21:00–13:30 UTC` & *weekend* Jum `21:00`–Sen `13:30 UTC`) dan **Komoditas** (`XAU`, `XAG`, `BRENTOIL` khusus *weekend* Jum `21:00`–Min `22:00 UTC`); **Crypto** tetap 24/7.
+  - *Nol Biaya Inap:* Jika *funding rate* berbalik arah menjadi beban biaya inap (`< 0%`, berapa pun nilainya) saat pre-close/pasar tutup, posisi langsung ditutup tanpa menunggu ambang `0.10%/hari`.
+  - *Pre-Close Overnight (`20:35–21:00 UTC` Sen–Kam, Saham AS):* Tetap ditahan bila *carry* searah `>= +0.20%/hari` atau sudah profit-locked (menghindari *fee bleed* tutup-buka `0.28%–0.45%`); bila profit `>= +0.40%` (di bawah Tier 1 `+0.80%`), SL otomatis dikunci lebih dini ke `Entry +/- 0.25%`.
+  - *Pre-Close Weekend (`20:35–21:00 UTC` Jum, Saham AS & Komoditas):* Hanya menginap melewati libur akhir pekan bila sudah profit-locked (`SL >= Entry + 0.25%`) atau *carry* kuat `>= +0.50%/hari` dengan floating PnL `>= -0.50%`.
 - **Guard Sisi Salah & Migrasi Posisi Lama:** Memvalidasi SL/TP terhadap harga berjalan sebelum mengirim `auto_close` dan otomatis menutup posisi lama yang sudah melewati batas SL 1.5% (`SL 1.5% breached (migrasi)`).
 - **Audit Penutupan & Statistik (`Closed_Positions` & `PnL_Tracker`):** Seluruh penutupan posisi (baik oleh monitor maupun TP/SL bursa) tercatat ke sheet `Closed_Positions` (`logs/closed_history.csv`), progres harian ke `PnL_Tracker`, dan dapat dianalisis via `python walt_bot.py stats`.
 
@@ -356,6 +361,7 @@ status sistem bisa dibaca tanpa menebak. Di GitHub: **Settings → Secrets and v
 | `MULTI_OPP_GLM_FALLBACK` | `false` | Jika `true`, saat `opportunity_count > 1` alihkan V3/V4 ke DashScope GLM. Default `false` menjaga keragaman 3 vendor. |
 | `OAK_MCP_ENABLED` | `on` | Aktifkan pengayaan konteks real-time dari OAK Research MCP Server (`OAK_MCP_URL=https://oakresearch.io/api/mcp`, opsional `OAK_MCP_PREMIUM=false`). |
 | `US_STOCK_HOURS_ONLY` | `true` | Memfilter pemindaian & eksekusi `ALLOWED_STOCKS` ke jam bursa reguler AS (`Sen–Jum 13:30–21:00 UTC`). Crypto & Komoditas tetap 24/7. |
+| `OFF_HOURS_HOLD_POLICY` | `hybrid` | Kebijakan Opsi B di `risk-monitor.yml`: nol toleransi biaya inap (`< 0%`), filter pre-close overnight/weekend (Saham AS overnight+weekend; Komoditas weekend), & early SL lock `+0.25%` (`>= +0.40%`). Set `off` untuk menonaktifkan. |
 | `GEAR_3_FULL_RESEARCH` | `false` | Jika `true` (atau peluang `GO > 5`), mengaktifkan **Gear 3** agar setiap kandidat trading mendapat riset AI penuh tanpa cap. |
 | `TRAINING_DATA_LOGGING` | `on` | Otomatis menyimpan dataset SFT `<think>...</think>` ke Google Sheet tab `Data Training` dan `logs/training_dataset.jsonl`. |
 | `WALT_TOKEN_SYNC` | `on` | `off` **menolak refresh** (bukan "refresh lalu buang hasilnya") — wajib `on` untuk workflow yang butuh OAuth. |

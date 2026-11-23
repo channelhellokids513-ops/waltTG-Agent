@@ -83,6 +83,7 @@ jobs:
           LOG_REDACT: "true"
           STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}
           US_STOCK_HOURS_ONLY: ${{ vars.US_STOCK_HOURS_ONLY }}
+          OFF_HOURS_HOLD_POLICY: ${{ vars.OFF_HOURS_HOLD_POLICY || 'hybrid' }}
           WALT_STATE_WARM: ${{ steps.state_probe.outputs.warm }}
           # R7: jarak ledger-vs-bursa saat start dingin; default `report` = tidak ada penulisan.
           WALT_COLD_REHYDRATE: ${{ vars.WALT_COLD_REHYDRATE || 'report' }}

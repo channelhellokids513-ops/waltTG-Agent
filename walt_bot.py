@@ -582,9 +582,198 @@ MIN_MEASURED_SLIPPAGE_BASIS = 0.0010
 US_STOCK_HOURS_ONLY_ENV = "US_STOCK_HOURS_ONLY"
 US_STOCK_MARKET_OPEN_UTC = (13, 30)   # Senin-Jumat 13:30 UTC (EDT open)
 US_STOCK_MARKET_CLOSE_UTC = (21, 0)   # sampai 21:00 UTC (EST close)
+OFF_HOURS_HOLD_POLICY_ENV = "OFF_HOURS_HOLD_POLICY"
 
 CI_ENV_KNOBS: tuple[str, ...] = ("E5_SLIPPAGE_BASIS", "US_STOCK_HOURS_ONLY")
+MONITOR_ENV_KNOBS: tuple[str, ...] = (OFF_HOURS_HOLD_POLICY_ENV,)
 ENTRY_WORKFLOWS: tuple[str, ...] = ("crypto-execute.yml", "market-execute.yml", "daily-scan.yml")
+
+US_STOCK_PRECLOSE_START_UTC = (20, 35)       # 25 menit sebelum tutup 21:00 UTC (cukup untuk siklus risk-monitor 5-10m)
+COMMODITY_WEEKEND_REOPEN_UTC = (22, 0)       # Minggu 22:00 UTC pembukaan futures komoditas global
+OFF_HOURS_EARLY_LOCK_TRIGGER_PCT = 0.0040    # +0.40% profit harga memicu early lock off-hours/pre-close
+OFF_HOURS_EARLY_LOCK_OFFSET_PCT = 0.0025     # Kunci SL di Entry +/- 0.25% (menutup fee 0.18% + buffer)
+OVERNIGHT_MIN_HOLD_FUNDING_DAILY = 0.0020    # +0.20%/hari carry searah minimal untuk inap overnight Saham AS
+WEEKEND_MIN_HOLD_FUNDING_DAILY = 0.0050      # +0.50%/hari carry searah minimal untuk inap akhir pekan bila belum profit-locked
+WEEKEND_MAX_LOSS_HOLD_PCT = -0.0050          # -0.50% batas floating loss maks untuk menahan lewat akhir pekan
+
+
+def is_off_hours_policy_enabled() -> bool:
+    """True bila kebijakan hybrid penahanan posisi saat pasar tutup aktif (OFF_HOURS_HOLD_POLICY != off)."""
+    return os.getenv(OFF_HOURS_HOLD_POLICY_ENV, "hybrid").strip().lower() not in (
+        "off", "false", "0", "no", "disabled"
+    )
+
+
+def classify_asset_market_session(asset: str, now_utc: Optional[datetime] = None) -> tuple[str, str]:
+    """Klasifikasikan sesi pasar aktif untuk aset tertentu pada waktu UTC tertentu.
+
+    Cakupan:
+    - Saham AS (`ALLOWED_STOCKS`): jam reguler Senin–Jumat 13:30–21:00 UTC;
+      mengenal `PRE_CLOSE_OVERNIGHT` (Sen–Kam 20:35–21:00), `CLOSED_OVERNIGHT`,
+      `PRE_CLOSE_WEEKEND` (Jum 20:35–21:00), dan `CLOSED_WEEKEND` (Jum 21:00–Sen 13:30).
+    - Komoditas (`ALLOWED_COMMODITIES`): aktif 24 jam Senin–Jumat, mengenal
+      `PRE_CLOSE_WEEKEND` (Jum 20:35–21:00) dan `CLOSED_WEEKEND` (Jum 21:00–Min 22:00).
+    - Crypto / lainnya: selalu `OPEN` (24/7).
+    """
+    now = now_utc or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    else:
+        now = now.astimezone(timezone.utc)
+
+    sym = str(asset or "").strip().upper()
+    wd = now.weekday()  # 0=Senin .. 4=Jumat, 5=Sabtu, 6=Minggu
+    cur_min = now.hour * 60 + now.minute
+    open_min = US_STOCK_MARKET_OPEN_UTC[0] * 60 + US_STOCK_MARKET_OPEN_UTC[1]
+    preclose_min = US_STOCK_PRECLOSE_START_UTC[0] * 60 + US_STOCK_PRECLOSE_START_UTC[1]
+    close_min = US_STOCK_MARKET_CLOSE_UTC[0] * 60 + US_STOCK_MARKET_CLOSE_UTC[1]
+    comm_reopen_min = COMMODITY_WEEKEND_REOPEN_UTC[0] * 60 + COMMODITY_WEEKEND_REOPEN_UTC[1]
+
+    if sym in ALLOWED_STOCKS:
+        if wd in (5, 6) or (wd == 4 and cur_min >= close_min) or (wd == 0 and cur_min < open_min):
+            return "CLOSED_WEEKEND", "pasar Saham AS tutup akhir pekan (libur 64,5 jam)"
+        if wd == 4 and preclose_min <= cur_min < close_min:
+            return "PRE_CLOSE_WEEKEND", "pre-close akhir pekan Saham AS (libur 64,5 jam)"
+        if wd in (0, 1, 2, 3) and preclose_min <= cur_min < close_min:
+            return "PRE_CLOSE_OVERNIGHT", "pre-close overnight Saham AS (tutup 16,5 jam)"
+        if open_min <= cur_min < preclose_min:
+            return "OPEN", "pasar Saham AS buka reguler"
+        return "CLOSED_OVERNIGHT", "pasar Saham AS tutup overnight"
+
+    if sym in ALLOWED_COMMODITIES:
+        if wd == 4 and preclose_min <= cur_min < close_min:
+            return "PRE_CLOSE_WEEKEND", "pre-close akhir pekan Komoditas (libur akhir pekan)"
+        if (wd == 4 and cur_min >= close_min) or wd == 5 or (wd == 6 and cur_min < comm_reopen_min):
+            return "CLOSED_WEEKEND", "pasar Komoditas tutup akhir pekan"
+        return "OPEN", "pasar Komoditas aktif"
+
+    return "OPEN", "pasar 24/7"
+
+
+def evaluate_off_hours_position_policy(
+    pos: Position,
+    current_funding_daily: float,
+    now_utc: Optional[datetime] = None,
+) -> dict[str, Any]:
+    """Kebijakan Hybrid Cost-Aware untuk menahan posisi saat pasar tutup (Opsi B).
+
+    Mempertimbangkan biaya inap (`funding_rate_hourly`) vs biaya tutup-buka ulang
+    (`~0.28%-0.45%` notional) dan risiko gap pembukaan:
+    1. Sesi `OPEN` / kill-switch `off`: tidak mengubah perilaku 24/7.
+    2. Di seluruh sesi non-OPEN (`PRE_CLOSE_*` & `CLOSED_*`):
+       - **Zero-tolerance biaya inap:** bila funding berbalik menjadi beban biaya
+         (`favorable_funding < 0`), langsung rekomendasikan `CLOSE`.
+       - **Early Profit Lock:** bila profit harga `>= +0.40%` (sebelum Tier 1 `+0.80%`),
+         kunci SL dini ke `Entry +/- 0.25%` untuk menutup round-trip taker fee `0.18%` + buffer.
+    3. `PRE_CLOSE_OVERNIGHT` (Sen–Kam 20:35–21:00 UTC, Saham AS):
+       - Tahan bila carry searah `>= +0.20%/hari` ATAU sudah profit-locked; selain itu `CLOSE`.
+    4. `PRE_CLOSE_WEEKEND` (Jum 20:35–21:00 UTC, Saham AS & Komoditas):
+       - Tahan melewati akhir pekan hanya bila sudah profit-locked ATAU
+         (carry searah `>= +0.50%/hari` DAN `profit_pct_price >= -0.50%`); selain itu `CLOSE`.
+    """
+    if not is_off_hours_policy_enabled():
+        return {
+            "action": "NONE",
+            "session": "DISABLED",
+            "early_lock_sl": None,
+            "reason": "",
+            "favorable_funding_daily": 0.0,
+        }
+
+    session, session_note = classify_asset_market_session(pos.base_asset, now_utc=now_utc)
+    favorable_funding = (-float(current_funding_daily or 0.0)) if pos.side == "long" else float(current_funding_daily or 0.0)
+    if session == "OPEN":
+        return {
+            "action": "NONE",
+            "session": "OPEN",
+            "early_lock_sl": None,
+            "reason": "",
+            "favorable_funding_daily": favorable_funding,
+        }
+
+    profit = pos.profit_pct_price
+    early_lock_sl: Optional[float] = None
+    if profit >= OFF_HOURS_EARLY_LOCK_TRIGGER_PCT and pos.entry_price > 0:
+        if pos.side == "long":
+            cand = round(pos.entry_price * (1.0 + OFF_HOURS_EARLY_LOCK_OFFSET_PCT), 4)
+            if cand < pos.current_price:
+                early_lock_sl = cand
+        else:
+            cand = round(pos.entry_price * (1.0 - OFF_HOURS_EARLY_LOCK_OFFSET_PCT), 4)
+            if cand > pos.current_price:
+                early_lock_sl = cand
+
+    existing_locked = False
+    if pos.sl is not None and pos.entry_price > 0:
+        if pos.side == "long":
+            existing_locked = pos.sl >= pos.entry_price * (1.0 + OFF_HOURS_EARLY_LOCK_OFFSET_PCT - 1e-6)
+        else:
+            existing_locked = pos.sl <= pos.entry_price * (1.0 - OFF_HOURS_EARLY_LOCK_OFFSET_PCT + 1e-6)
+    is_profit_locked = existing_locked or (early_lock_sl is not None)
+
+    if favorable_funding < -1e-9:
+        return {
+            "action": "CLOSE",
+            "session": session,
+            "early_lock_sl": None,
+            "favorable_funding_daily": favorable_funding,
+            "reason": (
+                f"Off-Hours Biaya Inap ({session}): funding berlawanan "
+                f"({favorable_funding*100:+.3f}%/hari)"
+            ),
+        }
+
+    if session == "PRE_CLOSE_OVERNIGHT":
+        if favorable_funding < OVERNIGHT_MIN_HOLD_FUNDING_DAILY and not is_profit_locked:
+            return {
+                "action": "CLOSE",
+                "session": session,
+                "early_lock_sl": None,
+                "favorable_funding_daily": favorable_funding,
+                "reason": (
+                    f"Pre-Close Overnight: carry lemah ({favorable_funding*100:+.3f}%/hari < "
+                    f"+{OVERNIGHT_MIN_HOLD_FUNDING_DAILY*100:.2f}%/hari) & belum profit-locked"
+                ),
+            }
+        return {
+            "action": "HOLD_PROTECT",
+            "session": session,
+            "early_lock_sl": early_lock_sl,
+            "favorable_funding_daily": favorable_funding,
+            "reason": session_note,
+        }
+
+    if session == "PRE_CLOSE_WEEKEND":
+        strong_weekend_carry = (
+            favorable_funding >= WEEKEND_MIN_HOLD_FUNDING_DAILY
+            and profit >= WEEKEND_MAX_LOSS_HOLD_PCT
+        )
+        if not (is_profit_locked or strong_weekend_carry):
+            return {
+                "action": "CLOSE",
+                "session": session,
+                "early_lock_sl": None,
+                "favorable_funding_daily": favorable_funding,
+                "reason": (
+                    f"Pre-Close Weekend: carry ({favorable_funding*100:+.3f}%/hari) / "
+                    f"PnL ({profit*100:+.2f}%) tidak layak inap akhir pekan"
+                ),
+            }
+        return {
+            "action": "HOLD_PROTECT",
+            "session": session,
+            "early_lock_sl": early_lock_sl,
+            "favorable_funding_daily": favorable_funding,
+            "reason": session_note,
+        }
+
+    return {
+        "action": "HOLD_PROTECT",
+        "session": session,
+        "early_lock_sl": early_lock_sl,
+        "favorable_funding_daily": favorable_funding,
+        "reason": session_note,
+    }
 
 
 def is_us_stock_market_open_utc(now_utc: Optional[datetime] = None) -> tuple[bool, str]:
@@ -2031,15 +2220,19 @@ def evaluate_and_apply_position_risk(
     client: WaltClient,
     pos: Position,
     current_funding_daily: float,
+    now_utc: Optional[datetime] = None,
 ) -> Optional[dict]:
     """
-    Evaluasi 4 Lapis Risiko Terpadu & Eksekusi Atomik Tunggal:
-    1. Lapis 2 (Funding Flip Sign): Jika funding berbalik arah negatif → TUTUP POSISI SEGERA.
+    Evaluasi 4 Lapis Risiko Terpadu + Kebijakan Off-Hours & Eksekusi Atomik Tunggal:
+    1. Lapis 2 (Funding Flip Sign): Jika funding berbalik arah negatif -> TUTUP POSISI SEGERA.
+    1b. Off-Hours Hybrid Cost-Aware Policy (saat `now_utc` diberikan / di risk-monitor):
+        Evaluasi biaya inap & kelayakan pre-close overnight/weekend untuk Saham AS & Komoditas.
     2. TP Dinamis: Ambil target TP baseline/windfall, perketat jika target baru lebih dekat ke entry.
     3. SL Dinamis: Komparasikan kandidat SL dari:
        - Baseline DEFAULT_SL_PCT (Lapis 1)
        - Funding rendah <0.1%/hari (Lapis 2)
        - Progressive Trailing Stop / Early Zero-Risk Lock (Lapis 4)
+       - Off-Hours Early Lock (+0.25% saat profit >= +0.40% di sesi non-OPEN)
        Pilih SL yang paling aman & menguntungkan (strictly better).
     4. Eksekusi Atomik: Kirim SATU request auto_close_set ke exchange untuk menghindari
        error 'auto_close_already_pending'.
@@ -2053,7 +2246,7 @@ def evaluate_and_apply_position_risk(
             "detail": "entry_price tidak valid",
         }
 
-    # --- 1. Lapis 2: Funding Flip Sign (dengan Hysteresis) → Tutup Posisi Segera ---
+    # --- 1. Lapis 2: Funding Flip Sign (dengan Hysteresis) -> Tutup Posisi Segera ---
     funding_flipped = (
         (pos.side == "long" and current_funding_daily > 0)
         or (pos.side == "short" and current_funding_daily < 0)
@@ -2061,12 +2254,30 @@ def evaluate_and_apply_position_risk(
     if funding_flipped and abs(current_funding_daily) >= FUNDING_FLIP_CLOSE_THRESHOLD:
         log.warning(
             f"[L2] {pos.base_asset}: funding flip sign ({current_funding_daily*100:+.3f}%/hari >= "
-            f"{FUNDING_FLIP_CLOSE_THRESHOLD*100:.2f}%) → tutup posisi riil"
+            f"{FUNDING_FLIP_CLOSE_THRESHOLD*100:.2f}%) -> tutup posisi riil"
         )
         preview = client.preview_close(pos.contract_id)
         return _execute_validated_close(
-            client, pos, preview, reason="Funding Flip Sign", detail="Funding Flip Sign → Close Posisi"
+            client, pos, preview, reason="Funding Flip Sign", detail="Funding Flip Sign -> Close Posisi"
         )
+
+    # --- 1b. Hybrid Cost-Aware Off-Hours & Pre-Close Policy ---
+    off_hours_policy: Optional[dict[str, Any]] = None
+    if now_utc is not None:
+        off_hours_policy = evaluate_off_hours_position_policy(
+            pos, current_funding_daily, now_utc=now_utc
+        )
+        if off_hours_policy.get("action") == "CLOSE":
+            close_reason = str(off_hours_policy.get("reason") or "Off-Hours Policy Close")
+            log.warning(f"[OFF-HOURS] {pos.base_asset}: {close_reason} -> tutup posisi riil")
+            preview = client.preview_close(pos.contract_id)
+            return _execute_validated_close(
+                client,
+                pos,
+                preview,
+                reason=close_reason,
+                detail=f"{close_reason} -> Close Posisi",
+            )
 
     # --- 2. Evaluasi Target TP (Lapis 1 Baseline & Windfall) ---
     target_tp, target_sl = compute_baseline_tpsl(
@@ -2115,6 +2326,21 @@ def evaluate_and_apply_position_risk(
         if _sl_is_better(pos.side, l4_sl, candidate_sl) and _sl_is_improvement(pos, l4_sl):
             candidate_sl = l4_sl
             sl_reason = tier_desc
+
+    # E. Kandidat Early Profit Lock Off-Hours (+0.25% saat profit >= +0.40% di sesi non-OPEN)
+    if off_hours_policy and off_hours_policy.get("early_lock_sl") is not None:
+        early_sl = float(off_hours_policy["early_lock_sl"])
+        early_valid_side = (
+            (pos.side == "long" and early_sl < pos.current_price)
+            or (pos.side == "short" and early_sl > pos.current_price)
+        )
+        if (
+            early_valid_side
+            and _sl_is_better(pos.side, early_sl, candidate_sl)
+            and _sl_is_improvement(pos, early_sl)
+        ):
+            candidate_sl = early_sl
+            sl_reason = f"Off-Hours Early Lock +0.25% ({off_hours_policy.get('session')})"
 
     # Pastikan candidate_sl adalah improvement nyata dibanding pos.sl saat ini
     final_sl = candidate_sl if (candidate_sl is not None and _sl_is_improvement(pos, candidate_sl)) else None
@@ -3211,6 +3437,7 @@ def _run_single_monitor_pass(
     contracts_by_id: dict[int, dict],
     snapshot_path: str = "logs/open_snapshot.json",
     cycle_label: str = "",
+    now_utc: Optional[datetime] = None,
 ) -> tuple[list[Position], dict[str, dict], list[dict], int]:
     """
     Jalankan 1 putaran pemeriksaan risk monitor terhadap seluruh posisi terbuka.
@@ -3235,6 +3462,7 @@ def _run_single_monitor_pass(
     actions = list(closed_actions)
     remaining_positions: list[Position] = []
     invalid_entry_assets: list[str] = []
+    effective_now = now_utc or datetime.now(timezone.utc)
 
     for p_raw in active_positions:
         cid = p_raw["contract_id"]
@@ -3273,7 +3501,9 @@ def _run_single_monitor_pass(
 
         closed_now = False
         try:
-            res = evaluate_and_apply_position_risk(client, pos, current_funding_daily)
+            res = evaluate_and_apply_position_risk(
+                client, pos, current_funding_daily, now_utc=effective_now
+            )
             if res and res.get("action") != "FAILED":
                 if res.get("action") == "CLOSE":
                     current_snapshot.pop(pos_key, None)
