@@ -7,6 +7,7 @@ __pycache__/
 venv/
 .pytest_cache/
 *.log
+logs_audit/
 logs/*.csv
 logs/*.csv.bak-*
 logs/*.jsonl

@@ -33,6 +33,7 @@ import os
 import json
 import logging
 import re
+import threading
 import time
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
@@ -133,6 +134,10 @@ for _candidate in [MODEL_AGGREGATOR] + [
 
 AGGREGATOR_CALL_TIMEOUT_SEC = 35.0
 AGGREGATOR_TOTAL_BUDGET_SEC = 75.0
+V2_PRIMARY_TIMEOUT_SEC = 25.0
+V2_FALLBACK_TIMEOUT_SEC = 20.0
+_DASHSCOPE_SEMAPHORE = threading.Semaphore(2)
+_V2_TIMED_OUT_MODELS: set[str] = set()
 
 RESEARCH_MODE_ENV = "RESEARCH_MODE"
 SINGLE_ANALYST_CALL_TIMEOUT_SEC = 30.0
@@ -274,8 +279,17 @@ class QwenClient:
     ) -> dict:
         """Kirim request ke DashScope dengan response_format JSON (mendukung Qwen & GLM)."""
         target_model = model or self.model
+        is_real_http = isinstance(self.client, httpx.Client)
+        active_model = target_model
+        if is_real_http and active_model == MODEL_V2:
+            if active_model in _V2_TIMED_OUT_MODELS and MODEL_V1 and MODEL_V1 != MODEL_V2:
+                active_model = MODEL_V1
+                timeout = float(timeout) if timeout is not None else V2_FALLBACK_TIMEOUT_SEC
+            else:
+                timeout = min(float(timeout), V2_PRIMARY_TIMEOUT_SEC) if timeout is not None else V2_PRIMARY_TIMEOUT_SEC
+
         payload = {
-            "model": target_model,
+            "model": active_model,
             "messages": messages,
             "temperature": 0.2,
             "response_format": {"type": "json_object"},
@@ -284,21 +298,27 @@ class QwenClient:
         if timeout is not None:
             post_kwargs["timeout"] = float(timeout)
 
-        def _post_and_parse(req_payload: dict[str, Any]) -> dict[str, Any]:
+        def _do_post(req_payload: dict[str, Any]) -> Any:
             post_kwargs["json"] = req_payload
-            r = self.client.post("/chat/completions", **post_kwargs)
+            if is_real_http:
+                with _DASHSCOPE_SEMAPHORE:
+                    return self.client.post("/chat/completions", **post_kwargs)
+            return self.client.post("/chat/completions", **post_kwargs)
+
+        def _post_and_parse(req_payload: dict[str, Any]) -> dict[str, Any]:
+            r = _do_post(req_payload)
 
             # Fallback otomatis V1 -> V2 dan V4 GLM -> V3 GLM saat 404/429 upstream.
-            if r.status_code in (404, 429) and target_model == MODEL_V1:
+            if r.status_code in (404, 429) and req_payload.get("model") == MODEL_V1:
                 reason = "rate limited (429)" if r.status_code == 429 else "model not found (404)"
-                log.warning(f"Qwen model {target_model} {reason}. Fallback ke {MODEL_V2}...")
+                log.warning(f"Qwen model {MODEL_V1} {reason}. Fallback ke {MODEL_V2}...")
                 req_payload["model"] = MODEL_V2
-                r = self.client.post("/chat/completions", **post_kwargs)
-            elif r.status_code in (404, 429) and target_model == MODEL_V4_GLM and MODEL_V3_GLM != MODEL_V4_GLM:
+                r = _do_post(req_payload)
+            elif r.status_code in (404, 429) and req_payload.get("model") == MODEL_V4_GLM and MODEL_V3_GLM != MODEL_V4_GLM:
                 reason = "rate limited (429)" if r.status_code == 429 else "model not found (404)"
-                log.warning(f"GLM model {target_model} {reason}. Fallback ke {MODEL_V3_GLM}...")
+                log.warning(f"GLM model {MODEL_V4_GLM} {reason}. Fallback ke {MODEL_V3_GLM}...")
                 req_payload["model"] = MODEL_V3_GLM
-                r = self.client.post("/chat/completions", **post_kwargs)
+                r = _do_post(req_payload)
 
             r.raise_for_status()
             data = r.json()
@@ -308,10 +328,21 @@ class QwenClient:
         try:
             return _post_and_parse(payload)
         except (json.JSONDecodeError, httpx.TimeoutException) as exc:
-            if target_model == MODEL_V2 and MODEL_V1 and MODEL_V1 != MODEL_V2:
-                log.info(f"DashScope {target_model} retry cepat via {MODEL_V1} ({type(exc).__name__})...")
+            if active_model == MODEL_V2 and MODEL_V1 and MODEL_V1 != MODEL_V2:
+                if is_real_http and isinstance(exc, httpx.TimeoutException):
+                    _V2_TIMED_OUT_MODELS.add(target_model)
+                if is_real_http:
+                    post_kwargs["timeout"] = V2_FALLBACK_TIMEOUT_SEC
+                log.info(f"DashScope {active_model} retry cepat via {MODEL_V1} ({type(exc).__name__})...")
                 payload["model"] = MODEL_V1
-                return _post_and_parse(payload)
+                try:
+                    return _post_and_parse(payload)
+                except httpx.TimeoutException:
+                    if is_real_http and MODEL_V1 != "qwen-plus":
+                        log.info("DashScope %s timeout -> fallback cepat ke qwen-plus...", MODEL_V1)
+                        payload["model"] = "qwen-plus"
+                        return _post_and_parse(payload)
+                    raise
             raise
 
 
@@ -1065,13 +1096,14 @@ def run_meta_aggregator(
     voter_verdicts: dict[str, dict],
     pre_analysis: dict[str, Any],
     gemini: Optional[GeminiClient] = None,
+    prefer_classai: bool = False,
 ) -> dict[str, Any]:
     """
     Jalankan Meta-Aggregator Chief Risk Officer untuk sintesis keputusan P1-P7.
     Prioritas:
-      1. Utama via DashScope (`DASHSCOPE_API_KEY`): `glm-5.3` (#1 OAK Winner +29.4%, 0 liq)
-         -> fallback `glm-5.3-prime` -> `glm-5.2-fast-preview` -> `qwen-plus` -> `qwen-flash`
-      2. Cadangan via ClassAI Router: `claude-opus-5.5` -> `gpt-6.1-sol`
+      1. Jika `prefer_classai=True` & `gemini` tersedia: ClassAI Router (`claude-opus-5.5` -> `gpt-6.1-sol`)
+         lebih dulu agar DashScope hanya melayani Voter V1 & V2 tanpa antrean.
+      2. DashScope (`DASHSCOPE_API_KEY`): `AGGREGATOR_MODEL_CHAIN` -> fallback ClassAI (jika belum dicoba).
       3. Deterministic rule-based synthesis bila semua LLM gagal.
     """
     if (qwen or gemini) and len(voter_verdicts) > 0:
@@ -1090,7 +1122,25 @@ def run_meta_aggregator(
             agg_deadline = time.monotonic() + AGGREGATOR_TOTAL_BUDGET_SEC
             ds_msgs = [{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}]
 
-            # 1. Utama: DashScope Aggregator (`glm-5.3` -> `glm-5.3-prime` -> ...) memakai DASHSCOPE_API_KEY
+            # 0. Opsi prioritas ClassAI terlebih dulu agar bebas antrean DashScope
+            if prefer_classai and gemini is not None:
+                for candidate in CLASSAI_AGGREGATOR_CHAIN:
+                    rem = agg_deadline - time.monotonic()
+                    if rem <= 5.0:
+                        last_error = "budget waktu habis"
+                        break
+                    try:
+                        agg_res = _call_agg_with_budget(gemini, True, prompt, sys_msg, candidate, rem)
+                    except Exception as exc:
+                        last_error = f"{type(exc).__name__}: {exc}"
+                        log.warning(f"Meta-Aggregator ClassAI {candidate} gagal {ticker}: {last_error[:170]}")
+                        continue
+                    if _finalize_agg_result(agg_res, candidate):
+                        return agg_res
+                    last_error = f"respons {candidate} tidak lengkap: {sorted(agg_res)[:6] if isinstance(agg_res, dict) else type(agg_res).__name__}"
+                    log.warning(f"Meta-Aggregator ClassAI {candidate} untuk {ticker}: {last_error}")
+
+            # 1. DashScope Aggregator (`glm-5.3` / `glm-5.2-fast-preview` -> ...) memakai DASHSCOPE_API_KEY
             if qwen is not None:
                 for candidate in AGGREGATOR_MODEL_CHAIN:
                     rem = agg_deadline - time.monotonic()
@@ -1111,8 +1161,8 @@ def run_meta_aggregator(
                     log.warning(f"Meta-Aggregator DashScope {candidate} untuk {ticker}: {last_error}")
                     break
 
-            # 2. Cadangan: ClassAI Aggregator (`claude-opus-5.5` -> `gpt-6.1-sol`) bila DashScope gagal/timeout
-            if gemini is not None:
+            # 2. Cadangan: ClassAI Aggregator (`claude-opus-5.5` -> `gpt-6.1-sol`) bila belum dicoba di awal
+            if not prefer_classai and gemini is not None:
                 for candidate in CLASSAI_AGGREGATOR_CHAIN:
                     rem = agg_deadline - time.monotonic()
                     if rem <= 5.0:
@@ -1642,13 +1692,14 @@ def research_stock(
     # 2. Pre-processing Varians & Konsensus P1-P7
     pre_analysis = analyze_voter_variance(voter_verdicts)
 
-    # 3. Meta-Aggregator Sintesis (prioritas ClassAI gpt-6.1-sol/claude-opus-5.5 -> DashScope GLM/Qwen)
+    # 3. Meta-Aggregator Sintesis (prioritas ClassAI claude-opus-5.5/gpt-6.1-sol -> cadangan DashScope)
     agg_result = run_meta_aggregator(
         qwen,
         ticker,
         voter_verdicts,
         pre_analysis,
         gemini=gemini if active_secondary != "glm" else None,
+        prefer_classai=True,
     )
 
     final_score = float(agg_result.get("final_score", 0.0))

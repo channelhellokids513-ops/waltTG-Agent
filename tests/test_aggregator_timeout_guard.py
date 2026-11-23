@@ -136,3 +136,72 @@ def test_scan_with_research_stops_research_loop_when_job_time_low(monkeypatch):
     res = walt_bot.scan_with_research(_FakeClient(), auto_execute=True, dry_run=False)
     assert research_calls == []
     assert "summary" in res and "top_opportunities" in res["summary"]
+
+
+def test_meta_aggregator_prefer_classai_runs_classai_first_and_skips_dashscope():
+    """Opsi 2: saat prefer_classai=True, ClassAI dipanggil lebih dulu dan DashScope tidak dipanggil bila ClassAI sukses."""
+    verdicts, pre = _sample_verdicts_and_pre()
+
+    class _FailIfCalledDashScope:
+        def __init__(self):
+            self.called = []
+
+        def chat_json(self, messages, model=None):
+            self.called.append(model)
+            return _valid_agg_payload(0.4)
+
+    class _FastClassAI:
+        def __init__(self):
+            self.called = []
+
+        def chat_json(self, prompt, system_instruction=None, model=None):
+            self.called.append(model)
+            return _valid_agg_payload(0.65)
+
+    ds = _FailIfCalledDashScope()
+    ca = _FastClassAI()
+    agg = llm_research.run_meta_aggregator(ds, "NVDA", verdicts, pre, gemini=ca, prefer_classai=True)
+    assert ca.called == [llm_research.CLASSAI_AGGREGATOR_CHAIN[0]]
+    assert ds.called == []
+    assert agg["aggregator_model"] == llm_research.CLASSAI_AGGREGATOR_CHAIN[0]
+
+    class _FailClassAI:
+        def chat_json(self, *a, **kw):
+            raise RuntimeError("classai down")
+
+    ds2 = _FailIfCalledDashScope()
+    agg2 = llm_research.run_meta_aggregator(ds2, "NVDA", verdicts, pre, gemini=_FailClassAI(), prefer_classai=True)
+    assert ds2.called == [llm_research.AGGREGATOR_MODEL_CHAIN[0]]
+    assert agg2["aggregator_model"] == llm_research.AGGREGATOR_MODEL_CHAIN[0]
+
+
+def test_qwen_client_v2_25s_timeout_and_circuit_breaker(monkeypatch):
+    """Attempt pertama MODEL_V2 dibatasi 25s, fallback ke MODEL_V1 saat ReadTimeout, dan memutus sirkuit call V2 berikutnya."""
+    import json
+
+    monkeypatch.setattr(llm_research, "_V2_TIMED_OUT_MODELS", set())
+    calls: list[tuple[str, float | None]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        model = body.get("model", "")
+        t_ext = request.extensions.get("timeout") or {}
+        read_t = t_ext.get("read") if isinstance(t_ext, dict) else t_ext
+        calls.append((model, read_t))
+        if model == llm_research.MODEL_V2:
+            raise httpx.ReadTimeout("simulated V2 slow timeout")
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"ok": true}'}}]})
+
+    qc = llm_research.QwenClient(api_key="dummy-key")
+    qc.client = httpx.Client(base_url=llm_research.DASHSCOPE_BASE, transport=httpx.MockTransport(_handler))
+
+    out1 = qc.chat_json([{"role": "user", "content": "hi"}], model=llm_research.MODEL_V2)
+    assert out1 == {"ok": True}
+    assert calls[0] == (llm_research.MODEL_V2, llm_research.V2_PRIMARY_TIMEOUT_SEC)
+    assert calls[1] == (llm_research.MODEL_V1, llm_research.V2_FALLBACK_TIMEOUT_SEC)
+    assert llm_research.MODEL_V2 in llm_research._V2_TIMED_OUT_MODELS
+
+    out2 = qc.chat_json([{"role": "user", "content": "hi 2"}], model=llm_research.MODEL_V2)
+    assert out2 == {"ok": True}
+    assert calls[2] == (llm_research.MODEL_V1, llm_research.V2_FALLBACK_TIMEOUT_SEC)
+
