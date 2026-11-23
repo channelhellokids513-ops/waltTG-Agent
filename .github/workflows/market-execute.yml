@@ -58,7 +58,7 @@ jobs:
           DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
           DASHSCOPE_MODEL: ${{ vars.DASHSCOPE_MODEL || 'glm-5.3-prime' }}
           DASHSCOPE_MODEL_V1: ${{ vars.DASHSCOPE_MODEL_V1 || 'glm-5.2-fast-preview' }}
-          DASHSCOPE_MODEL_AGG: ${{ vars.DASHSCOPE_MODEL_AGG || 'glm-5.3' }}
+          DASHSCOPE_MODEL_AGG: ${{ vars.DASHSCOPE_MODEL_AGG || 'glm-5.2-fast-preview' }}
           DASHSCOPE_API_GEMINI_KEY: ${{ secrets.DASHSCOPE_API_GEMINI_KEY || secrets.GEMINI_API_KEY }}
           GEMINI_BASE_URL: ${{ vars.GEMINI_BASE_URL || 'https://router.classai.id/v1' }}
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'minimax-m3' }}
@@ -85,7 +85,7 @@ jobs:
           CRYPTO_FORECAST_UNIVERSE: ${{ vars.CRYPTO_FORECAST_UNIVERSE || 'all' }}
           STOCK_FORECAST_ENGINE: ${{ vars.STOCK_FORECAST_ENGINE || 'on' }}
           DYNAMIC_SL_MODE: ${{ vars.DYNAMIC_SL_MODE || 'atr' }}
-          RESEARCH_MODE: ${{ vars.RESEARCH_MODE || 'oak_single' }}
+          RESEARCH_MODE: ${{ vars.RESEARCH_MODE || 'swarm' }}
           WALT_STATE_WARM: ${{ steps.state_probe.outputs.warm }}
         run: |
           mkdir -p logs

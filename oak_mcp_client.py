@@ -67,6 +67,58 @@ _CRYPTO_TICKER_TO_OAK_ID: dict[str, str] = {
     "ADA": "cardano",
 }
 
+try:
+    from market_chart import CRYPTO_ASSETS as _CHART_CRYPTO_ASSETS
+except Exception:
+    _CHART_CRYPTO_ASSETS = set()
+_KNOWN_CRYPTO_SYMBOLS: frozenset[str] = frozenset(_CRYPTO_TICKER_TO_OAK_ID.keys()) | frozenset(_CHART_CRYPTO_ASSETS)
+
+
+def extract_earnings_days_from_oak_calendar(
+    ticker: str,
+    calendar_raw: str = "",
+    now_utc: Optional[datetime] = None,
+) -> tuple[Optional[int], str]:
+    """Ambil hari menuju earnings berikutnya dari kalender OAKresearch MCP (`events`) tanpa Yahoo crumb/404."""
+    sym_u = str(ticker or "").strip().upper()
+    if not sym_u or not calendar_raw:
+        return None, "no_data"
+    try:
+        parsed = json.loads(calendar_raw)
+    except Exception:
+        return None, "no_data"
+    events = parsed.get("events") if isinstance(parsed, dict) else (parsed if isinstance(parsed, list) else [])
+    if not isinstance(events, list):
+        return None, "no_data"
+    now = now_utc or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    future_days: list[int] = []
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        ev_sym = str(ev.get("symbol") or "").strip().upper()
+        kind = str(ev.get("kind") or "").strip().lower()
+        title = str(ev.get("name") or ev.get("title") or "").strip().lower()
+        if ev_sym != sym_u:
+            continue
+        if kind != "earnings" and "earning" not in title:
+            continue
+        raw_dt = str(ev.get("startsAt") or ev.get("date") or "").strip()
+        if not raw_dt:
+            continue
+        try:
+            dt = datetime.fromisoformat(raw_dt.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            if dt >= now:
+                future_days.append(max(0, (dt - now).days))
+        except Exception:
+            continue
+    if future_days:
+        return min(future_days), "ok"
+    return None, "no_data"
+
 # Cache in-process agar market overview, kalender makro, & news global hanya ditarik 1x per siklus
 _GLOBAL_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _ASSET_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -566,13 +618,16 @@ def fetch_oak_market_context(
     if cli is None:
         return {"available": False, "reason": "not_configured", "ticker": sym, "headlines": []}
 
-    asset_is_crypto = (sym in _CRYPTO_TICKER_TO_OAK_ID) if is_crypto is None else bool(is_crypto)
+    asset_is_crypto = (sym in _KNOWN_CRYPTO_SYMBOLS) if is_crypto is None else bool(is_crypto)
     global_brief = fetch_oak_global_brief(client=cli)
 
     cal_summary = (
         _summarize_calendar(global_brief.get("calendar_raw", ""), focus_symbol=sym)
         if global_brief.get("calendar_raw")
         else global_brief.get("calendar", "")
+    )
+    oak_days_earn, oak_earn_status = extract_earnings_days_from_oak_calendar(
+        sym, global_brief.get("calendar_raw", "")
     )
     out: dict[str, Any] = {
         "available": bool(global_brief.get("available")),
@@ -582,6 +637,8 @@ def fetch_oak_market_context(
         "headlines": [],
         "market_overview": global_brief.get("market_overview", ""),
         "calendar": cal_summary,
+        "days_to_earnings": oak_days_earn,
+        "earnings_status": oak_earn_status,
         "smart_money": "",
         "errors": list(global_brief.get("errors", [])),
     }

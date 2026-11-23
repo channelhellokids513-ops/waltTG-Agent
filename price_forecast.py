@@ -34,7 +34,9 @@ NON_CRYPTO_SYMBOLS: frozenset[str] = frozenset({
     # Saham AS, ETF, Indeks, & Pre-IPO
     "NVDA", "NBIS", "CRCL", "MSTR", "AAPL", "GOOGL", "AMD", "PLTR", "COIN", "SNDK",
     "SPY", "QQQ", "US100", "SPX", "NDX", "DJI", "VIX", "DXY", "AMZN", "TSLA", "META",
-    "LIT", "VVV", "ANTHROPIC", "MSFT", "NFLX", "ORCL", "INTC", "MU", "ARM", "SMCI",
+    "LIT", "VVV", "ANTHROPIC", "ANT", "SPCX", "SPACEX", "SOXL", "SKHY", "IBM",
+    "MSFT", "NFLX", "ORCL", "INTC", "MU", "ARM", "SMCI", "OPENAI", "STRIPE", "XAI",
+    "DATABRICKS", "ANDURIL", "USDJPY", "DRV", "DRAM", "SAMSUNGUSD", "PRL", "CBRS",
     "UBER", "HOOD", "GME", "AMC", "RIVN", "DIS",
     # Komoditas & Logam
     "XAU", "XAG", "BRENTOIL", "WTI", "USOIL", "GOLD", "SILVER", "OIL", "COPPER",

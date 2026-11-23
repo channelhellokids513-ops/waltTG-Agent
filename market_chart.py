@@ -6,9 +6,10 @@ dan referensi sumber cek harga aktual untuk Bot Telegram Walt Trading.
 from __future__ import annotations
 
 import json
+import threading
 import time
 import urllib.parse
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -18,6 +19,13 @@ YAHOO_TICKER_MAP: dict[str, str] = {
     "XAG": "SI=F",
     "BRENTOIL": "BZ=F",
 }
+
+_YAHOO_UNLISTED_ASSETS: frozenset[str] = frozenset({
+    "ANTHROPIC", "ANT", "SPCX", "SPACEX", "OPENAI", "STRIPE", "XAI", "DATABRICKS", "ANDURIL",
+})
+
+_HL_UNIVERSE_CACHE: Optional[dict[str, str]] = None
+_HL_UNIVERSE_LOCK = threading.Lock()
 
 CRYPTO_ASSETS = {
     "BTC", "ETH", "SOL", "BNB", "XRP", "AVAX", "SUI", "LINK", "NEAR", "AAVE",
@@ -119,7 +127,7 @@ def _fetch_binance_candles(asset: str, interval: str = "1h", limit: int = 48) ->
     symbol = f"{asset.upper()}USDT"
     limit = max(1, min(int(limit), 1000))  # the klines endpoint rejects limit > 1000
     r = httpx.get(
-        "https://api.binance.com/api/v3/klines",
+        "https://data-api.binance.vision/api/v3/klines",
         params={"symbol": symbol, "interval": interval, "limit": limit},
         timeout=10.0,
     )
@@ -143,7 +151,10 @@ def _fetch_binance_candles(asset: str, interval: str = "1h", limit: int = 48) ->
 
 
 def _fetch_yahoo_candles(asset: str, interval: str = "1h", limit: int = 48) -> list[dict[str, Any]]:
-    ticker = YAHOO_TICKER_MAP.get(asset.upper(), asset.upper())
+    sym_u = str(asset or "").strip().upper()
+    if sym_u in _YAHOO_UNLISTED_ASSETS:
+        return []
+    ticker = YAHOO_TICKER_MAP.get(sym_u, sym_u)
     # A 48-bar chart only ever needed a few days; a liquidity-structure window needs
     # hundreds of bars, so the range has to scale with the requested limit.
     if limit > 700:
@@ -195,6 +206,35 @@ def _fetch_yahoo_candles(asset: str, interval: str = "1h", limit: int = 48) -> l
     return candles[-limit:]
 
 
+_ORIG_FETCH_HL = _fetch_hyperliquid_candles
+_ORIG_FETCH_BN = _fetch_binance_candles
+
+
+def get_hyperliquid_universe_map() -> dict[str, str]:
+    """Ambil dan cache peta simbol resmi Hyperliquid (`UPPER -> nama asli`) sekali per proses."""
+    global _HL_UNIVERSE_CACHE
+    with _HL_UNIVERSE_LOCK:
+        if _HL_UNIVERSE_CACHE is not None:
+            return dict(_HL_UNIVERSE_CACHE)
+        try:
+            r = httpx.post("https://api.hyperliquid.xyz/info", json={"type": "meta"}, timeout=10.0)
+            r.raise_for_status()
+            data = r.json()
+            mapping: dict[str, str] = {}
+            for u in (data.get("universe") or []):
+                if isinstance(u, dict) and u.get("name"):
+                    raw_name = str(u["name"]).strip()
+                    if raw_name:
+                        mapping[raw_name.upper()] = raw_name
+            _HL_UNIVERSE_CACHE = mapping
+        except Exception:
+            _HL_UNIVERSE_CACHE = {}
+        return dict(_HL_UNIVERSE_CACHE)
+
+
+_ORIG_GET_HL_MAP = get_hyperliquid_universe_map
+
+
 def fetch_crypto_candles(asset: str, interval: str = "1h", limit: int = 48) -> tuple[list[dict[str, Any]], str]:
     """Ambil candle OHLCV khusus kontrak Crypto dari Hyperliquid/Binance (tanpa Yahoo Finance)."""
     sym = asset.upper().strip()
@@ -207,13 +247,28 @@ def fetch_crypto_candles(asset: str, interval: str = "1h", limit: int = 48) -> t
     elif not sym.startswith("K"):
         hl_candidates.append(f"k{sym}")
 
-    for hl_sym in hl_candidates:
+    hl_patched = _fetch_hyperliquid_candles is not _ORIG_FETCH_HL
+    hl_map_patched = get_hyperliquid_universe_map is not _ORIG_GET_HL_MAP
+    hl_map = get_hyperliquid_universe_map() if (hl_map_patched or not hl_patched) else {}
+    if hl_map:
+        hl_run_list = [hl_map[c.upper()] for c in hl_candidates if c.upper() in hl_map]
+    elif hl_patched:
+        hl_run_list = hl_candidates
+    else:
+        hl_run_list = [sym] if (sym in CRYPTO_ASSETS or sym.lstrip("K") in CRYPTO_ASSETS) else []
+
+    for hl_sym in hl_run_list:
         try:
             candles = _fetch_hyperliquid_candles(hl_sym, interval, limit)
             if candles:
                 return candles, "Hyperliquid"
         except Exception:
             continue
+
+    bn_patched = _fetch_binance_candles is not _ORIG_FETCH_BN
+    base_no_prefix = sym[4:] if sym.startswith("1000") else (sym[1:] if sym.startswith("K") else sym)
+    if not bn_patched and sym not in CRYPTO_ASSETS and base_no_prefix not in CRYPTO_ASSETS:
+        return [], "Tidak tersedia"
 
     bn_candidates = [sym]
     if sym.startswith("K") and len(sym) > 1:

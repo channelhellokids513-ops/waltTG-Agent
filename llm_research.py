@@ -153,11 +153,49 @@ _NO_EARNINGS_TICKERS = {
 
 
 def get_research_mode() -> Literal["oak_single", "swarm"]:
-    """Mode riset aktif: default `oak_single` (OAK-First + Single Deep Analyst), opsional `swarm` (4-Voter)."""
-    raw = os.getenv(RESEARCH_MODE_ENV, "oak_single").strip().lower()
-    if raw in ("swarm", "4voter", "multi_voter"):
-        return "swarm"
-    return "oak_single"
+    """Mode riset aktif: default `swarm` (4-Voter Swarm), opsional `oak_single` (Single Deep Analyst)."""
+    raw = os.getenv(RESEARCH_MODE_ENV, "swarm").strip().lower()
+    if raw in ("oak_single", "single", "oak_fast"):
+        return "oak_single"
+    return "swarm"
+
+
+def _parse_json_lenient(raw_text: str) -> dict[str, Any]:
+    """Parse JSON dari respons LLM secara tangguh (<think>, markdown fence, trailing comma, raw newline)."""
+    text = str(raw_text or "").strip()
+    if "<think>" in text:
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+    if text.startswith("```json"):
+        text = text[7:].strip()
+    elif text.startswith("```"):
+        text = text[3:].strip()
+    if text.endswith("```"):
+        text = text[:-3].strip()
+
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    try:
+        parsed = json.loads(text, strict=False)
+        if isinstance(parsed, dict):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        sub = text[start:end + 1]
+        sub_clean = re.sub(r",\s*([}\]])", r"\1", sub)
+        parsed = json.loads(sub_clean, strict=False)
+        if isinstance(parsed, dict):
+            return parsed
+
+    raise json.JSONDecodeError("Respons LLM bukan objek JSON valid", text, 0)
 
 # P1-P7 Weights
 PARAM_WEIGHTS: dict[str, float] = {
@@ -245,33 +283,36 @@ class QwenClient:
         post_kwargs: dict[str, Any] = {"json": payload}
         if timeout is not None:
             post_kwargs["timeout"] = float(timeout)
-        r = self.client.post("/chat/completions", **post_kwargs)
 
-        # Fallback otomatis V1 -> V2 dan V4 GLM -> V3 GLM saat 404/429 upstream.
-        if r.status_code in (404, 429) and target_model == MODEL_V1:
-            reason = "rate limited (429)" if r.status_code == 429 else "model not found (404)"
-            log.warning(f"Qwen model {target_model} {reason}. Fallback ke {MODEL_V2}...")
-            payload["model"] = MODEL_V2
-            r = self.client.post("/chat/completions", **post_kwargs)
-        elif r.status_code in (404, 429) and target_model == MODEL_V4_GLM and MODEL_V3_GLM != MODEL_V4_GLM:
-            reason = "rate limited (429)" if r.status_code == 429 else "model not found (404)"
-            log.warning(f"GLM model {target_model} {reason}. Fallback ke {MODEL_V3_GLM}...")
-            payload["model"] = MODEL_V3_GLM
+        def _post_and_parse(req_payload: dict[str, Any]) -> dict[str, Any]:
+            post_kwargs["json"] = req_payload
             r = self.client.post("/chat/completions", **post_kwargs)
 
-        r.raise_for_status()
-        data = r.json()
-        content = data["choices"][0]["message"]["content"]
-        
-        # Clean markdown wrappers if any
-        text = content.strip()
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.startswith("```"):
-            text = text[3:]
-        if text.endswith("```"):
-            text = text[:-3]
-        return json.loads(text.strip())
+            # Fallback otomatis V1 -> V2 dan V4 GLM -> V3 GLM saat 404/429 upstream.
+            if r.status_code in (404, 429) and target_model == MODEL_V1:
+                reason = "rate limited (429)" if r.status_code == 429 else "model not found (404)"
+                log.warning(f"Qwen model {target_model} {reason}. Fallback ke {MODEL_V2}...")
+                req_payload["model"] = MODEL_V2
+                r = self.client.post("/chat/completions", **post_kwargs)
+            elif r.status_code in (404, 429) and target_model == MODEL_V4_GLM and MODEL_V3_GLM != MODEL_V4_GLM:
+                reason = "rate limited (429)" if r.status_code == 429 else "model not found (404)"
+                log.warning(f"GLM model {target_model} {reason}. Fallback ke {MODEL_V3_GLM}...")
+                req_payload["model"] = MODEL_V3_GLM
+                r = self.client.post("/chat/completions", **post_kwargs)
+
+            r.raise_for_status()
+            data = r.json()
+            content = data["choices"][0]["message"]["content"]
+            return _parse_json_lenient(content)
+
+        try:
+            return _post_and_parse(payload)
+        except (json.JSONDecodeError, httpx.TimeoutException) as exc:
+            if target_model == MODEL_V2 and MODEL_V1 and MODEL_V1 != MODEL_V2:
+                log.info(f"DashScope {target_model} retry cepat via {MODEL_V1} ({type(exc).__name__})...")
+                payload["model"] = MODEL_V1
+                return _post_and_parse(payload)
+            raise
 
 
 class GeminiClient:
@@ -370,20 +411,32 @@ class GeminiClient:
             "temperature": 0.2,
             "response_format": {"type": "json_object"},
         }
-        r = self.client.post(url, headers=headers, json=payload, timeout=req_timeout)
-
-        # Pengaman anti-404: bila env/variable lama masih memakai nama model Google native
-        # (mis. gemini-flash-latest / gemini-pro-latest), otomatis fallback ke gemini-4-argon.
-        if getattr(r, "status_code", 200) == 404 and target_model != GEMINI_CLASSAI_FALLBACK_MODEL:
-            log.warning(
-                f"Gemini router model '{target_model}' tidak ditemukan (404) di {self.base_url}. "
-                f"Fallback ke {GEMINI_CLASSAI_FALLBACK_MODEL}..."
-            )
-            payload["model"] = GEMINI_CLASSAI_FALLBACK_MODEL
+        try:
             r = self.client.post(url, headers=headers, json=payload, timeout=req_timeout)
 
-        r.raise_for_status()
-        return self._parse_response(r.json())
+            # Pengaman anti-404: bila env/variable lama masih memakai nama model Google native,
+            # otomatis fallback ke model fallback ClassAI.
+            if getattr(r, "status_code", 200) == 404 and target_model != GEMINI_CLASSAI_FALLBACK_MODEL:
+                log.warning(
+                    f"Gemini router model '{target_model}' tidak ditemukan (404) di {self.base_url}. "
+                    f"Fallback ke {GEMINI_CLASSAI_FALLBACK_MODEL}..."
+                )
+                payload["model"] = GEMINI_CLASSAI_FALLBACK_MODEL
+                r = self.client.post(url, headers=headers, json=payload, timeout=req_timeout)
+
+            r.raise_for_status()
+            return self._parse_response(r.json())
+        except (json.JSONDecodeError, httpx.HTTPError) as exc:
+            if payload.get("model") != GEMINI_CLASSAI_FALLBACK_MODEL:
+                log.info(
+                    f"ClassAI {payload.get('model')} gagal parse/HTTP ({type(exc).__name__}), "
+                    f"retry 1x via {GEMINI_CLASSAI_FALLBACK_MODEL}..."
+                )
+                payload["model"] = GEMINI_CLASSAI_FALLBACK_MODEL
+                r = self.client.post(url, headers=headers, json=payload, timeout=req_timeout)
+                r.raise_for_status()
+                return self._parse_response(r.json())
+            raise
 
     def _parse_response(self, res_data: dict) -> dict:
         text = ""
@@ -403,13 +456,7 @@ class GeminiClient:
         if not text:
             raise RuntimeError(f"Gemini API empty text content: {res_data}")
 
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.startswith("```"):
-            text = text[3:]
-        if text.endswith("```"):
-            text = text[:-3]
-        return json.loads(text.strip())
+        return _parse_json_lenient(text)
 
 
 # =============================================================================
@@ -541,6 +588,9 @@ def fetch_earnings_days_with_status(
 def fetch_earnings_days(ticker: str) -> Optional[int]:
     """Kontrak lama dipertahankan: hanya jumlah hari (None bila tidak diketahui)."""
     return fetch_earnings_days_with_status(ticker)[0]
+
+
+_ORIG_FETCH_EARNINGS_WITH_STATUS = fetch_earnings_days_with_status
 
 
 # =============================================================================
@@ -961,6 +1011,26 @@ Output HANYA JSON valid dengan skema:
 """
 
 
+def _compact_voters_for_aggregator(voter_verdicts: dict[str, dict]) -> dict[str, dict]:
+    """Ringkas output voter agar prompt Meta-Aggregator tetap padat dan cepat diproses."""
+    compact: dict[str, dict] = {}
+    for vk, vv in voter_verdicts.items():
+        if not isinstance(vv, dict):
+            continue
+        p_out: dict[str, Any] = {}
+        for pk, pv in (vv.get("params") or {}).items():
+            if isinstance(pv, dict):
+                p_out[pk] = {
+                    "score": pv.get("score", 0.0),
+                    "reasoning": str(pv.get("reasoning") or "")[:140],
+                }
+        compact[vk] = {
+            "overall_voter_confidence": vv.get("overall_voter_confidence", 0.5),
+            "params": p_out,
+        }
+    return compact
+
+
 def _call_agg_with_budget(
     client: Any,
     is_gemini: bool,
@@ -1014,7 +1084,7 @@ def run_meta_aggregator(
                 AGGREGATOR_PROMPT
                 .replace("{ticker}", ticker)
                 .replace("{pre_analysis_json}", json.dumps(pre_analysis, indent=2))
-                .replace("{raw_voters_json}", json.dumps(voter_verdicts, indent=2))
+                .replace("{raw_voters_json}", json.dumps(_compact_voters_for_aggregator(voter_verdicts), indent=2))
             )
             last_error = ""
             agg_deadline = time.monotonic() + AGGREGATOR_TOTAL_BUDGET_SEC
@@ -1312,23 +1382,35 @@ def research_stock(
     oak_block = ""
     oak_news: list[str] = []
     oak_asset_type = ""
+    oak_configured = False
+    oak_days_earnings: Optional[int] = None
+    oak_earnings_status = "no_data"
     try:
         import oak_mcp_client
 
         if oak_mcp_client.is_oak_mcp_configured():
+            oak_configured = True
             oak_ctx = oak_mcp_client.fetch_oak_market_context(ticker)
             oak_asset_type = str(oak_ctx.get("asset_type") or "").strip().lower()
             oak_block = oak_mcp_client.format_oak_context_for_prompt(oak_ctx)
             if oak_block:
                 strategy_context = f"{strategy_context}\n\n{oak_block}"
             oak_news = [str(h).strip() for h in (oak_ctx.get("headlines") or []) if str(h).strip()]
+            raw_d = oak_ctx.get("days_to_earnings")
+            oak_days_earnings = int(raw_d) if raw_d is not None else None
+            oak_earnings_status = str(oak_ctx.get("earnings_status") or "no_data")
     except Exception as exc:
         log.warning(f"OAK MCP enrichment dilewati untuk {ticker}: {exc}")
 
-    # Earnings check: lewati untuk crypto/ETF agar bebas 404 latency; saham individual tetap dicek untuk guard H-7
+    # Earnings check: lewati untuk crypto/ETF agar bebas 404 latency; untuk saham individual pakai
+    # kalender OAKresearch MCP (tanpa Yahoo fc.yahoo.com/quoteSummary 404), tetap hormati monkeypatch test.
     sym_u = str(ticker or "").strip().upper()
-    if active_mode == "oak_single" and (oak_asset_type == "crypto" or sym_u in _NO_EARNINGS_TICKERS):
-        days_earnings, earnings_status = None, "not_applicable"
+    if oak_asset_type == "crypto" or sym_u in _NO_EARNINGS_TICKERS:
+        days_earnings, earnings_status = None, "not_applicable" if active_mode == "oak_single" else "no_data"
+    elif fetch_earnings_days_with_status is not _ORIG_FETCH_EARNINGS_WITH_STATUS:
+        days_earnings, earnings_status = fetch_earnings_days_with_status(ticker)
+    elif oak_configured:
+        days_earnings, earnings_status = oak_days_earnings, oak_earnings_status
     else:
         days_earnings, earnings_status = fetch_earnings_days_with_status(ticker)
 

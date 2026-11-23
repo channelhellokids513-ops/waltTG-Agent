@@ -4712,7 +4712,7 @@ def scan_with_research(
         else:
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
-            max_w = min(4, len(eligible_opps))
+            max_w = min(2 if research_mode == "swarm" else 4, len(eligible_opps))
             log.info(f"  ⚡ Riset paralel {len(eligible_opps)} aset (workers={max_w}, mode={research_mode})...")
 
             def _run_one_asset(item: dict) -> Research:

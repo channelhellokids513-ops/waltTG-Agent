@@ -33,15 +33,15 @@ def _valid_single_payload(score: float = 0.55, consensus: str = "strong", p5: fl
     }
 
 
-def test_default_research_mode_is_oak_single(monkeypatch):
+def test_default_research_mode_is_swarm_with_oak_single_option(monkeypatch):
     monkeypatch.delenv("RESEARCH_MODE", raising=False)
-    assert llm_research.get_research_mode() == "oak_single"
-    monkeypatch.setenv("RESEARCH_MODE", "swarm")
     assert llm_research.get_research_mode() == "swarm"
+    monkeypatch.setenv("RESEARCH_MODE", "oak_single")
+    assert llm_research.get_research_mode() == "oak_single"
 
 
 def test_oak_single_skips_yahoo_for_crypto_and_uses_classai_single_pass(monkeypatch):
-    monkeypatch.delenv("RESEARCH_MODE", raising=False)
+    monkeypatch.setenv("RESEARCH_MODE", "oak_single")
     oak_mcp_client.reset_oak_cache()
 
     yahoo_calls = []
@@ -96,7 +96,7 @@ def test_oak_single_skips_yahoo_for_crypto_and_uses_classai_single_pass(monkeypa
 
 
 def test_oak_single_checks_earnings_for_us_stock_and_falls_back_on_error(monkeypatch):
-    monkeypatch.delenv("RESEARCH_MODE", raising=False)
+    monkeypatch.setenv("RESEARCH_MODE", "oak_single")
     earnings_checked = []
 
     monkeypatch.setattr(oak_mcp_client, "is_oak_mcp_configured", lambda: True)
@@ -257,3 +257,100 @@ def test_scan_with_research_parallelizes_across_assets(monkeypatch):
     out = walt_bot.scan_with_research(_FakeClient(), auto_execute=True, dry_run=False)
     assert set(researched) == {"NVDA", "SPY", "AAVE"}
     assert set(out["researches"].keys()) == {"NVDA", "SPY", "AAVE"}
+
+
+def test_parse_json_lenient_handles_think_fence_trailing_comma_and_raw_newlines():
+    noisy = (
+        "<think>\nanalisa internal...\n</think>\n"
+        "```json\n"
+        '{\n  "ok": true,\n  "note": "baris 1\nbaris 2",\n  "score": 0.45,\n}\n'
+        "```"
+    )
+    parsed = llm_research._parse_json_lenient(noisy)
+    assert parsed["ok"] is True
+    assert parsed["score"] == 0.45
+    assert "baris 1" in parsed["note"]
+
+
+def test_swarm_mode_uses_oak_calendar_without_yahoo_404_and_scores_news_oak(monkeypatch):
+    monkeypatch.delenv("RESEARCH_MODE", raising=False)
+    oak_mcp_client.reset_oak_cache()
+
+    def _forbid_yahoo_session():
+        raise AssertionError("_yahoo_session tidak boleh dipanggil saat OAKresearch aktif!")
+
+    monkeypatch.setattr(llm_research, "_yahoo_session", _forbid_yahoo_session)
+    monkeypatch.setattr(llm_research, "fetch_headlines", lambda t, limit=10: [f"Yahoo: {t} climbs 3%"])
+    monkeypatch.setattr(oak_mcp_client, "is_oak_mcp_configured", lambda: True)
+    monkeypatch.setattr(
+        oak_mcp_client,
+        "fetch_oak_market_context",
+        lambda t: {
+            "available": True,
+            "ticker": t,
+            "asset_type": "tradfi",
+            "asset_data": "NVDA (tradfi) | price=$142.00 | 24h=+3.10%",
+            "market_overview": "Risk-on sentiment",
+            "calendar": "2026-12-10 [earnings/high] NVDA Q3",
+            "days_to_earnings": 16,
+            "earnings_status": "ok",
+            "headlines": ["OAK: NVDA AI demand stays robust"],
+        },
+    )
+
+    def _fake_voter(v_id):
+        def _run(client, ticker, headlines, strategy_context=""):
+            assert "[DATA REAL-TIME OAK RESEARCH MCP]" in strategy_context
+            return {
+                "voter_id": v_id,
+                "overall_voter_confidence": 0.85,
+                "params": {
+                    p: {"score": 0.6 if p in ("P1_sentiment_polarity", "P4_momentum_direction", "P7_historical_pattern") else 0.75, "reasoning": "ok"}
+                    for p in llm_research.PARAM_WEIGHTS
+                },
+            }
+        return _run
+
+    monkeypatch.setattr(llm_research, "run_voter_1", _fake_voter("V1_qwen_turbo"))
+    monkeypatch.setattr(llm_research, "run_voter_2", _fake_voter("V2_qwen_plus"))
+    monkeypatch.setattr(llm_research, "run_voter_3", _fake_voter("V3_gemini_flash"))
+    monkeypatch.setattr(llm_research, "run_voter_4", _fake_voter("V4_gemini_pro"))
+    monkeypatch.setattr(
+        llm_research,
+        "run_meta_aggregator",
+        lambda *a, **k: {
+            "final_score": 0.52,
+            "overall_confidence": 0.85,
+            "overall_consensus_level": "STRONG",
+            "vendor_alignment": "both_agree",
+            "most_influential_parameter": "P1_sentiment_polarity",
+            "justification": "Swarm menyetujui sinyal berita dan OAK MCP positif.",
+            "disagreement_summary": [],
+            "per_parameter_final": {
+                p: {"final_score": 0.6 if p in ("P1_sentiment_polarity", "P4_momentum_direction", "P7_historical_pattern") else 0.75, "trusted_voter": "CONSENSUS", "rationale": "ok"}
+                for p in llm_research.PARAM_WEIGHTS
+            },
+        },
+    )
+
+    res = llm_research.research_stock("NVDA", qwen=object(), gemini=object())
+    assert res.days_to_earnings == 16
+    assert res.earnings_status == "ok"
+    assert res.voters_count == 4
+    assert res.news_sentiment == "bullish"
+    assert res.overall_consensus_level == "STRONG"
+    assert res.p1_to_p7_scores["P1_sentiment_polarity"] == 0.6
+    assert "[DATA REAL-TIME OAK RESEARCH MCP]" in res.oak_context_block
+
+
+def test_market_chart_guards_unlisted_yahoo_and_hl_universe(monkeypatch):
+    import market_chart
+
+    assert market_chart._fetch_yahoo_candles("ANTHROPIC") == []
+    monkeypatch.setattr(market_chart, "get_hyperliquid_universe_map", lambda: {"BTC": "BTC"})
+    hl_called = []
+    monkeypatch.setattr(market_chart, "_fetch_hyperliquid_candles", lambda s, *a: hl_called.append(s) or [])
+    candles, src = market_chart.fetch_crypto_candles("UNKNOWNCOIN_XYZ", interval="1h", limit=24)
+    assert candles == [] and src == "Tidak tersedia"
+    assert hl_called == []
+
