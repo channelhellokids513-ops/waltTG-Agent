@@ -55,48 +55,96 @@ def test_gate_zero_defaults_keep_old_behavior(monkeypatch):
     assert "bull_pressure" in sig  # field bahan AI selalu ada
 
 
-def test_long_fade_vetoed_by_bearish_structure_and_allowed_by_bullish(monkeypatch):
-    monkeypatch.setattr(pf, "_gravity_bull_pressure", lambda candles: 40.0)
+def test_long_fade_structure_only_informs_never_vetoes(monkeypatch):
     _cfg_gates(monkeypatch, 52.0, 0.0)
     c4 = _flat_candles()
     c1 = _stretched(_flat_candles(), 0.986)  # flush ekstrem -> V4 LONG
-    base_sig = pf.evaluate_crypto_live_fade_signal("SOL", c4, c1, funding_daily=0.0005)
-    assert base_sig is None  # bull 40 < 52 -> struktur memveto LONG
-    monkeypatch.setattr(pf, "_gravity_bull_pressure", lambda candles: 60.0)
+    monkeypatch.setattr(pf, "_gravity_bull_pressure", lambda candles: 40.0)
     sig = pf.evaluate_crypto_live_fade_signal("SOL", c4, c1, funding_daily=0.0005)
-    assert sig is not None and sig["side"] == "long" and sig["bull_pressure"] == 60.0
+    assert sig is not None and sig["side"] == "long"  # TIDAK diveto struktur
+    assert sig["bull_pressure"] == 40.0
+    monkeypatch.setattr(pf, "_gravity_bull_pressure", lambda candles: 60.0)
+    sig2 = pf.evaluate_crypto_live_fade_signal("SOL", c4, c1, funding_daily=0.0005)
+    assert sig2 is not None and sig2["bull_pressure"] == 60.0
 
 
-def test_short_fade_requires_bear_pressure_threshold(monkeypatch):
+def test_short_fade_structure_only_informs_never_vetoes(monkeypatch):
     _cfg_gates(monkeypatch, 0.0, 55.0)
     c4 = _flat_candles()
     c1 = _stretched(_flat_candles(), 1.014)  # spike -> V4 SHORT
     monkeypatch.setattr(pf, "_gravity_bull_pressure", lambda candles: 80.0)  # bear 20 < 55
-    assert pf.evaluate_crypto_live_fade_signal("SOL", c4, c1, funding_daily=0.0005) is None
-    monkeypatch.setattr(pf, "_gravity_bull_pressure", lambda candles: 20.0)  # bear 80 >= 55
     sig = pf.evaluate_crypto_live_fade_signal("SOL", c4, c1, funding_daily=0.0005)
-    assert sig is not None and sig["side"] == "short" and sig["bull_pressure"] == 20.0
+    assert sig is not None and sig["side"] == "short" and sig["bull_pressure"] == 80.0
+    monkeypatch.setattr(pf, "_gravity_bull_pressure", lambda candles: 20.0)  # bear 80 >= 55
+    sig2 = pf.evaluate_crypto_live_fade_signal("SOL", c4, c1, funding_daily=0.0005)
+    assert sig2 is not None and sig2["bull_pressure"] == 20.0
 
 
-def test_stock_dip_long_gated_by_structure(monkeypatch):
+def test_stock_dip_structure_only_informs_never_vetoes(monkeypatch):
     _cfg_gates(monkeypatch, 52.0, 0.0)
     dip = _stretched(_flat_candles(), 0.985, tail=5, vol=8000.0)
     monkeypatch.setattr(pf, "_gravity_bull_pressure", lambda candles: 45.0)
-    assert pf.evaluate_stock_live_dip_signal("NVDA", candles_1h=dip, candles_1d=None,
-                                             funding_daily=-0.0005) is None
-    monkeypatch.setattr(pf, "_gravity_bull_pressure", lambda candles: 58.0)
     sig = pf.evaluate_stock_live_dip_signal("NVDA", candles_1h=dip, candles_1d=None,
-                                           funding_daily=-0.0005)
-    assert sig is not None and sig["side"] == "long" and sig["bull_pressure"] == 58.0
+                                            funding_daily=-0.0005)
+    assert sig is not None and sig["side"] == "long" and sig["bull_pressure"] == 45.0
+
+
+def _research_neutral(consensus="STRONG"):
+    return llm_research.Research(
+        ticker="SOL", days_to_earnings=None, news_sentiment="neutral", narrative="x",
+        confidence=0.7, fetched_at="2026-11-24T00:00:00+00:00", consensus=consensus,
+        overall_consensus_level=consensus, vendor_alignment="aligned", final_score=0.05)
+
+
+def _opp_e2(side="long", grav=None):
+    return Opportunity(contract_id=1, base_asset="SOL", funding_daily=0.0005, volume_24h=1e7,
+                       max_leverage=2, side=side, signal_source="price_forecast",
+                       forecast_setup="V5_4H_REJ_COMFORT", grav_bull_pressure=grav)
+
+
+def test_go_nogo_amplifies_conviction_only_when_aligned(monkeypatch):
+    _cfg_gates(monkeypatch, 52.0, 55.0)
+    # LONG & struktur bullish 64.6 -> GO dengan conviction +10%
+    v, r, m = walt_bot.decide_go_nogo(_opp_e2("long", 64.6), _research_neutral())
+    assert v == "GO" and m == pytest.approx(1.10) and "🧲" in r and "searah" in r
+    # LONG & struktur bearish 40 -> verdict TETAP milik AI, tanpa penalti/boost
+    v2, r2, m2 = walt_bot.decide_go_nogo(_opp_e2("long", 40.0), _research_neutral())
+    assert v2 == "GO" and m2 == pytest.approx(1.0) and "tak searah" in r2
+    # SHORT & bear 80 (bull 20) -> +10%
+    v3, _r3, m3 = walt_bot.decide_go_nogo(_opp_e2("short", 20.0), _research_neutral())
+    assert v3 == "GO" and m3 == pytest.approx(1.10)
+    # SHORT & bear 40 (bull 60) -> tanpa boost
+    _v4, _r4, m4 = walt_bot.decide_go_nogo(_opp_e2("short", 60.0), _research_neutral())
+    assert m4 == pytest.approx(1.0)
+    # tanpa data gravity -> perilaku lama utuh
+    _v5, r5, m5 = walt_bot.decide_go_nogo(_opp_e2("long", None), _research_neutral())
+    assert m5 == pytest.approx(1.0) and "🧲" not in r5
+
+
+def test_go_nogo_halves_case_amplified_but_skip_untouched(monkeypatch):
+    _cfg_gates(monkeypatch, 52.0, 55.0)
+    # SPLIT -> HALF (0.5) lalu struktur searah -> 0.55
+    _v, r, m = walt_bot.decide_go_nogo(_opp_e2("long", 70.0), _research_neutral(consensus="SPLIT"))
+    assert m == pytest.approx(0.55) and "🧲" in r
+    # SKIP (P5 tinggi) TIDAK boleh dinaikkan apa pun
+    res_bad = llm_research.Research(
+        ticker="SOL", days_to_earnings=None, news_sentiment="neutral", narrative="x",
+        confidence=0.7, fetched_at="2026-11-24T00:00:00+00:00", consensus="STRONG",
+        overall_consensus_level="STRONG", vendor_alignment="aligned", final_score=0.05,
+        p1_to_p7_scores={"P5_risk_catalysts": 0.9})
+    v, r2, m2 = walt_bot.decide_go_nogo(_opp_e2("long", 70.0), res_bad)
+    assert v == "SKIP" and m2 == 0.0 and "🧲" not in r2
 
 
 def test_context_block_carries_pressure_and_gates_as_ai_material(monkeypatch):
     _cfg_gates(monkeypatch, 52.0, 55.0)
     txt = llm_research._build_strategy_context_block(
         "SOL", funding_daily=0.0005, recommended_side="long", grav_pressure=63.4)
-    assert "bullish_pressure=63.4%" in txt
-    assert "LONG butuh bull pressure >= 52%" in txt
-    assert "P4" in txt  # eksplisit memerintahkan voter memperhitungkannya
+    assert "bullish_pressure=63.4/100" in txt
+    assert "total selalu 100" in txt
+    assert "pemutus UTAMA" in txt          # AI (berita+OAK MCP) = pemutus utama
+    assert "PENGUAT keputusan, bukan penentu" in txt
+    assert "LONG bila bull >= 52" in txt
     plain = llm_research._build_strategy_context_block(
         "SOL", funding_daily=0.0005, recommended_side="long")
     assert "Market Gravity" not in plain

@@ -712,14 +712,15 @@ def _build_strategy_context_block(
         bias = "BULLISH (magnet atas dominan)" if grav_pressure >= 55.0 else (
             "BEARISH (magnet bawah dominan)" if grav_pressure <= 45.0 else "SEIMBANG")
         gate_txt = (
-            f"Gerbang mesin: LONG butuh bull pressure >= {_lt:.0f}%, "
-            f"SHORT butuh bear pressure >= {_st:.0f}%."
-            if (_lt > 0 or _st > 0) else "Gerbang mesin pressure sedang nonaktif."
+            f"Ambang keselarasan: LONG bila bull >= {_lt:.0f}, SHORT bila bear >= {_st:.0f}."
+            if (_lt > 0 or _st > 0) else "Ambang keselarasan default 50/100."
         )
         grav_txt = (
-            f" Data Market Gravity terkini: bullish_pressure={grav_pressure:.1f}% "
-            f"(bearish {100.0 - grav_pressure:.1f}%) — struktur {bias}. {gate_txt} "
-            "Faktor P4 momentummu HARUS memperhitungkan tekanan struktur ini."
+            f" Data Market Gravity terkini: bullish_pressure={grav_pressure:.1f}/100 "
+            f"(bearish {100.0 - grav_pressure:.1f}/100, total selalu 100) — struktur {bias}. {gate_txt} "
+            "PEDOMAN: berita + OAKresearch MCP adalah pemutus UTAMA; bila kesimpulanmu searah struktur ini, "
+            "tingkatkan keyakinan P4; bila berlawanan, sampaikan alasan kuat dari berita/MCP — "
+            "struktur hanya PENGUAT keputusan, bukan penentu."
         )
     return (
         f"Konteks Strategi: Bot sedang mempertimbangkan posisi {side_txt} pada {ticker} "

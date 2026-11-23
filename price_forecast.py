@@ -94,17 +94,24 @@ def _gravity_bull_pressure(candles: Optional[Sequence[Mapping[str, Any]]]) -> Op
 
 
 def _mg_pressure_gate_ok(side: str, bull_pressure: Optional[float]) -> tuple[bool, str]:
-    """Kembalikan (lolos, keterangan). Ambang 0 / pressure tak terbaca -> selalu lolos."""
+    """Deteksi STRUKTUR SEPARAH arah trade (penguat, bukan veto).
+
+    Poin selalu netral-100 (bull + bear = 100). Ambang 0 -> default 50 (cukup miring
+    ke sisi trade). Pressure tak terbaca -> (True, "") agar tidak ada noise log.
+    Return (searah, keterangan_bila_tidak_searah).
+    """
     long_thr, short_thr = _mg_pressure_gates()
-    if bull_pressure is None or (side == "long" and long_thr <= 0.0) or (side != "long" and short_thr <= 0.0):
+    if bull_pressure is None:
         return True, ""
+    thr_l = long_thr or 50.0
+    thr_s = short_thr or 50.0
     if side == "long":
-        if bull_pressure < long_thr:
-            return False, f"MG gate LONG: bull_pressure {bull_pressure:.1f}% < {long_thr:.0f}%"
+        if bull_pressure < thr_l:
+            return False, f"struktur belum searah LONG (bull {bull_pressure:.1f}/100 < ambang {thr_l:.0f})"
         return True, ""
     bear = 100.0 - bull_pressure
-    if bear < short_thr:
-        return False, f"MG gate SHORT: bear_pressure {bear:.1f}% < {short_thr:.0f}%"
+    if bear < thr_s:
+        return False, f"struktur belum searah SHORT (bear {bear:.1f}/100 < ambang {thr_s:.0f})"
     return True, ""
 
 
@@ -686,10 +693,10 @@ def evaluate_crypto_live_fade_signal(
                 side1 = "long"
             if side1 is not None:
                 bull1 = _gravity_bull_pressure(candles_1h)
-                gate_ok1, gate_note1 = _mg_pressure_gate_ok(side1, bull1)
-                if not gate_ok1:
-                    log.info(f"  🧲 {sym}: {gate_note1} — V4_1H_EXTREME_FADE {side1.upper()} diveto struktur")
-            if side1 is not None and gate_ok1:
+                _al1, _note1 = _mg_pressure_gate_ok(side1, bull1)
+                if not _al1:
+                    log.info(f"  🧲 {sym}: {_note1} — diteruskan ke AI (struktur hanya penguat, bukan veto)")
+            if side1 is not None:
                 sl_pct = round(_clamp(1.0 * d1.atr_24h_pct, 0.015, FORECAST_SL_CAP_PCT), 4)
                 tp_pct = round(max(0.020, 1.2 * sl_pct), 4)
                 candidate = {
@@ -721,10 +728,10 @@ def evaluate_crypto_live_fade_signal(
                 side4 = "long"
             if side4 is not None:
                 bull4 = _gravity_bull_pressure(candles_4h)
-                gate_ok4, gate_note4 = _mg_pressure_gate_ok(side4, bull4)
-                if not gate_ok4:
-                    log.info(f"  🧲 {sym}: {gate_note4} — V5_4H_REJ_COMFORT {side4.upper()} diveto struktur")
-            if side4 is not None and gate_ok4:
+                _al4, _note4 = _mg_pressure_gate_ok(side4, bull4)
+                if not _al4:
+                    log.info(f"  🧲 {sym}: {_note4} — diteruskan ke AI (struktur hanya penguat, bukan veto)")
+            if side4 is not None:
                 sl_pct = round(_clamp(1.0 * d4.atr_24h_pct, 0.015, FORECAST_SL_CAP_PCT), 4)
                 tp_pct = round(max(0.020, 1.0 * sl_pct), 4)
                 candidate = {
@@ -944,9 +951,9 @@ def evaluate_stock_live_dip_signal(
         d1 = compute_price_delta_24h(sym, candles_1h, interval="1h", asset_class="stock")
         if d1 is not None and d1.z_move_24h <= -1.8 and d1.rsi_14 <= 32.0:
             bull1 = _gravity_bull_pressure(candles_1h)
-            if not _mg_pressure_gate_ok("long", bull1)[0]:
-                log.info(f"  🧲 {sym}: {_mg_pressure_gate_ok('long', bull1)[1]} — S1_1H_LONG_DIP diveto struktur")
-                return None
+            _al1s, _note1s = _mg_pressure_gate_ok("long", bull1)
+            if not _al1s:
+                log.info(f"  🧲 {sym}: {_note1s} — S1_1H_LONG_DIP diteruskan ke AI (tanpa boost)")
             sl_pct = round(_clamp(1.0 * d1.atr_24h_pct, 0.015, FORECAST_SL_CAP_PCT), 4)
             tp_pct = round(max(0.020, 1.3 * sl_pct), 4)
             candidate = {
@@ -971,9 +978,9 @@ def evaluate_stock_live_dip_signal(
         d_day = compute_price_delta_24h(sym, candles_1d, interval="1d", asset_class="stock")
         if d_day is not None and d_day.z_move_24h <= -1.8 and d_day.rsi_14 <= 32.0:
             bulld = _gravity_bull_pressure(candles_1d)
-            if not _mg_pressure_gate_ok("long", bulld)[0]:
-                log.info(f"  🧲 {sym}: {_mg_pressure_gate_ok('long', bulld)[1]} — S2_1D_LONG_DIP diveto struktur")
-                return None
+            _al2s, _note2s = _mg_pressure_gate_ok("long", bulld)
+            if not _al2s:
+                log.info(f"  🧲 {sym}: {_note2s} — S2_1D_LONG_DIP diteruskan ke AI (tanpa boost)")
             sl_pct = round(_clamp(1.0 * d_day.atr_24h_pct, 0.015, FORECAST_SL_CAP_PCT), 4)
             tp_pct = round(max(0.020, 1.3 * sl_pct), 4)
             candidate = {

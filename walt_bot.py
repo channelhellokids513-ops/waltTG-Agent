@@ -1567,7 +1567,52 @@ def crypto_research_set(pairs, limit: Optional[int] = None) -> set[str]:
     return {asset for asset, _f in rows[:cap]}
 
 
+def _grav_amplify_decision(
+    opp: Opportunity, verdict: str, reason: str, mult: float
+) -> tuple[Literal["GO", "HALF", "SKIP"], str, float]:
+    """Market Gravity = PENGUAT keputusan, BUKAN pemutus (keputusan pemilik 2026-11-24).
+
+    Poin selalu netral-100: bull pressure + bear pressure = 100. Aturan:
+      - AI (Berita + OAKresearch MCP) tetap pemutus utama verdict.
+      - Struktur SEPARAH AI (bull >= ambang utk LONG / bear >= ambang utk SHORT)
+        -> keyakinan +10% margin multiplier, ditandai 🧲 di reason.
+      - Struktur berlawanan -> TIDAK memblokir & TIDAK memberi penalti; hanya catatan
+        informatif agar AI tetap memegang keputusan (mis. hasil riset kuat melawan struktur).
+    """
+    grav = getattr(opp, "grav_bull_pressure", None)
+    if grav is None or verdict == "SKIP":
+        return verdict, reason, mult
+    try:
+        from strategy_config import load_strategy_config
+        _cfg = load_strategy_config()
+        thr_l = float(_cfg.get("grav_long_min_bull_pressure", 0.0) or 0.0) or 50.0
+        thr_s = float(_cfg.get("grav_short_min_bear_pressure", 0.0) or 0.0) or 50.0
+    except Exception as exc:
+        log.debug(f"grav amplify: pembacaan ambang gagal ({type(exc).__name__}: {exc}); pakai 50/50")
+        thr_l = thr_s = 50.0
+    bull = float(grav)
+    bear = 100.0 - bull
+    aligned = (opp.side == "long" and bull >= thr_l) or (opp.side == "short" and bear >= thr_s)
+    if aligned:
+        boosted = round(min(1.10, mult * 1.10), 4) if mult > 0 else mult
+        return verdict, f"{reason} | 🧲 struktur searah AI ({bull:.1f}/100 bull) → conviction +10%", boosted
+    return (
+        verdict,
+        f"{reason} | 🧲 struktur tak searah ({bull:.1f}/100 bull) → tanpa boost; keputusan tetap milik riset AI",
+        mult,
+    )
+
+
 def decide_go_nogo(
+    opp: Opportunity,
+    research: Optional[Research],
+) -> tuple[Literal["GO", "HALF", "SKIP"], str, float]:
+    """Verdict utama dari riset AI, lalu dikuatkan (bukan diputuskan ulang) oleh Market Gravity."""
+    verdict, reason, mult = _decide_go_nogo_ai(opp, research)
+    return _grav_amplify_decision(opp, verdict, reason, mult)
+
+
+def _decide_go_nogo_ai(
     opp: Opportunity,
     research: Optional[Research],
 ) -> tuple[Literal["GO", "HALF", "SKIP"], str, float]:

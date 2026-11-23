@@ -46,8 +46,10 @@ DEFAULT_STRATEGY_CONFIG: dict[str, Any] = {
     "expected_hold_hours": 24.0,    # E5: asumsi durasi tahan posisi (jam) untuk gerbang funding vs fee
     # MG: gerbang tekanan Market Gravity untuk Engine 2. 0.0 = NONAKTIF (perilaku lama).
     # Nilai spesifik (mis. 52/55) diaktifkan lewat STRATEGY_CONFIG_JSON — see price_forecast gates.
-    "grav_long_min_bull_pressure": 0.0,   # % bullish_pressure MINIMAL agar sinyal LONG Engine 2 lolos
-    "grav_short_min_bear_pressure": 0.0,  # % bearish_pressure MINIMAL agar sinyal SHORT Engine 2 lolos
+    # Poin selalu netral-100 (bull+bear=100). Dipakai sebagai PENGUAT keyakinan bila struktur
+    # searah verdict riset AI (Berita + OAK MCP) — bukan gerbang veto. 0 = default 50.
+    "grav_long_min_bull_pressure": 0.0,   # ambang bull >= X agar LONG mendapat boost conviction
+    "grav_short_min_bear_pressure": 0.0,  # ambang bear >= X agar SHORT mendapat boost conviction
     "dry_run": False,
 }
 
@@ -65,8 +67,8 @@ STRATEGY_PARAM_SPECS: dict[str, dict[str, Any]] = {
     "max_entries_per_day": {"type": "int", "min": 1, "max": 30, "desc": "Maksimal total entry dalam 24 jam"},
     "daily_loss_limit_pct": {"type": "float", "min": 0.01, "max": 0.25, "desc": "Batas penurunan ekuitas harian UTC untuk circuit breaker (mis. 0.05 = 5%)"},
     "expected_hold_hours": {"type": "float", "min": 1.0, "max": 168.0, "desc": "Target durasi tahan posisi (jam) untuk gerbang ekonomi funding vs fee"},
-    "grav_long_min_bull_pressure": {"type": "float", "min": 0.0, "max": 80.0, "desc": "Ambang bullish_pressure % minimal untuk LONG Engine 2 (0 = nonaktif; 52 = spesifik moderat)"},
-    "grav_short_min_bear_pressure": {"type": "float", "min": 0.0, "max": 80.0, "desc": "Ambang bearish_pressure % minimal untuk SHORT Engine 2 (0 = nonaktif; 55 = spesifik moderat)"},
+    "grav_long_min_bull_pressure": {"type": "float", "min": 0.0, "max": 80.0, "desc": "Ambang bull-pressure (dari 100) agar LONG dikuatkan +10% ketika searah riset AI (0 = default 50; 52 = moderat). Bukan veto."},
+    "grav_short_min_bear_pressure": {"type": "float", "min": 0.0, "max": 80.0, "desc": "Ambang bear-pressure (dari 100) agar SHORT dikuatkan +10% ketika searah riset AI (0 = default 50; 55 = moderat). Bukan veto."},
     "dry_run": {"type": "bool", "desc": "Mode simulasi tanpa order riil (true/false)"},
 }
 
