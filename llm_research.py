@@ -33,6 +33,7 @@ import os
 import json
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Literal, Optional, Any
@@ -130,6 +131,9 @@ for _candidate in [MODEL_AGGREGATOR] + [
     if _candidate and _candidate not in AGGREGATOR_MODEL_CHAIN:
         AGGREGATOR_MODEL_CHAIN.append(_candidate)
 
+AGGREGATOR_CALL_TIMEOUT_SEC = 35.0
+AGGREGATOR_TOTAL_BUDGET_SEC = 75.0
+
 # P1-P7 Weights
 PARAM_WEIGHTS: dict[str, float] = {
     "P1_sentiment_polarity": 0.25,
@@ -194,10 +198,15 @@ class QwenClient:
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",
             },
-            timeout=90.0,
+            timeout=60.0,
         )
 
-    def chat_json(self, messages: list[dict], model: Optional[str] = None) -> dict:
+    def chat_json(
+        self,
+        messages: list[dict],
+        model: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> dict:
         """Kirim request ke DashScope dengan response_format JSON (mendukung Qwen & GLM)."""
         target_model = model or self.model
         payload = {
@@ -206,19 +215,22 @@ class QwenClient:
             "temperature": 0.2,
             "response_format": {"type": "json_object"},
         }
-        r = self.client.post("/chat/completions", json=payload)
+        post_kwargs: dict[str, Any] = {"json": payload}
+        if timeout is not None:
+            post_kwargs["timeout"] = float(timeout)
+        r = self.client.post("/chat/completions", **post_kwargs)
 
         # Fallback otomatis V1 -> V2 dan V4 GLM -> V3 GLM saat 404/429 upstream.
         if r.status_code in (404, 429) and target_model == MODEL_V1:
             reason = "rate limited (429)" if r.status_code == 429 else "model not found (404)"
             log.warning(f"Qwen model {target_model} {reason}. Fallback ke {MODEL_V2}...")
             payload["model"] = MODEL_V2
-            r = self.client.post("/chat/completions", json=payload)
+            r = self.client.post("/chat/completions", **post_kwargs)
         elif r.status_code in (404, 429) and target_model == MODEL_V4_GLM and MODEL_V3_GLM != MODEL_V4_GLM:
             reason = "rate limited (429)" if r.status_code == 429 else "model not found (404)"
             log.warning(f"GLM model {target_model} {reason}. Fallback ke {MODEL_V3_GLM}...")
             payload["model"] = MODEL_V3_GLM
-            r = self.client.post("/chat/completions", json=payload)
+            r = self.client.post("/chat/completions", **post_kwargs)
 
         r.raise_for_status()
         data = r.json()
@@ -260,7 +272,7 @@ class GeminiClient:
             or GEMINI_BASE
         ).strip().rstrip("/")
         self.model = self._clean_model_name(model or MODEL_V3)
-        self.client = httpx.Client(timeout=60.0)
+        self.client = httpx.Client(timeout=45.0)
 
     @staticmethod
     def _clean_model_name(model_name: str) -> str:
@@ -274,9 +286,16 @@ class GeminiClient:
     def _is_google_native(self) -> bool:
         return "generativelanguage.googleapis.com" in self.base_url.lower()
 
-    def chat_json(self, prompt: str, system_instruction: Optional[str] = None, model: Optional[str] = None) -> dict:
+    def chat_json(
+        self,
+        prompt: str,
+        system_instruction: Optional[str] = None,
+        model: Optional[str] = None,
+        timeout: Optional[float] = None,
+    ) -> dict:
         """Kirim prompt ke ClassAI Router OpenAI-compatible (`/chat/completions`) atau Google native."""
         target_model = self._clean_model_name(model or self.model)
+        req_timeout = float(timeout) if timeout is not None else 45.0
 
         if self._is_google_native():
             url = f"{self.base_url}/models/{target_model}:generateContent"
@@ -300,7 +319,7 @@ class GeminiClient:
                     "responseMimeType": "application/json",
                 },
             }
-            r = self.client.post(url, headers=headers, json=payload, timeout=60.0)
+            r = self.client.post(url, headers=headers, json=payload, timeout=req_timeout)
             r.raise_for_status()
             return self._parse_response(r.json())
 
@@ -324,7 +343,7 @@ class GeminiClient:
             "temperature": 0.2,
             "response_format": {"type": "json_object"},
         }
-        r = self.client.post(url, headers=headers, json=payload, timeout=60.0)
+        r = self.client.post(url, headers=headers, json=payload, timeout=req_timeout)
 
         # Pengaman anti-404: bila env/variable lama masih memakai nama model Google native
         # (mis. gemini-flash-latest / gemini-pro-latest), otomatis fallback ke gemini-4-argon.
@@ -334,7 +353,7 @@ class GeminiClient:
                 f"Fallback ke {GEMINI_CLASSAI_FALLBACK_MODEL}..."
             )
             payload["model"] = GEMINI_CLASSAI_FALLBACK_MODEL
-            r = self.client.post(url, headers=headers, json=payload, timeout=60.0)
+            r = self.client.post(url, headers=headers, json=payload, timeout=req_timeout)
 
         r.raise_for_status()
         return self._parse_response(r.json())
@@ -915,6 +934,34 @@ Output HANYA JSON valid dengan skema:
 """
 
 
+def _call_agg_with_budget(
+    client: Any,
+    is_gemini: bool,
+    prompt_or_msgs: Any,
+    sys_msg: str,
+    model: str,
+    remaining_sec: float,
+) -> dict:
+    """Panggil client Meta-Aggregator dengan timeout terikat; tetap kompatibel dengan mock test."""
+    call_timeout = min(AGGREGATOR_CALL_TIMEOUT_SEC, remaining_sec)
+    if is_gemini:
+        if isinstance(client, GeminiClient):
+            return client.chat_json(prompt_or_msgs, system_instruction=sys_msg, model=model, timeout=call_timeout)
+        return client.chat_json(prompt_or_msgs, system_instruction=sys_msg, model=model)
+    if isinstance(client, QwenClient):
+        return client.chat_json(prompt_or_msgs, model=model, timeout=call_timeout)
+    return client.chat_json(prompt_or_msgs, model=model)
+
+
+def _finalize_agg_result(agg_res: Any, candidate: str) -> bool:
+    """Validasi respons aggregator dan normalisasi final_score arah murni secara in-place."""
+    if isinstance(agg_res, dict) and "final_score" in agg_res and "per_parameter_final" in agg_res:
+        agg_res["final_score"] = compute_directional_final_score(agg_res["per_parameter_final"])
+        agg_res["aggregator_model"] = candidate
+        return True
+    return False
+
+
 def run_meta_aggregator(
     qwen: Optional[QwenClient],
     ticker: str,
@@ -943,39 +990,45 @@ def run_meta_aggregator(
                 .replace("{raw_voters_json}", json.dumps(voter_verdicts, indent=2))
             )
             last_error = ""
+            agg_deadline = time.monotonic() + AGGREGATOR_TOTAL_BUDGET_SEC
+            ds_msgs = [{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}]
 
             # 1. Utama: DashScope Aggregator (`glm-5.3` -> `glm-5.3-prime` -> ...) memakai DASHSCOPE_API_KEY
             if qwen is not None:
                 for candidate in AGGREGATOR_MODEL_CHAIN:
+                    rem = agg_deadline - time.monotonic()
+                    if rem <= 5.0:
+                        last_error = "budget waktu habis"
+                        break
                     try:
-                        agg_res = qwen.chat_json(
-                            [{"role": "system", "content": sys_msg}, {"role": "user", "content": prompt}],
-                            model=candidate,
-                        )
+                        agg_res = _call_agg_with_budget(qwen, False, ds_msgs, sys_msg, candidate, rem)
                     except Exception as exc:
                         last_error = f"{type(exc).__name__}: {exc}"
-                        log.warning(f"Meta-Aggregator DashScope {candidate} gagal untuk {ticker}: {last_error[:170]}")
+                        log.warning(f"Meta-Aggregator DashScope {candidate} gagal {ticker}: {last_error[:140]}")
+                        if isinstance(exc, httpx.TimeoutException) and gemini is not None:
+                            break
                         continue
-                    if isinstance(agg_res, dict) and "final_score" in agg_res and "per_parameter_final" in agg_res:
-                        agg_res["final_score"] = compute_directional_final_score(agg_res["per_parameter_final"])
-                        agg_res["aggregator_model"] = candidate
+                    if _finalize_agg_result(agg_res, candidate):
                         return agg_res
                     last_error = f"respons {candidate} tidak lengkap: {sorted(agg_res)[:6] if isinstance(agg_res, dict) else type(agg_res).__name__}"
                     log.warning(f"Meta-Aggregator DashScope {candidate} untuk {ticker}: {last_error}")
                     break
 
-            # 2. Cadangan: ClassAI Aggregator (`claude-opus-5.5` -> `gpt-6.1-sol`) bila DashScope gagal
+            # 2. Cadangan: ClassAI Aggregator (`claude-opus-5.5` -> `gpt-6.1-sol`) bila DashScope gagal/timeout
             if gemini is not None:
                 for candidate in CLASSAI_AGGREGATOR_CHAIN:
+                    rem = agg_deadline - time.monotonic()
+                    if rem <= 5.0:
+                        last_error = "budget waktu habis"
+                        log.warning(f"Meta-Aggregator ClassAI berhenti untuk {ticker}: {last_error}")
+                        break
                     try:
-                        agg_res = gemini.chat_json(prompt, system_instruction=sys_msg, model=candidate)
+                        agg_res = _call_agg_with_budget(gemini, True, prompt, sys_msg, candidate, rem)
                     except Exception as exc:
                         last_error = f"{type(exc).__name__}: {exc}"
                         log.warning(f"Meta-Aggregator ClassAI {candidate} gagal untuk {ticker}: {last_error[:170]}")
                         continue
-                    if isinstance(agg_res, dict) and "final_score" in agg_res and "per_parameter_final" in agg_res:
-                        agg_res["final_score"] = compute_directional_final_score(agg_res["per_parameter_final"])
-                        agg_res["aggregator_model"] = candidate
+                    if _finalize_agg_result(agg_res, candidate):
                         return agg_res
                     last_error = f"respons {candidate} tidak lengkap: {sorted(agg_res)[:6] if isinstance(agg_res, dict) else type(agg_res).__name__}"
                     log.warning(f"Meta-Aggregator ClassAI {candidate} untuk {ticker}: {last_error}")

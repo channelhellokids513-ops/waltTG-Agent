@@ -4674,6 +4674,12 @@ def scan_with_research(
                  f"terbesar: {', '.join(sorted(crypto_research))}")
 
     for opp in summary["top_opportunities"]:
+        if not has_enough_job_time(2.5):
+            log.warning(
+                f"⏳ Sisa waktu job tinggal {get_job_remaining_minutes():.1f} menit; "
+                "hentikan loop riset AI agar kandidat yang sudah diriset sempat dieksekusi & dilog."
+            )
+            break
         asset = opp["asset"]
         is_forecast = opp.get("signal_source") == "price_forecast"
         # Gear 3: setiap kandidat keputusan trading boleh diteliti AI; selain itu saham + top-N crypto + Engine 2.
@@ -4761,20 +4767,26 @@ def scan_with_research(
                 continue
             is_forecast = getattr(opp, "signal_source", "funding") == "price_forecast"
             if (asset in RESEARCH_ELIGIBLE or is_forecast) and asset not in researches and (qwen or gemini):
-                try:
-                    researches[asset] = research_stock(
-                        asset,
-                        qwen=qwen,
-                        gemini=gemini,
-                        funding_daily=opp.funding_daily,
-                        recommended_side=opp.side,
-                        opportunity_count=opp_count,
-                        is_idle=scan_is_idle,
+                if not has_enough_job_time(2.5):
+                    log.warning(
+                        f"⏳ Sisa waktu job tinggal {get_job_remaining_minutes():.1f} menit; "
+                        f"riset OTF {asset} dilewati."
                     )
-                    record_research_health(asset, researches[asset])
-                except Exception as e:
-                    record_input_failure("input.riset_error", f"{asset}:{type(e).__name__}")
-                    log.warning(f"  ✗ research {asset} failed: {e}")
+                else:
+                    try:
+                        researches[asset] = research_stock(
+                            asset,
+                            qwen=qwen,
+                            gemini=gemini,
+                            funding_daily=opp.funding_daily,
+                            recommended_side=opp.side,
+                            opportunity_count=opp_count,
+                            is_idle=scan_is_idle,
+                        )
+                        record_research_health(asset, researches[asset])
+                    except Exception as e:
+                        record_input_failure("input.riset_error", f"{asset}:{type(e).__name__}")
+                        log.warning(f"  ✗ research {asset} failed: {e}")
             research = researches.get(asset)
             verdict, reason, mult = decide_go_nogo(opp, research)
 
