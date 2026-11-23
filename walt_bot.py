@@ -584,9 +584,15 @@ US_STOCK_MARKET_OPEN_UTC = (13, 30)   # Senin-Jumat 13:30 UTC (EDT open)
 US_STOCK_MARKET_CLOSE_UTC = (21, 0)   # sampai 21:00 UTC (EST close)
 OFF_HOURS_HOLD_POLICY_ENV = "OFF_HOURS_HOLD_POLICY"
 CRYPTO_FORECAST_ENGINE_ENV = "CRYPTO_FORECAST_ENGINE"
+CRYPTO_FORECAST_UNIVERSE_ENV = "CRYPTO_FORECAST_UNIVERSE"
 FORECAST_ADVERSE_FUNDING_CLOSE_THRESHOLD = 0.0030  # 0.30%/hari batas funding merugikan untuk Engine 2
 
-CI_ENV_KNOBS: tuple[str, ...] = ("E5_SLIPPAGE_BASIS", "US_STOCK_HOURS_ONLY", CRYPTO_FORECAST_ENGINE_ENV)
+CI_ENV_KNOBS: tuple[str, ...] = (
+    "E5_SLIPPAGE_BASIS",
+    "US_STOCK_HOURS_ONLY",
+    CRYPTO_FORECAST_ENGINE_ENV,
+    CRYPTO_FORECAST_UNIVERSE_ENV,
+)
 MONITOR_ENV_KNOBS: tuple[str, ...] = (OFF_HOURS_HOLD_POLICY_ENV,)
 ENTRY_WORKFLOWS: tuple[str, ...] = ("crypto-execute.yml", "market-execute.yml", "daily-scan.yml")
 
@@ -596,6 +602,14 @@ def is_crypto_forecast_engine_enabled() -> bool:
     return os.getenv(CRYPTO_FORECAST_ENGINE_ENV, "on").strip().lower() not in (
         "off", "false", "0", "no", "disabled"
     )
+
+
+def get_crypto_forecast_universe_mode() -> Literal["all", "tier1"]:
+    """Mode cakupan aset Crypto Engine 2: `all` (seluruh crypto likuid Walt, default) atau `tier1`."""
+    raw = os.getenv(CRYPTO_FORECAST_UNIVERSE_ENV, "all").strip().lower()
+    if raw in ("tier1", "bluechip", "allowed_crypto"):
+        return "tier1"
+    return "all"
 
 US_STOCK_PRECLOSE_START_UTC = (20, 35)       # 25 menit sebelum tutup 21:00 UTC (cukup untuk siklus risk-monitor 5-10m)
 COMMODITY_WEEKEND_REOPEN_UTC = (22, 0)       # Minggu 22:00 UTC pembukaan futures komoditas global
@@ -1481,9 +1495,13 @@ def decide_go_nogo(
     if not is_forecast and abs(opp.funding_daily) < MIN_FUNDING_DAILY:
         return "SKIP", "funding kurang (<0.5%/hari)", 0.0
 
-    # Whitelist check
-    if opp.base_asset not in ALLOWED_ASSETS:
-        return "SKIP", f"aset {opp.base_asset} tidak masuk whitelist", 0.0
+    # Whitelist check: Engine 1 tetap 31 aset terkurasi; Engine 2 terbuka untuk seluruh kontrak crypto
+    # likuid di Walt (kecuali saham/komoditas non-crypto).
+    if not is_forecast:
+        if opp.base_asset not in ALLOWED_ASSETS:
+            return "SKIP", f"aset {opp.base_asset} tidak masuk whitelist", 0.0
+    elif opp.base_asset in ALLOWED_STOCKS or opp.base_asset in ALLOWED_COMMODITIES:
+        return "SKIP", f"Engine 2 hanya berlaku untuk aset crypto (bukan {opp.base_asset})", 0.0
 
     # Engine 2: Crypto Mean-Reversion Fade terverifikasi OOS (AI sebagai filter P5/SPLIT/lawan arah)
     if is_forecast:
@@ -4024,17 +4042,20 @@ def _scan_crypto_engine2_opportunities(
     *,
     log_label: str = "ENGINE 2 CRYPTO",
 ) -> list[Opportunity]:
-    """Pindai kandidat Engine 2 Crypto (V5 4h + V4 1h) jika toggle CRYPTO_FORECAST_ENGINE aktif."""
+    """Pindai kandidat Engine 2 Crypto (`all` seluruh crypto likuid atau `tier1` 10 aset) bila aktif."""
     if not is_crypto_forecast_engine_enabled():
         return []
     fc_opps_out: list[Opportunity] = []
     try:
         import price_forecast
 
+        universe_mode = get_crypto_forecast_universe_mode()
+        scan_allowed: Optional[set[str]] = None if universe_mode == "all" else target_universe
         fc_raw = price_forecast.scan_crypto_price_opportunities(
             contracts,
-            allowed_assets=target_universe,
+            allowed_assets=scan_allowed,
             exclude_assets=exclude_assets,
+            exclude_non_crypto=(ALLOWED_STOCKS | ALLOWED_COMMODITIES),
             min_vol_24h=MIN_VOL_24H,
         )
         for fc in fc_raw:
@@ -4380,14 +4401,15 @@ def scan_with_research(
 
     for opp in summary["top_opportunities"]:
         asset = opp["asset"]
+        is_forecast = opp.get("signal_source") == "price_forecast"
         # Gear 3: setiap kandidat keputusan trading boleh diteliti AI; selain itu saham + top-N crypto + Engine 2.
         worth_calling = (
             full_research_gear3
             or asset in ALLOWED_STOCKS
             or asset in crypto_research
-            or opp.get("signal_source") == "price_forecast"
+            or is_forecast
         )
-        if asset in RESEARCH_ELIGIBLE and worth_calling and (qwen or gemini):
+        if (asset in RESEARCH_ELIGIBLE or is_forecast) and worth_calling and (qwen or gemini):
             try:
                 researches[asset] = research_stock(
                     asset,
@@ -4463,7 +4485,8 @@ def scan_with_research(
                     "reason": us_stocks_note,
                 })
                 continue
-            if asset in RESEARCH_ELIGIBLE and asset not in researches and (qwen or gemini):
+            is_forecast = getattr(opp, "signal_source", "funding") == "price_forecast"
+            if (asset in RESEARCH_ELIGIBLE or is_forecast) and asset not in researches and (qwen or gemini):
                 try:
                     researches[asset] = research_stock(
                         asset,
@@ -4936,13 +4959,14 @@ def market_execute(
     for opp in opps:
         if opp.base_asset in ALLOWED_STOCKS and not us_stocks_open:
             continue
-        if opp.base_asset in RESEARCH_ELIGIBLE:
+        is_forecast = getattr(opp, "signal_source", "funding") == "price_forecast"
+        if opp.base_asset in RESEARCH_ELIGIBLE or is_forecast:
             if opp.base_asset in cached_researches:
                 cached = cached_researches[opp.base_asset]
                 log.info(f"  ✓ Pakai riset spreadsheet {opp.base_asset}: skor {cached.final_score:+.2f}, sentimen {cached.news_sentiment}")
                 researches[opp.base_asset] = cached
             elif (qwen or gemini) and otf_research_calls < max_otf_calls and (
-                    full_research_gear3 or opp.base_asset in ALLOWED_STOCKS or opp.base_asset in crypto_research):
+                    full_research_gear3 or opp.base_asset in ALLOWED_STOCKS or opp.base_asset in crypto_research or is_forecast):
                 try:
                     otf_research_calls += 1
                     log.info(

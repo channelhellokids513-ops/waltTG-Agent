@@ -15,8 +15,10 @@ Tiga Pilar Perkiraan 24 Jam:
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import math
 import statistics
+import time
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping, Optional, Sequence
 
@@ -28,6 +30,26 @@ CRYPTO_SYMBOLS: frozenset[str] = frozenset({
     "ARB", "OP", "DOGE", "ADA", "DOT", "ATOM", "LTC", "UNI", "APT", "SEI", "HYPE",
 })
 COMMODITY_SYMBOLS: frozenset[str] = frozenset({"XAU", "XAG", "BRENTOIL"})
+NON_CRYPTO_SYMBOLS: frozenset[str] = frozenset({
+    # Saham AS, ETF, Indeks, & Pre-IPO
+    "NVDA", "NBIS", "CRCL", "MSTR", "AAPL", "GOOGL", "AMD", "PLTR", "COIN", "SNDK",
+    "SPY", "QQQ", "US100", "SPX", "NDX", "DJI", "VIX", "DXY", "AMZN", "TSLA", "META",
+    "LIT", "VVV", "ANTHROPIC", "MSFT", "NFLX", "ORCL", "INTC", "MU", "ARM", "SMCI",
+    "UBER", "HOOD", "GME", "AMC", "RIVN", "DIS",
+    # Komoditas & Logam
+    "XAU", "XAG", "BRENTOIL", "WTI", "USOIL", "GOLD", "SILVER", "OIL", "COPPER",
+    "NATGAS", "PAXG", "XAUT",
+    # Forex & Stablecoin
+    "EUR", "GBP", "JPY", "AUD", "CAD", "CHF", "TRY", "BRL",
+    "USDT", "USDC", "DAI", "BUSD", "TUSD", "FDUSD", "USDE", "USDD", "PYUSD",
+})
+_NON_CRYPTO_META_HINTS: tuple[str, ...] = (
+    "stock", "equity", "equities", "commodity", "commodities", "forex", "fx",
+    "index", "indices", "etf", "pre_ipo", "rwa", "metal", "energy", "fiat",
+)
+
+FORECAST_MAX_SCAN_ASSETS = 50
+FORECAST_MAX_SIGNALS = 5
 
 DEFAULT_ROUND_TRIP_COST_PCT = 0.0028  # 0.18% round-trip taker + 0.10% floor slippage terukur
 DEFAULT_MIN_NET_EDGE_PCT = 0.0080     # +0.80% minimal net expected edge 24h
@@ -625,25 +647,50 @@ def evaluate_crypto_live_fade_signal(
     return candidate
 
 
+def _is_non_crypto_contract(
+    contract: Mapping[str, Any],
+    extra_exclude: Optional[set[str] | frozenset[str]] = None,
+) -> bool:
+    """True bila kontrak teridentifikasi sebagai saham, indeks, komoditas, FX, atau stablecoin."""
+    asset = str(contract.get("base_asset") or "").strip().upper()
+    if not asset or asset in NON_CRYPTO_SYMBOLS:
+        return True
+    if extra_exclude and asset in {str(x).strip().upper() for x in extra_exclude}:
+        return True
+    for field in ("category", "asset_class", "market_type", "type", "sector", "group"):
+        val = str(contract.get(field) or "").strip().lower()
+        if val and any(hint in val for hint in _NON_CRYPTO_META_HINTS):
+            return True
+    return False
+
+
 def scan_crypto_price_opportunities(
     contracts: Sequence[Mapping[str, Any]],
     *,
     allowed_assets: Optional[set[str] | frozenset[str]] = None,
     exclude_assets: Optional[set[str]] = None,
+    exclude_non_crypto: Optional[set[str] | frozenset[str]] = None,
     min_vol_24h: float = 1_000_000.0,
+    max_candidates: int = FORECAST_MAX_SCAN_ASSETS,
+    max_signals: int = FORECAST_MAX_SIGNALS,
+    max_scan_seconds: float = 45.0,
     fetcher: Optional[Any] = None,
 ) -> list[dict[str, Any]]:
-    """Pindai kontrak Crypto Tier-1 yang tidak lolos Engine 1 funding memakai sinyal Engine 2."""
-    from market_chart import fetch_candles as _default_fetch
+    """Pindai kontrak Crypto likuid (`allowed_assets=None` -> seluruh crypto di Walt) memakai Engine 2."""
+    from market_chart import fetch_crypto_candles as _default_fetch
 
     candle_fetcher = fetcher or _default_fetch
-    target = set(allowed_assets) if allowed_assets is not None else set(CRYPTO_SYMBOLS)
-    excluded = {str(a).upper() for a in (exclude_assets or set())}
-    found: list[dict[str, Any]] = []
+    target = {str(a).strip().upper() for a in allowed_assets} if allowed_assets is not None else None
+    excluded = {str(a).strip().upper() for a in (exclude_assets or set())}
 
+    candidates_by_asset: dict[str, tuple[float, float, float, Mapping[str, Any]]] = {}
     for c in contracts:
         asset = str(c.get("base_asset") or "").strip().upper()
-        if not asset or asset not in target or asset in excluded:
+        if not asset or asset in excluded:
+            continue
+        if _is_non_crypto_contract(c, extra_exclude=exclude_non_crypto):
+            continue
+        if target is not None and asset not in target:
             continue
         try:
             vol = float(c.get("volume_24h_usd") or 0.0)
@@ -659,8 +706,21 @@ def scan_crypto_price_opportunities(
             slip = float(c.get("price_slippage") or 0.0)
         except (TypeError, ValueError):
             slip = 0.0
-        rt_cost = max(DEFAULT_ROUND_TRIP_COST_PCT, 0.0018 + min(max(0.0, slip), 0.0020))
+        prev = candidates_by_asset.get(asset)
+        if prev is None or vol > prev[0]:
+            candidates_by_asset[asset] = (vol, fr_daily, slip, c)
 
+    ordered = sorted(
+        ((vol, asset, fr_daily, slip, c) for asset, (vol, fr_daily, slip, c) in candidates_by_asset.items()),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    if max_candidates > 0:
+        ordered = ordered[: int(max_candidates)]
+
+    def _eval_candidate(item: tuple[float, str, float, float, Mapping[str, Any]]) -> Optional[dict[str, Any]]:
+        vol, asset, fr_daily, slip, c = item
+        rt_cost = max(DEFAULT_ROUND_TRIP_COST_PCT, 0.0018 + min(max(0.0, slip), 0.0020))
         try:
             candles_4h, _src4 = candle_fetcher(asset, "4h", 180)
         except Exception:
@@ -678,7 +738,7 @@ def scan_crypto_price_opportunities(
             round_trip_cost_pct=rt_cost,
         )
         if sig is None:
-            continue
+            return None
 
         sig.update({
             "contract_id": c["contract_id"],
@@ -690,7 +750,32 @@ def scan_crypto_price_opportunities(
             "max_size_quote": float(c.get("max_size_quote") or 0.0),
             "price_slippage": slip,
         })
-        found.append(sig)
+        return sig
+
+    found: list[dict[str, Any]] = []
+    if fetcher is None and len(ordered) > 1:
+        deadline = time.monotonic() + max(1.0, float(max_scan_seconds))
+        pool = ThreadPoolExecutor(max_workers=6)
+        try:
+            futures = {pool.submit(_eval_candidate, item): item[1] for item in ordered}
+            for fut in as_completed(futures, timeout=max(1.0, deadline - time.monotonic())):
+                try:
+                    res = fut.result(timeout=max(0.1, deadline - time.monotonic()))
+                    if res is not None:
+                        found.append(res)
+                except Exception:
+                    continue
+        except TimeoutError:
+            pass
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
+    else:
+        for item in ordered:
+            res = _eval_candidate(item)
+            if res is not None:
+                found.append(res)
 
     found.sort(key=lambda item: float(item.get("expected_net_edge_pct") or 0.0), reverse=True)
+    if max_signals > 0:
+        return found[: int(max_signals)]
     return found

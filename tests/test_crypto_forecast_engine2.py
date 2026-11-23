@@ -525,3 +525,194 @@ def test_scan_with_research_executes_and_logs_engine2_to_daily_scans(monkeypatch
         o["asset"] == "SOL" and o.get("signal_source") == "price_forecast"
         for o in logged_scan_summaries[0]["top_opportunities"]
     )
+
+
+# ---------------------------------------------------------------------------
+# 5. Perluasan Universe Crypto Engine 2 (`CRYPTO_FORECAST_UNIVERSE=all`)
+# ---------------------------------------------------------------------------
+
+
+def test_scan_crypto_price_opportunities_all_mode_filters_non_crypto_and_caps_signals(monkeypatch):
+    def fake_eval(asset, c4, c1, **kw):
+        edge_map = {"DOGE": 0.0040, "HYPE": 0.0032, "PEPE": 0.0025, "APT": 0.0020}
+        return {
+            "asset": asset,
+            "side": "long",
+            "setup": "V5_4H_REJ_COMFORT",
+            "sl_pct": 0.030,
+            "tp_pct": 0.030,
+            "max_hold_hours": 72.0,
+            "expected_net_edge_pct": edge_map.get(asset, 0.0018),
+            "reason": f"fade {asset}",
+        }
+
+    monkeypatch.setattr(price_forecast, "evaluate_crypto_live_fade_signal", fake_eval)
+    contracts = [
+        {"contract_id": 1, "base_asset": "NVDA", "volume_24h_usd": "90000000", "funding_rate_hourly": "0.00001"},
+        {"contract_id": 2, "base_asset": "MSFT", "volume_24h_usd": "80000000", "funding_rate_hourly": "0.00001"},
+        {"contract_id": 3, "base_asset": "XAU", "volume_24h_usd": "70000000", "funding_rate_hourly": "0.00001"},
+        {"contract_id": 4, "base_asset": "USDC", "volume_24h_usd": "70000000", "funding_rate_hourly": "0.00001"},
+        {"contract_id": 5, "base_asset": "EUR", "volume_24h_usd": "70000000", "funding_rate_hourly": "0.00001"},
+        {"contract_id": 6, "base_asset": "CUSTOM_EQ", "category": "stock", "volume_24h_usd": "70000000", "funding_rate_hourly": "0.00001"},
+        {"contract_id": 7, "base_asset": "LOWVOL", "volume_24h_usd": "300000", "funding_rate_hourly": "0.00001"},
+        {"contract_id": 8, "base_asset": "DOGE", "volume_24h_usd": "45000000", "funding_rate_hourly": "0.00001"},
+        {"contract_id": 9, "base_asset": "HYPE", "volume_24h_usd": "35000000", "funding_rate_hourly": "0.00001"},
+        {"contract_id": 10, "base_asset": "PEPE", "volume_24h_usd": "25000000", "funding_rate_hourly": "0.00001"},
+        {"contract_id": 11, "base_asset": "APT", "volume_24h_usd": "15000000", "funding_rate_hourly": "0.00001"},
+    ]
+    res = price_forecast.scan_crypto_price_opportunities(
+        contracts,
+        allowed_assets=None,
+        min_vol_24h=1_000_000.0,
+        max_signals=2,
+        fetcher=lambda asset, interval, limit: ([], "stub"),
+    )
+    assert [x["asset"] for x in res] == ["DOGE", "HYPE"]
+
+
+def test_decide_go_nogo_allows_non_whitelist_crypto_only_on_engine2():
+    res_neutral = llm_research.Research(
+        ticker="DOGE",
+        days_to_earnings=None,
+        news_sentiment="neutral",
+        narrative="Netral",
+        confidence=0.70,
+        fetched_at=datetime.now(timezone.utc).isoformat(),
+        consensus="STRONG",
+        overall_consensus_level="STRONG",
+        vendor_alignment="aligned",
+        final_score=0.05,
+    )
+    opp_e1 = Opportunity(
+        contract_id=8, base_asset="DOGE", funding_daily=0.0080, volume_24h=20_000_000.0,
+        max_leverage=2, side="short", signal_source="funding",
+    )
+    v1, _, _ = walt_bot.decide_go_nogo(opp_e1, res_neutral)
+    assert v1 == "SKIP"
+
+    opp_e2 = Opportunity(
+        contract_id=8, base_asset="DOGE", funding_daily=0.0005, volume_24h=20_000_000.0,
+        max_leverage=2, side="short", signal_source="price_forecast", forecast_setup="V5_4H_REJ_COMFORT",
+    )
+    v2, _, _ = walt_bot.decide_go_nogo(opp_e2, res_neutral)
+    assert v2 == "GO"
+
+    opp_stock_e2 = Opportunity(
+        contract_id=1, base_asset="NVDA", funding_daily=0.0005, volume_24h=50_000_000.0,
+        max_leverage=2, side="short", signal_source="price_forecast", forecast_setup="V5_4H_REJ_COMFORT",
+    )
+    v3, _, _ = walt_bot.decide_go_nogo(opp_stock_e2, res_neutral)
+    assert v3 == "SKIP"
+
+    opp_comm_e2 = Opportunity(
+        contract_id=3, base_asset="XAU", funding_daily=0.0005, volume_24h=50_000_000.0,
+        max_leverage=2, side="short", signal_source="price_forecast", forecast_setup="V5_4H_REJ_COMFORT",
+    )
+    v4, _, _ = walt_bot.decide_go_nogo(opp_comm_e2, res_neutral)
+    assert v4 == "SKIP"
+
+
+def test_crypto_execute_and_daily_scan_support_all_vs_tier1_universe(monkeypatch, tmp_path):
+    import sheet_logger
+
+    monkeypatch.setenv("CRYPTO_FORECAST_ENGINE", "on")
+    monkeypatch.setattr(walt_bot, "has_enough_job_time", lambda *a, **kw: True)
+    monkeypatch.setattr(walt_bot, "check_daily_circuit_breaker", lambda *a, **kw: (False, "OK"))
+    monkeypatch.setattr(walt_bot, "check_cold_state_entry_gate", lambda *a, **kw: (True, "OK"))
+    monkeypatch.setattr(walt_bot, "_is_asset_in_cooldown", lambda *a, **kw: (False, 0.0))
+    monkeypatch.setattr(walt_bot, "check_entry_frequency_limits", lambda *a, **kw: (True, "OK"))
+    monkeypatch.setattr(walt_bot, "record_entry_execution", lambda *a, **kw: None)
+    monkeypatch.setattr(walt_bot, "send_telegram", lambda *a, **kw: True)
+    monkeypatch.setattr(sheet_logger, "get_closed_funding_current_month", lambda **kw: 0.0)
+    monkeypatch.setattr(sheet_logger, "fetch_latest_research_from_sheet", lambda **kw: {})
+    monkeypatch.setattr(sheet_logger, "log_execution", lambda *a, **kw: {"executions_count": 1})
+    monkeypatch.setattr(sheet_logger, "gravity_diagnostics", lambda asset: {k: "" for k in sheet_logger.MG_COLUMNS})
+
+    def fake_scan(contracts, **kw):
+        allowed = kw.get("allowed_assets")
+        if allowed is not None and "HYPE" not in allowed:
+            return []
+        return [
+            {
+                "contract_id": 77,
+                "asset": "HYPE",
+                "side": "short",
+                "setup": "V4_1H_EXTREME_FADE",
+                "sl_pct": 0.035,
+                "tp_pct": 0.042,
+                "max_hold_hours": 24.0,
+                "expected_net_edge_pct": 0.0050,
+                "funding_daily": 0.0004,
+                "volume_24h": 40_000_000.0,
+                "max_leverage": 2,
+                "min_size_base": 0.1,
+                "price_slippage": 0.0005,
+                "reason": "V4 1h Fade SHORT HYPE",
+            }
+        ]
+
+    monkeypatch.setattr(price_forecast, "scan_crypto_price_opportunities", fake_scan)
+
+    client = _make_mock_client()
+    client.readiness.return_value = {"ok": True}
+    client.balance.return_value = {"accounts": [{"balance_available": "25.0", "currency": "USDC"}]}
+    client.list_positions.return_value = {"positions": []}
+    client.latest_rate.return_value = {"rate": "25.0"}
+    client.list_contracts.return_value = {
+        "contracts": [
+            {
+                "contract_id": 77,
+                "base_asset": "HYPE",
+                "volume_24h_usd": "40000000",
+                "funding_rate_hourly": "0.0000167",
+                "max_leverage": 2,
+                "min_size_base": "0.1",
+                "price_slippage": "0.0005",
+            }
+        ]
+    }
+
+    monkeypatch.setenv("CRYPTO_FORECAST_UNIVERSE", "tier1")
+    scan_t1 = walt_bot.daily_scan(client)
+    assert all(o["asset"] != "HYPE" for o in scan_t1["top_opportunities"])
+
+    monkeypatch.setenv("CRYPTO_FORECAST_UNIVERSE", "all")
+    scan_all = walt_bot.daily_scan(client)
+    assert any(o["asset"] == "HYPE" and o.get("signal_source") == "price_forecast" for o in scan_all["top_opportunities"])
+    csv_rows = sheet_logger.log_scan_to_csv(scan_all, {}, filepath=str(tmp_path / "scan_all.csv"))
+    assert len(csv_rows) == 1 and len(csv_rows[0]) == 30
+
+    exec_res = walt_bot.crypto_execute(client, dry_run=False)
+    hype_execs = [e for e in exec_res["executions"] if e["asset"] == "HYPE" and e["verdict"] == "EXECUTED"]
+    assert len(hype_execs) == 1
+    meta = walt_bot._load_forecast_position_meta()
+    assert "77" in meta and meta["77"]["setup"] == "V4_1H_EXTREME_FADE"
+
+
+def test_fetch_crypto_candles_never_calls_yahoo_and_supports_meme_alias(monkeypatch):
+    import market_chart
+
+    yahoo_calls = []
+    hl_calls = []
+    bn_calls = []
+
+    monkeypatch.setattr(market_chart, "_fetch_yahoo_candles", lambda *a, **kw: yahoo_calls.append(a) or [])
+
+    def fake_hl(sym, interval="1h", limit=48):
+        hl_calls.append(sym)
+        if sym == "kPEPE":
+            return [{"t": 1, "o": 1.0, "h": 1.1, "l": 0.9, "c": 1.0, "v": 100.0}]
+        return []
+
+    monkeypatch.setattr(market_chart, "_fetch_hyperliquid_candles", fake_hl)
+    monkeypatch.setattr(
+        market_chart,
+        "_fetch_binance_candles",
+        lambda sym, interval="1h", limit=48: bn_calls.append(sym) or [],
+    )
+
+    candles, src = market_chart.fetch_crypto_candles("1000PEPE", interval="1h", limit=48)
+    assert src == "Hyperliquid" and len(candles) == 1
+    assert hl_calls == ["1000PEPE", "kPEPE"]
+    assert yahoo_calls == []
+    assert bn_calls == []

@@ -22,6 +22,11 @@ YAHOO_TICKER_MAP: dict[str, str] = {
 CRYPTO_ASSETS = {
     "BTC", "ETH", "SOL", "BNB", "XRP", "AVAX", "SUI", "LINK", "NEAR", "AAVE",
     "ARB", "OP", "DOGE", "ADA", "DOT", "ATOM", "LTC", "UNI", "APT", "SEI",
+    "HYPE", "PEPE", "WIF", "BONK", "SHIB", "TAO", "TON", "ENA", "PENDLE",
+    "RENDER", "FET", "INJ", "TIA", "JUP", "PYTH", "WLD", "ONDO", "TRX", "BCH",
+    "ETC", "XLM", "FIL", "ICP", "STX", "RUNE", "MKR", "LDO", "CRV", "SNX",
+    "COMP", "PENGU", "VIRTUAL", "FARTCOIN", "TRUMP", "BERA", "IP", "KAITO",
+    "ZEC", "XMR", "WLFI", "PUMP",
 }
 
 SPARK_CHARS = "▁▂▃▄▅▆▇█"
@@ -190,6 +195,42 @@ def _fetch_yahoo_candles(asset: str, interval: str = "1h", limit: int = 48) -> l
     return candles[-limit:]
 
 
+def fetch_crypto_candles(asset: str, interval: str = "1h", limit: int = 48) -> tuple[list[dict[str, Any]], str]:
+    """Ambil candle OHLCV khusus kontrak Crypto dari Hyperliquid/Binance (tanpa Yahoo Finance)."""
+    sym = asset.upper().strip()
+    if interval not in {"15m", "1h", "4h", "1d"}:
+        interval = "1h"
+
+    hl_candidates = [sym]
+    if sym.startswith("1000") and len(sym) > 4:
+        hl_candidates.append(f"k{sym[4:]}")
+    elif not sym.startswith("K"):
+        hl_candidates.append(f"k{sym}")
+
+    for hl_sym in hl_candidates:
+        try:
+            candles = _fetch_hyperliquid_candles(hl_sym, interval, limit)
+            if candles:
+                return candles, "Hyperliquid"
+        except Exception:
+            continue
+
+    bn_candidates = [sym]
+    if sym.startswith("K") and len(sym) > 1:
+        bn_candidates.append(sym[1:])
+        bn_candidates.append(f"1000{sym[1:]}")
+
+    for bn_sym in bn_candidates:
+        try:
+            candles = _fetch_binance_candles(bn_sym, interval, limit)
+            if candles:
+                return candles, "Binance"
+        except Exception:
+            continue
+
+    return [], "Tidak tersedia"
+
+
 def fetch_candles(asset: str, interval: str = "1h", limit: int = 48) -> tuple[list[dict[str, Any]], str]:
     """Ambil candle OHLCV dan nama sumber datanya."""
     sym = asset.upper().strip()
@@ -197,21 +238,14 @@ def fetch_candles(asset: str, interval: str = "1h", limit: int = 48) -> tuple[li
         interval = "1h"
 
     if sym in CRYPTO_ASSETS:
-        for name, fn in [("Hyperliquid", _fetch_hyperliquid_candles), ("Binance", _fetch_binance_candles)]:
-            try:
-                candles = fn(sym, interval, limit)
-                if candles:
-                    return candles, name
-            except Exception:
-                continue
-    else:
-        for name, fn in [("Yahoo Finance", _fetch_yahoo_candles), ("Hyperliquid", _fetch_hyperliquid_candles)]:
-            try:
-                candles = fn(sym, interval, limit)
-                if candles:
-                    return candles, name
-            except Exception:
-                continue
+        return fetch_crypto_candles(sym, interval, limit)
+    for name, fn in [("Yahoo Finance", _fetch_yahoo_candles), ("Hyperliquid", _fetch_hyperliquid_candles)]:
+        try:
+            candles = fn(sym, interval, limit)
+            if candles:
+                return candles, name
+        except Exception:
+            continue
     return [], "Tidak tersedia"
 
 
