@@ -92,6 +92,29 @@ def require_google_auth_strict() -> bool:
     return (os.environ.get("REQUIRE_GOOGLE_AUTH") or "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def get_owner_chat_id() -> int | None:
+    """Telegram ID Owner dari TELEGRAM_CHAT_ID (di-file ini, int). None bila tidak disetel."""
+    raw = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+    if not raw or raw.lower() == "dummy":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def owner_only_mode() -> bool:
+    """Mode KHUSUS-OWNER — default AKTIF untuk bot pribadi ini.
+
+    Saat aktif, bot MEMBISUKAN total (tanpa balasan apa pun) semua update yang
+    pengirimnya bukan TELEGRAM_CHAT_ID, bahkan jika user itu terdaftar via
+    /adduser atau Google OAuth. Set BOT_OWNER_ONLY=false untuk kembali ke
+    perilaku multi-user RBAC lama.
+    """
+    return (os.environ.get("BOT_OWNER_ONLY") or "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+
 class AuthManager:
     """Mengelola autentikasi Google OAuth, whitelist user Telegram, sesi, dan audit log."""
 

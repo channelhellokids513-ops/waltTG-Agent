@@ -40,7 +40,9 @@ from telegram_auth import (
     ROLE_PERMISSIONS,
     AuthManager,
     Role,
+    get_owner_chat_id,
     is_google_oauth_configured,
+    owner_only_mode,
     require_google_auth_strict,
 )
 import walt_bot
@@ -186,6 +188,50 @@ class WaltTelegramBot:
         self.api = api
         self.auth = auth or AuthManager()
         self._running_login_polls: set[int] = set()
+        # Gerbang owner-only: satu peringatan per ID asing per proses + flag misconfig
+        self._seen_non_owner: set[int] = set()
+        self._owner_gate_misconfig_logged = False
+
+    def _owner_gate(self, update: dict[str, Any]) -> bool:
+        """True = update HARUS dibuang tanpa balasan apa pun (mode khusus-owner aktif).
+
+        Syarat lolos: BOT_OWNER_ONLY mati, ATAU pengirim == TELEGRAM_CHAT_ID DAN
+        chat == chat pribadi owner (menutup kebocoran di dalam grup). Fail-closed:
+        owner-only aktif tapi TELEGRAM_CHAT_ID tak disetel -> semua dibuang.
+        """
+        if not owner_only_mode():
+            return False
+        owner = get_owner_chat_id()
+        if owner is None:
+            if not self._owner_gate_misconfig_logged:
+                self._owner_gate_misconfig_logged = True
+                self.auth.log_audit("OWNER_GATE_MISCONFIGURED", None, detail="BOT_OWNER_ONLY aktif tanpa TELEGRAM_CHAT_ID — semua update dibuang")
+            return True
+        if "callback_query" in update:
+            cb = update["callback_query"] or {}
+            from_u = cb.get("from") or {}
+            chat_id = int(((cb.get("message") or {}).get("chat") or {}).get("id", from_u.get("id", 0)))
+            preview = str(cb.get("data") or "")[:80]
+        else:
+            msg = update.get("message") or {}
+            from_u = msg.get("from") or {}
+            chat_id = int((msg.get("chat") or {}).get("id", from_u.get("id", 0)))
+            preview = str(msg.get("text") or "")[:80]
+        tg_id = int(from_u.get("id") or 0)
+        if tg_id == owner and chat_id == owner:
+            return False
+        self.auth.log_audit("DISCARDED_NON_OWNER", tg_id or None, username=str(from_u.get("username") or ""), detail=preview)
+        if tg_id != owner and tg_id not in self._seen_non_owner:
+            self._seen_non_owner.add(tg_id)
+            try:
+                self.api.send_message(
+                    owner,
+                    f"🛡️ *Owner-only: pesan dibisukan*\n• Dari: `{tg_id}` (@{from_u.get('username') or '-'})\n• Isi: `{preview[:60]}`",
+                )
+            except Exception:
+                pass
+        return True
+
 
     def _notify_admin_intrusion(self, tg_id: int, username: str, text: str) -> None:
         self.auth.log_audit("UNAUTHORIZED_ACCESS", tg_id, username=username, detail=text[:120])
@@ -213,6 +259,8 @@ class WaltTelegramBot:
         return user
 
     def handle_update(self, update: dict[str, Any]) -> None:
+        if self._owner_gate(update):
+            return
         if "callback_query" in update:
             cb = update["callback_query"]
             cb_id = cb["id"]
@@ -630,9 +678,15 @@ class WaltTelegramBot:
     def _cmd_auth_setup(self, chat_id: int) -> None:
         g_ok = "✅ Aktif" if is_google_oauth_configured() else "⚠️ Belum diisi (`GOOGLE_OAUTH_CLIENT_ID`)"
         strict = "✅ Ketat (`REQUIRE_GOOGLE_AUTH=true`)" if require_google_auth_strict() else "🟡 Mode Transisi (Bootstrap Owner + Whitelist)"
+        owner = get_owner_chat_id()
+        if owner_only_mode():
+            gate = f"✅ **KHUSUS-OWNER** — hanya `{owner}` yang dijawab; yang lain dibisukan" if owner else "✅ **KHUSUS-OWNER** aktif tetapi ⚠️ TELEGRAM_CHAT_ID belum disetel (semua ditolak)"
+        else:
+            gate = "🟡 Multi-user RBAC (`BOT_OWNER_ONLY=false`)"
         self.api.send_message(
             chat_id,
             f"🛡️ *Status Konfigurasi Keamanan*\n"
+            f"• Gerbang Akses: {gate}\n"
             f"• Google OAuth 2.0: {g_ok}\n"
             f"• Kebijakan Auth: {strict}\n"
             f"• Total User Terdaftar: `{len(self.auth.list_users())}`\n\n"
@@ -931,10 +985,16 @@ def run_polling() -> None:
     token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
     if not token or token.lower() == "dummy":
         raise RuntimeError("TELEGRAM_BOT_TOKEN belum disetel.")
+    if owner_only_mode() and get_owner_chat_id() is None:
+        raise RuntimeError(
+            "BOT_OWNER_ONLY aktif tetapi TELEGRAM_CHAT_ID belum disetel — bot menolak start "
+            "(fail-closed). Setel TELEGRAM_CHAT_ID atau BOT_OWNER_ONLY=false di file .env."
+        )
     api = TelegramAPI(token)
     auth = AuthManager()
     bot = WaltTelegramBot(api=api, auth=auth)
-    print("[INFO] Walt Telegram Bot aktif (long-polling + RBAC + Google Auth siap)...")
+    gate_txt = f"KHUSUS-OWNER hanya {get_owner_chat_id()}" if owner_only_mode() else "multi-user RBAC"
+    print(f"[INFO] Walt Telegram Bot aktif (long-polling + {gate_txt} + Google Auth siap)...")
 
     offset: int | None = None
     while True:
