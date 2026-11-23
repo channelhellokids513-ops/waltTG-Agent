@@ -41,7 +41,7 @@ def _cfg_gates(monkeypatch, lt, st, min_s=None, max_p=None, curve=None):
     if curve is not None:
         payload["grav_boost_curve"] = curve
     monkeypatch.setenv("STRATEGY_CONFIG_JSON", json.dumps(payload))
-    monkeypatch.setattr(pf, "_MG_GATES_CACHE", (0.0, 0.0, 0.0))
+    monkeypatch.setattr(pf, "_MG_GATES_CACHE", (0.0, 0.0, -1e9))
 
 
 def test_gates_read_config_with_ttl_cache(monkeypatch):
@@ -51,9 +51,18 @@ def test_gates_read_config_with_ttl_cache(monkeypatch):
     assert pf._mg_pressure_gates() == (0.0, 0.0)
 
 
+def test_gates_recompute_on_fresh_boot_container(monkeypatch):
+    """Regresi CI 45273915605: container baru boot (monotonic < 60) tidak boleh
+    memakai cache kosong (0,0) — konfigurasi WAJIB dibaca ulang."""
+    _cfg_gates(monkeypatch, 52.0, 55.0)
+    monkeypatch.setattr(pf.time, "monotonic", lambda: 3.0)  # uptime 3 detik
+    monkeypatch.setattr(pf, "_MG_GATES_CACHE", (0.0, 0.0, -1e9))
+    assert pf._mg_pressure_gates() == (52.0, 55.0)
+
+
 def test_gate_zero_defaults_keep_old_behavior(monkeypatch):
     monkeypatch.delenv("STRATEGY_CONFIG_JSON", raising=False)
-    monkeypatch.setattr(pf, "_MG_GATES_CACHE", (0.0, 0.0, 0.0))
+    monkeypatch.setattr(pf, "_MG_GATES_CACHE", (0.0, 0.0, -1e9))
     c4 = _flat_candles()
     c1 = _stretched(_flat_candles(), 1.014)
     sig = pf.evaluate_crypto_live_fade_signal("SOL", c4, c1, funding_daily=0.0005)

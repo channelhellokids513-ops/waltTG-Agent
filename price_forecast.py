@@ -60,7 +60,7 @@ STOCK_FORECAST_MAX_SIGNALS = 3
 _ATR_CACHE: dict[str, tuple[float, Optional[float]]] = {}
 
 # --- gerbang tekanan Market Gravity (MG) untuk Engine 2 ---------------------------------
-_MG_GATES_CACHE: tuple[float, float, float] = (0.0, 0.0, 0.0)  # (long_thr, short_thr, monotonic)
+_MG_GATES_CACHE: tuple[float, float, float] = (0.0, 0.0, -1e9)  # (long_thr, short_thr, monotonic) — -1e9 = selalu miss di panggilan pertama (aman untuk container CI yang baru boot)
 
 
 def _mg_pressure_gates() -> tuple[float, float]:
