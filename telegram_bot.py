@@ -155,6 +155,83 @@ def _safe_float(val: Any, default: float = 0.0) -> float:
         return default
 
 
+# =============================================================================
+# GUARD ANTI-TABRAK TOKEN SINGLE-USE + KEYBOARD MENU OWNER
+# =============================================================================
+
+_TRADING_WORKFLOW_FILES = ("risk-monitor.yml", "market-execute.yml", "crypto-execute.yml", "daily-scan.yml")
+_ACTIVE_RUN_STATUSES = {"queued", "requested", "waiting", "action_required", "in_progress"}
+
+
+def is_trading_run_active() -> tuple[bool, str]:
+    """Best-effort: ada run trading (4 workflow concurrency `walt-trading-account`) sedang aktif?
+
+    Return (busy, detail).
+    - ("no_gh_pat")  : GH_PAT/GITHUB_REPOSITORY belum disetel -> tidak bisa mengecek.
+    - ("check_error"): API GitHub gagal -> anggap idle (fail-open, dicatat di audit).
+    - ("idle")       : antrean trading benar-benar kosong.
+    """
+    token = (os.environ.get("GH_PAT") or os.environ.get("GH_PATH") or os.environ.get("GITHUB_PAT") or "").strip()
+    repo = (os.environ.get("GITHUB_REPOSITORY") or "").strip()
+    if not token or not repo:
+        return False, "no_gh_pat"
+    try:
+        r = httpx.get(
+            f"https://api.github.com/repos/{repo}/actions/runs",
+            params={"per_page": "50"},
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            timeout=10.0,
+        )
+        r.raise_for_status()
+        runs = (r.json() or {}).get("workflow_runs") or []
+        for run in runs:
+            wf = str(run.get("path") or "").rsplit("/", 1)[-1]
+            if wf in _TRADING_WORKFLOW_FILES and str(run.get("status") or "") in _ACTIVE_RUN_STATUSES:
+                created = str(run.get("created_at") or "")[:16].replace("T", " ")
+                return True, f"`{wf}` status `{run.get('status')}` sejak `{created}` UTC"
+        return False, "idle"
+    except Exception:
+        return False, "check_error"
+
+
+def _build_main_keyboard() -> dict[str, Any]:
+    """ReplyKeyboard permanen di atas keyboard Telegram — baris atas = menu AMAN
+    (tanpa Walt/OAK refresh token), baris bawah bertanda ⚡ = menu yang menyentuh
+    bursa dan otomatis dijeda guard anti-tabrak token."""
+    rows = [
+        ["⚙️ Strategi Global", "🎯 Strategi Saya", "📦 Paket Strategi"],
+        ["📊 Chart BTC", "🔍 Cek Harga", "📜 Histori"],
+        ["ℹ️ Bantuan", "👤 Whoami", "🛡️ Keamanan"],
+        ["💰 Keuangan ⚡", "📊 Posisi ⚡", "🔎 Scan Market ⚡", "🛡️ Monitor ⚡"],
+        ["🔁 Coba Lagi", "🧹 Tutup Menu"],
+    ]
+    return {"keyboard": rows, "resize_keyboard": True, "one_time_keyboard": False}
+
+
+_LABEL_TO_CMD: dict[str, str] = {
+    "⚙️ Strategi Global": "/strategy",
+    "🎯 Strategi Saya": "/my_strategy",
+    "📦 Paket Strategi": "/packs",
+    "📊 Chart BTC": "/chart BTC 1h",
+    "🔍 Cek Harga": "/sources",
+    "📜 Histori": "/history",
+    "ℹ️ Bantuan": "/help",
+    "👤 Whoami": "/whoami",
+    "🛡️ Keamanan": "/auth_setup",
+    "💰 Keuangan ⚡": "/finance",
+    "📊 Posisi ⚡": "/positions",
+    "🔎 Scan Market ⚡": "/scan",
+    "🛡️ Monitor ⚡": "/monitor",
+    "🔁 Coba Lagi": "__retry_last__",
+    "🧹 Tutup Menu": "__hide_keyboard__",
+}
+
+
+
 def _build_main_menu(role: str) -> dict[str, Any]:
     rows = [
         [
@@ -191,6 +268,34 @@ class WaltTelegramBot:
         # Gerbang owner-only: satu peringatan per ID asing per proses + flag misconfig
         self._seen_non_owner: set[int] = set()
         self._owner_gate_misconfig_logged = False
+        # Guard anti-tabrak token + memori perintah terakhir utk tombol "🔁 Coba Lagi"
+        self._last_cmd: dict[int, str] = {}
+
+    def _idle_gate(self, tg_id: int, chat_id: int, username: str, cmd: str) -> bool:
+        """True = boleh lanjut (bursa/idle); False = perintah dijeda karena run trading aktif."""
+        busy, detail = is_trading_run_active()
+        if busy:
+            self.auth.log_audit("RUN_GUARD_BLOCKED", tg_id, username=username, detail=f"{cmd} | {detail}")
+            self.api.send_message(
+                chat_id,
+                f"⏳ *Perintah `{cmd}` dijeda*\n"
+                f"• {detail}\n"
+                f"• Token Walt/OAK bersifat single-use dan dipakai bersama CI — menjalankan "
+                f"perintah ⚡ saat job aktif bisa memutus token di tengah eksekusi order.\n"
+                f"• Menu tanpa ⚡ selalu aman. Setelah run selesai (±1–10 menit), ketuk "
+                f"*🔁 Coba Lagi* di keyboard.",
+            )
+            return False
+        if detail == "no_gh_pat":
+            self.api.send_message(
+                chat_id,
+                "⚠️ Catatan: `GH_PAT`/`GITHUB_REPOSITORY` belum disetel — status run trading "
+                "tidak bisa dicek, perintah dilanjutkan dengan risiko Anda sendiri.",
+            )
+        elif detail == "check_error":
+            self.auth.log_audit("RUN_GUARD_UNAVAILABLE", tg_id, username=username, detail=cmd)
+        return True
+
 
     def _owner_gate(self, update: dict[str, Any]) -> bool:
         """True = update HARUS dibuang tanpa balasan apa pun (mode khusus-owner aktif).
@@ -309,9 +414,24 @@ class WaltTelegramBot:
         self.handle_text(tg_id, chat_id, username, text)
 
     def handle_text(self, tg_id: int, chat_id: int, username: str, text: str) -> None:
+        text = (text or "").strip()
+        # Tombol ReplyKeyboard (label ber-emoji) diterjemahkan dulu menjadi perintah
+        if text in _LABEL_TO_CMD:
+            mapped = _LABEL_TO_CMD[text]
+            if mapped == "__retry_last__":
+                text = self._last_cmd.get(tg_id, "/help")
+            elif mapped == "__hide_keyboard__":
+                self.api.send_message(chat_id, "🧹 Keyboard menu disembunyikan. Ketik `/help` untuk memunculkan lagi.",
+                                      reply_markup={"remove_keyboard": True, "selective": True})
+                return
+            else:
+                text = mapped
         parts = text.split()
         cmd = parts[0].lower().split("@")[0]
         args = parts[1:]
+        if cmd.startswith("/"):
+            self._last_cmd[tg_id] = text
+
 
         # Perintah autentikasi terbuka agar user whitelist bisa login via Google Auth
         if cmd == "/login":
@@ -359,11 +479,15 @@ class WaltTelegramBot:
         if cmd in {"/status", "/finance"}:
             if not self._require(tg_id, chat_id, username, "view_finance"):
                 return
+            if not self._idle_gate(tg_id, chat_id, username, "/finance"):
+                return
             self._cmd_finance(chat_id)
             return
 
         if cmd == "/positions":
             if not self._require(tg_id, chat_id, username, "view_finance"):
+                return
+            if not self._idle_gate(tg_id, chat_id, username, "/positions"):
                 return
             self._cmd_positions(chat_id)
             return
@@ -384,6 +508,8 @@ class WaltTelegramBot:
 
         if cmd == "/price":
             if not self._require(tg_id, chat_id, username, "view_chart"):
+                return
+            if not self._idle_gate(tg_id, chat_id, username, "/price"):
                 return
             asset = args[0] if args else "BTC"
             self._cmd_price(chat_id, asset)
@@ -543,6 +669,8 @@ class WaltTelegramBot:
         if cmd == "/scan":
             if not self._require(tg_id, chat_id, username, "trade_control"):
                 return
+            if not self._idle_gate(tg_id, chat_id, username, "/scan"):
+                return
             self.api.send_message(chat_id, "🔎 Menjalankan scan funding rate pasar...")
             try:
                 res = walt_bot.scan_markets()
@@ -563,6 +691,8 @@ class WaltTelegramBot:
         if cmd == "/monitor":
             if not self._require(tg_id, chat_id, username, "trade_control"):
                 return
+            if not self._idle_gate(tg_id, chat_id, username, "/monitor"):
+                return
             self.api.send_message(chat_id, "🛡️ Menjalankan risk monitor manual...")
             try:
                 res = walt_bot.risk_monitor()
@@ -578,6 +708,8 @@ class WaltTelegramBot:
         if cmd == "/execute_market":
             if not self._require(tg_id, chat_id, username, "trade_control"):
                 return
+            if not self._idle_gate(tg_id, chat_id, username, "/execute_market"):
+                return
             self.api.send_message(chat_id, "🚀 Menjalankan Market Execute (Saham US & Komoditas)...")
             try:
                 res = walt_bot.market_execute()
@@ -589,6 +721,8 @@ class WaltTelegramBot:
         if cmd == "/execute_crypto":
             if not self._require(tg_id, chat_id, username, "trade_control"):
                 return
+            if not self._idle_gate(tg_id, chat_id, username, "/execute_crypto"):
+                return
             self.api.send_message(chat_id, "⚡ Menjalankan Crypto Execute (Bluechip)...")
             try:
                 res = walt_bot.crypto_execute()
@@ -599,6 +733,8 @@ class WaltTelegramBot:
 
         if cmd == "/close":
             if not self._require(tg_id, chat_id, username, "trade_control"):
+                return
+            if not self._idle_gate(tg_id, chat_id, username, "/close"):
                 return
             if not args:
                 self.api.send_message(chat_id, "Format: `/close <ASSET>` (contoh: `/close SPY`)")
@@ -723,7 +859,13 @@ class WaltTelegramBot:
                 "• `/users`, `/adduser`, `/setrole`, `/revoke`, `/audit`, `/auth_setup`",
                 "• `/scan`, `/monitor`, `/execute_market`, `/execute_crypto`, `/close <ASET>`",
             ]
-        self.api.send_message(chat_id, "\n".join(lines), reply_markup=_build_main_menu(role))
+        lines += [
+            "",
+            "🔝 *Keyboard Menu* — tombol di atas keyboard selalu tampil:",
+            "• Menu tanpa ⚡ — tidak menyentuh token Walt/OAK, bebas dipakai kapan pun.",
+            "• Menu ⚡ — otomatis dijeda selagi run trading aktif (token single-use dipakai bersama CI).",
+        ]
+        self.api.send_message(chat_id, "\n".join(lines), reply_markup=_build_main_keyboard())
 
     def _cmd_finance(self, chat_id: int) -> None:
         try:
@@ -828,7 +970,10 @@ class WaltTelegramBot:
 
         walt_line = ""
         try:
-            contracts = walt_bot.WaltClient().list_contracts()
+            if is_trading_run_active()[0]:  # token dipakai CI -> Lewati pengayaan Walt; chart tetap jalan dari sumber publik
+                contracts = None
+            else:
+                contracts = walt_bot.WaltClient().list_contracts()
             items = contracts.get("contracts", contracts) if isinstance(contracts, dict) else contracts
             match = next((c for c in (items or []) if str(c.get("base_asset", "")).upper() == info["asset"]), None)
             if match:
@@ -960,6 +1105,8 @@ class WaltTelegramBot:
 
     def _exec_close_asset(self, tg_id: int, chat_id: int, username: str, asset: str) -> None:
         if not self._require(tg_id, chat_id, username, "trade_control"):
+            return
+        if not self._idle_gate(tg_id, chat_id, username, f"/close {asset}"):
             return
         try:
             client = walt_bot.WaltClient()
