@@ -127,10 +127,10 @@ Untuk menyeimbangkan antara **kebutuhan eksekusi segera** dan **potensi komersia
      - **Gear 2 (`GEAR_2_ACTIVE_60M` — `2..5` peluang `'GO'`):** Interval `60` menit (1 jam) aktif menangkap peluang kuat.
      - **Gear 3 (`GEAR_3_FULL_RESEARCH_60M` — `> 5` peluang `'GO'` atau `GEAR_3_FULL_RESEARCH=true`):** Interval `60` menit (1 jam) + membuka izin **riset & analisa AI penuh untuk setiap keputusan trading** (mengangkat cap `max_otf_calls` & `CRYPTO_RESEARCH_TOP_N`).
    - **3-Hour Re-Entry Cooldown, `'GO'` Bypass E4, & Dynamic Slot Elasticity:** Verdict **`GO`** melewati batas frekuensi `2/aset/24j` & `8/hari` (sirkuit `-5%`, cooldown 3 jam, batas slot 5–15, & buffer kas 15% tetap ketat).
-4. **Crypto Execute (`crypto-execute.yml` — 4-Tier Execution Gear `0..3`, 24/7 via Cloud Scheduler):**
-   - Modul mandiri untuk 10 crypto bluechip (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `AVAX`, `SUI`, `LINK`, `NEAR`, `AAVE`) dengan sistem **4-Tier Execution Gear** (`Gear 0` `720m` = 2x/hari; `Gear 1` `120m`; `Gear 2` `60m`; `Gear 3` `60m` Full Research) + *3-hour re-entry cooldown*.
+4. **Crypto Execute (`crypto-execute.yml` — Dual-Engine + 4-Tier Gear `0..3`, 24/7 via Cloud Scheduler):**
+   - Modul mandiri 24/7 untuk 10 crypto bluechip (`BTC`, `ETH`, `SOL`, `BNB`, `XRP`, `AVAX`, `SUI`, `LINK`, `NEAR`, `AAVE`): menggabungkan **Engine 1 (Funding Carry `>= 0.50%/hari`)** dan **Engine 2 (`CRYPTO_FORECAST_ENGINE=on` — Mean-Reversion Fade teruji OOS `V5 4h Rejected->Comfort` & `V4 1h Extreme Fade`)** dengan 4-Tier Gear + *3-hour re-entry cooldown*.
+   - Manajemen risiko Engine 2: ATR SL (`1.5%–4.5%`), Time-Stop `24h/72h` (kecuali trailing L4 aktif), serta tutup darurat bila *adverse funding* `>= 0.30%/hari`.
    - Strict altcoin exclusion: token spekulatif dan memecoin di-blacklist total.
-   - Asymmetric R:R TP +2.0% & SL 1.5% untuk memberi ruang napas *funding carry*.
 5. **Watchdog & CI Safety (`watchdog.yml` & `tests.yml`):**
    - **Cloud Scheduler Satu-Satunya Trigger Trading:** Blok `schedule:` dihapus dari 4 workflow trading agar tidak terjadi eksekusi dobel/terlambat. Verifikasi job Cloud Scheduler dilakukan dengan `gcloud scheduler jobs list --location=asia-southeast2`.
    - **Watchdog (`watchdog.yml`, `0 * * * *`, timeout `3m`):** Mengecek apakah `Walt Risk Monitor` sukses dalam 30 menit terakhir; jika tidak, mengirim alert Telegram dan memicu 1x `workflow_dispatch` fallback (tanpa mengakses Walt API).

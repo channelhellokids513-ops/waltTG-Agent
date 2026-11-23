@@ -507,3 +507,190 @@ def forecast_24h(
         rejected_down=rej_down,
         reason=reason,
     )
+
+
+# =============================================================================
+# ENGINE 2 PRODUKSI CRYPTO: V5 (4h Rejected -> Comfort) + V4 (1h Extreme Fade)
+# Terkalibrasi 4-Fold Walk-Forward OOS pada 10 Koin Tier-1 Hyperliquid
+# =============================================================================
+
+FORECAST_SL_CAP_PCT = 0.045              # Maks 4.5% price SL (maks 9% risiko margin @ 2x)
+FORECAST_MAX_ADVERSE_FUNDING_DAILY = 0.0030  # Tolak bila harus membayar funding > 0.30%/hari
+
+
+def _extract_gravity_fade_state(
+    candles: Sequence[Mapping[str, Any]],
+) -> tuple[float, bool, bool, Optional[list[float]], Optional[list[float]]]:
+    """Ambil (comfort_structural, rejected_up, rejected_down, rejected_up_prices, rejected_down_prices)."""
+    n = len(candles)
+    close = float(candles[-1]["c"])
+    mg = analyze_market_gravity(candles, trace_every=max(1, n - 1))
+    if not mg.usable or not mg.trace or mg.trace[-1].bar_index != n - 1:
+        return close, False, False, None, None
+    snap = mg.trace[-1]
+    cp = float(comfort_points(snap).get("structural", close))
+    rej_up = list(snap.rejected_up or [])
+    rej_dn = list(snap.rejected_down or [])
+    return cp, bool(rej_up), bool(rej_dn), rej_up, rej_dn
+
+
+def evaluate_crypto_live_fade_signal(
+    asset: str,
+    candles_4h: Sequence[Mapping[str, Any]],
+    candles_1h: Optional[Sequence[Mapping[str, Any]]] = None,
+    *,
+    funding_daily: float = 0.0,
+    round_trip_cost_pct: float = DEFAULT_ROUND_TRIP_COST_PCT,
+) -> Optional[dict[str, Any]]:
+    """Evaluasi sinyal Engine 2 teruji OOS khusus Crypto Tier-1:
+    1) `V4_1H_EXTREME_FADE`: 1h extreme fade (`z >= 2.2 & RSI >= 78` atau `Rejected` + `z >= 1.5` menuju Comfort).
+    2) `V5_4H_REJ_COMFORT`: 4h structural magnet `Rejected` searah `Comfort Point`.
+    """
+    sym = str(asset or "").strip().upper()
+    candidate: Optional[dict[str, Any]] = None
+
+    # Prioritas 1: V4_1H_EXTREME_FADE (OOS 1h: 58.3% win, +1.027% gross, PF 1.73)
+    if candles_1h and len(candles_1h) >= 75:
+        d1 = compute_price_delta_24h(sym, candles_1h, interval="1h", asset_class="crypto")
+        if d1 is not None:
+            cp1, rej_up1, rej_dn1, _ru1, _rd1 = _extract_gravity_fade_state(candles_1h)
+            side1: Optional[Literal["long", "short"]] = None
+            if (d1.z_move_24h >= 2.2 and d1.rsi_14 >= 78.0) or (rej_up1 and cp1 < d1.close and d1.z_move_24h >= 1.5):
+                side1 = "short"
+            elif (d1.z_move_24h <= -2.2 and d1.rsi_14 <= 22.0) or (rej_dn1 and cp1 > d1.close and d1.z_move_24h <= -1.5):
+                side1 = "long"
+            if side1 is not None:
+                sl_pct = round(_clamp(1.0 * d1.atr_24h_pct, 0.015, FORECAST_SL_CAP_PCT), 4)
+                tp_pct = round(max(0.020, 1.2 * sl_pct), 4)
+                candidate = {
+                    "asset": sym,
+                    "side": side1,
+                    "setup": "V4_1H_EXTREME_FADE",
+                    "sl_pct": sl_pct,
+                    "tp_pct": tp_pct,
+                    "max_hold_hours": 24.0,
+                    "expected_gross_pct": 0.0102,
+                    "z_move_24h": round(d1.z_move_24h, 3),
+                    "rsi_14": round(d1.rsi_14, 2),
+                    "reason": (
+                        f"V4 1h Fade {side1.upper()} (z={d1.z_move_24h:+.2f}, RSI={d1.rsi_14:.1f}, "
+                        f"SL={sl_pct*100:.2f}%, TP={tp_pct*100:.2f}%, hold=24h)"
+                    ),
+                }
+
+    # Prioritas 2: V5_4H_REJ_COMFORT (OOS 4h: 340 trade, 54.7% win, +0.470% gross, PF 1.12)
+    if candidate is None and candles_4h and len(candles_4h) >= 75:
+        d4 = compute_price_delta_24h(sym, candles_4h, interval="4h", asset_class="crypto")
+        if d4 is not None:
+            cp4, rej_up4, rej_dn4, _ru4, _rd4 = _extract_gravity_fade_state(candles_4h)
+            side4: Optional[Literal["long", "short"]] = None
+            if rej_up4 and cp4 < d4.close and d4.rsi_14 >= 50.0:
+                side4 = "short"
+            elif rej_dn4 and cp4 > d4.close and d4.rsi_14 <= 50.0:
+                side4 = "long"
+            if side4 is not None:
+                sl_pct = round(_clamp(1.0 * d4.atr_24h_pct, 0.015, FORECAST_SL_CAP_PCT), 4)
+                tp_pct = round(max(0.020, 1.0 * sl_pct), 4)
+                candidate = {
+                    "asset": sym,
+                    "side": side4,
+                    "setup": "V5_4H_REJ_COMFORT",
+                    "sl_pct": sl_pct,
+                    "tp_pct": tp_pct,
+                    "max_hold_hours": 72.0,
+                    "expected_gross_pct": 0.0050,
+                    "z_move_24h": round(d4.z_move_24h, 3),
+                    "rsi_14": round(d4.rsi_14, 2),
+                    "reason": (
+                        f"V5 4h Fade {side4.upper()} (Rejected->Comfort, z={d4.z_move_24h:+.2f}, "
+                        f"RSI={d4.rsi_14:.1f}, SL={sl_pct*100:.2f}%, TP={tp_pct*100:.2f}%, hold=72h)"
+                    ),
+                }
+
+    if candidate is None:
+        return None
+
+    side = candidate["side"]
+    favorable_funding = (-float(funding_daily or 0.0)) if side == "long" else float(funding_daily or 0.0)
+    adverse_funding = max(0.0, -favorable_funding)
+    if adverse_funding > FORECAST_MAX_ADVERSE_FUNDING_DAILY:
+        return None
+
+    expected_net = round(candidate["expected_gross_pct"] - float(round_trip_cost_pct) - adverse_funding, 6)
+    if expected_net <= 0.0:
+        return None
+
+    candidate["adverse_funding_daily"] = round(adverse_funding, 6)
+    candidate["expected_net_edge_pct"] = expected_net
+    return candidate
+
+
+def scan_crypto_price_opportunities(
+    contracts: Sequence[Mapping[str, Any]],
+    *,
+    allowed_assets: Optional[set[str] | frozenset[str]] = None,
+    exclude_assets: Optional[set[str]] = None,
+    min_vol_24h: float = 1_000_000.0,
+    fetcher: Optional[Any] = None,
+) -> list[dict[str, Any]]:
+    """Pindai kontrak Crypto Tier-1 yang tidak lolos Engine 1 funding memakai sinyal Engine 2."""
+    from market_chart import fetch_candles as _default_fetch
+
+    candle_fetcher = fetcher or _default_fetch
+    target = set(allowed_assets) if allowed_assets is not None else set(CRYPTO_SYMBOLS)
+    excluded = {str(a).upper() for a in (exclude_assets or set())}
+    found: list[dict[str, Any]] = []
+
+    for c in contracts:
+        asset = str(c.get("base_asset") or "").strip().upper()
+        if not asset or asset not in target or asset in excluded:
+            continue
+        try:
+            vol = float(c.get("volume_24h_usd") or 0.0)
+        except (TypeError, ValueError):
+            vol = 0.0
+        if vol < min_vol_24h:
+            continue
+        try:
+            fr_daily = float(c.get("funding_rate_hourly") or 0.0) * 24.0
+        except (TypeError, ValueError):
+            fr_daily = 0.0
+        try:
+            slip = float(c.get("price_slippage") or 0.0)
+        except (TypeError, ValueError):
+            slip = 0.0
+        rt_cost = max(DEFAULT_ROUND_TRIP_COST_PCT, 0.0018 + min(max(0.0, slip), 0.0020))
+
+        try:
+            candles_4h, _src4 = candle_fetcher(asset, "4h", 180)
+        except Exception:
+            candles_4h = []
+        try:
+            candles_1h, _src1 = candle_fetcher(asset, "1h", 180)
+        except Exception:
+            candles_1h = []
+
+        sig = evaluate_crypto_live_fade_signal(
+            asset,
+            candles_4h,
+            candles_1h,
+            funding_daily=fr_daily,
+            round_trip_cost_pct=rt_cost,
+        )
+        if sig is None:
+            continue
+
+        sig.update({
+            "contract_id": c["contract_id"],
+            "funding_daily": fr_daily,
+            "volume_24h": vol,
+            "max_leverage": int(c.get("max_leverage") or 2),
+            "min_size_base": float(c.get("min_size_base") or 0.0),
+            "max_size_base": float(c.get("max_size_base") or 0.0),
+            "max_size_quote": float(c.get("max_size_quote") or 0.0),
+            "price_slippage": slip,
+        })
+        found.append(sig)
+
+    found.sort(key=lambda item: float(item.get("expected_net_edge_pct") or 0.0), reverse=True)
+    return found

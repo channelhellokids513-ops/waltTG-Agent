@@ -583,10 +583,19 @@ US_STOCK_HOURS_ONLY_ENV = "US_STOCK_HOURS_ONLY"
 US_STOCK_MARKET_OPEN_UTC = (13, 30)   # Senin-Jumat 13:30 UTC (EDT open)
 US_STOCK_MARKET_CLOSE_UTC = (21, 0)   # sampai 21:00 UTC (EST close)
 OFF_HOURS_HOLD_POLICY_ENV = "OFF_HOURS_HOLD_POLICY"
+CRYPTO_FORECAST_ENGINE_ENV = "CRYPTO_FORECAST_ENGINE"
+FORECAST_ADVERSE_FUNDING_CLOSE_THRESHOLD = 0.0030  # 0.30%/hari batas funding merugikan untuk Engine 2
 
-CI_ENV_KNOBS: tuple[str, ...] = ("E5_SLIPPAGE_BASIS", "US_STOCK_HOURS_ONLY")
+CI_ENV_KNOBS: tuple[str, ...] = ("E5_SLIPPAGE_BASIS", "US_STOCK_HOURS_ONLY", CRYPTO_FORECAST_ENGINE_ENV)
 MONITOR_ENV_KNOBS: tuple[str, ...] = (OFF_HOURS_HOLD_POLICY_ENV,)
 ENTRY_WORKFLOWS: tuple[str, ...] = ("crypto-execute.yml", "market-execute.yml", "daily-scan.yml")
+
+
+def is_crypto_forecast_engine_enabled() -> bool:
+    """True bila Engine 2 Crypto Mean-Reversion Fade (V5 4h + V4 1h) aktif (default on)."""
+    return os.getenv(CRYPTO_FORECAST_ENGINE_ENV, "on").strip().lower() not in (
+        "off", "false", "0", "no", "disabled"
+    )
 
 US_STOCK_PRECLOSE_START_UTC = (20, 35)       # 25 menit sebelum tutup 21:00 UTC (cukup untuk siklus risk-monitor 5-10m)
 COMMODITY_WEEKEND_REOPEN_UTC = (22, 0)       # Minggu 22:00 UTC pembukaan futures komoditas global
@@ -1203,6 +1212,13 @@ class Opportunity:
     max_size_quote: float = 0.0  # plafon ATAS nilai notional (quote/USD) dari payload kontrak
     price_slippage: float = 0.0
     min_margin_2x: float = 0.0   # minimum margin efektif di lev 2x
+    signal_source: str = "funding"  # "funding" | "price_forecast"
+    forecast_setup: str = ""        # "V5_4H_REJ_COMFORT" | "V4_1H_EXTREME_FADE"
+    planned_sl_pct: Optional[float] = None
+    planned_tp_pct: Optional[float] = None
+    max_hold_hours: Optional[float] = None
+    expected_net_edge_pct: Optional[float] = None
+    forecast_reason: str = ""
 
     @property
     def funding_annualized_pct(self) -> float:
@@ -1224,6 +1240,10 @@ class Position:
     liquidation_price: float
     position_id: str = ""
     opened_at: str = ""
+    signal_source: str = "funding"
+    planned_sl_pct: Optional[float] = None
+    planned_tp_pct: Optional[float] = None
+    max_hold_hours: Optional[float] = None
 
     @property
     def pnl_pct_margin(self) -> float:
@@ -1455,13 +1475,46 @@ def decide_go_nogo(
     Return (verdict, reason, margin_multiplier).
     margin_multiplier = 1.0 (full) atau 0.5 (half) atau 0 (skip).
     """
-    # Minimum funding threshold
-    if abs(opp.funding_daily) < MIN_FUNDING_DAILY:
+    is_forecast = getattr(opp, "signal_source", "funding") == "price_forecast"
+
+    # Minimum funding threshold (hanya berlaku untuk jalur Engine 1 funding carry)
+    if not is_forecast and abs(opp.funding_daily) < MIN_FUNDING_DAILY:
         return "SKIP", "funding kurang (<0.5%/hari)", 0.0
 
     # Whitelist check
     if opp.base_asset not in ALLOWED_ASSETS:
         return "SKIP", f"aset {opp.base_asset} tidak masuk whitelist", 0.0
+
+    # Engine 2: Crypto Mean-Reversion Fade terverifikasi OOS (AI sebagai filter P5/SPLIT/lawan arah)
+    if is_forecast:
+        setup_lbl = opp.forecast_setup or "ENGINE2_FADE"
+        if research is None:
+            return "GO", f"Engine 2 ({setup_lbl}) sinyal OOS (riset tidak tersedia -> lolos)", 1.0
+        p5 = research.p1_to_p7_scores.get("P5_risk_catalysts", 0.0) if research.p1_to_p7_scores else 0.0
+        if p5 >= MAX_P5_RISK:
+            return "SKIP", f"Engine 2 ({setup_lbl}): katalis risiko tinggi (P5={p5:.2f} >= {MAX_P5_RISK:.2f}) -> SKIP", 0.0
+        opposed = (
+            (opp.side == "short" and research.news_sentiment == "bullish")
+            or (opp.side == "long" and research.news_sentiment == "bearish")
+        )
+        if opposed:
+            return (
+                "SKIP",
+                f"Engine 2 ({setup_lbl}): berita `{research.news_sentiment}` (skor {research.final_score:+.2f}) "
+                f"bertentangan dengan {opp.side.upper()} -> SKIP",
+                0.0,
+            )
+        if (
+            research.overall_consensus_level == "SPLIT"
+            or research.vendor_alignment == "split"
+            or research.consensus == "CONFLICT"
+        ):
+            return (
+                "HALF",
+                f"Engine 2 ({setup_lbl}): swarm SPLIT -> proteksi HALF size",
+                0.5,
+            )
+        return "GO", f"Engine 2 ({setup_lbl}) lolos filter AI ({research.news_sentiment} {research.final_score:+.2f})", 1.0
 
     # Komoditas / Crypto Bluechip: funding & struktur yang memutuskan; AI ikut menilai tetapi
     # hanya boleh MENURUNKAN (HALF/SKIP), tidak pernah membuat entry baru. (Ronde 8, permintaan
@@ -1705,7 +1758,17 @@ def open_position(
             return None
     margin, price = resolved
 
-    tp, sl = compute_baseline_tpsl(opp.side, price, asset=opp.base_asset, funding_daily=opp.funding_daily)
+    if getattr(opp, "signal_source", "funding") == "price_forecast" and opp.planned_sl_pct and opp.planned_tp_pct:
+        sl_pct = min(0.045, max(DEFAULT_SL_PCT, float(opp.planned_sl_pct)))
+        tp_pct = max(0.020, float(opp.planned_tp_pct))
+        if opp.side == "long":
+            tp = round(price * (1.0 + tp_pct), 4)
+            sl = round(price * (1.0 - sl_pct), 4)
+        else:
+            tp = round(price * (1.0 - tp_pct), 4)
+            sl = round(price * (1.0 + sl_pct), 4)
+    else:
+        tp, sl = compute_baseline_tpsl(opp.side, price, asset=opp.base_asset, funding_daily=opp.funding_daily)
 
     # Coba preview dengan TP/SL
     try:
@@ -2216,6 +2279,21 @@ def _record_position_close(
     _set_asset_cooldown(pos.base_asset)
 
 
+def _parse_position_age_hours(opened_at: str, now_utc: datetime) -> Optional[float]:
+    raw = str(opened_at or "").strip()
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        now = now_utc.replace(tzinfo=timezone.utc) if now_utc.tzinfo is None else now_utc.astimezone(timezone.utc)
+        return max(0.0, (now - dt).total_seconds() / 3600.0)
+    except (ValueError, TypeError) as exc:
+        log.debug(f"Gagal parse position opened_at={opened_at!r}: {exc}")
+        return None
+
+
 def evaluate_and_apply_position_risk(
     client: WaltClient,
     pos: Position,
@@ -2223,14 +2301,17 @@ def evaluate_and_apply_position_risk(
     now_utc: Optional[datetime] = None,
 ) -> Optional[dict]:
     """
-    Evaluasi 4 Lapis Risiko Terpadu + Kebijakan Off-Hours & Eksekusi Atomik Tunggal:
-    1. Lapis 2 (Funding Flip Sign): Jika funding berbalik arah negatif -> TUTUP POSISI SEGERA.
+    Evaluasi 4 Lapis Risiko Terpadu + Kebijakan Off-Hours + Engine 2 Time-Stop & Eksekusi Atomik Tunggal:
+    1. Lapis 2 (Funding Flip Sign): Tutup posisi bila funding flip melampaui ambang
+       (0.10%/hari untuk Engine 1 carry, atau 0.30%/hari untuk Engine 2 price_forecast).
+    1a. Engine 2 Time-Stop: Untuk `signal_source == "price_forecast"`, tutup posisi bila umur
+        sudah melewati `max_hold_hours` (24h/72h) dan belum masuk trailing profit (>= +0.80%).
     1b. Off-Hours Hybrid Cost-Aware Policy (saat `now_utc` diberikan / di risk-monitor):
         Evaluasi biaya inap & kelayakan pre-close overnight/weekend untuk Saham AS & Komoditas.
-    2. TP Dinamis: Ambil target TP baseline/windfall, perketat jika target baru lebih dekat ke entry.
+    2. TP Dinamis: Ambil target TP baseline/windfall (atau planned TP Engine 2), perketat bila perlu.
     3. SL Dinamis: Komparasikan kandidat SL dari:
-       - Baseline DEFAULT_SL_PCT (Lapis 1)
-       - Funding rendah <0.1%/hari (Lapis 2)
+       - Baseline DEFAULT_SL_PCT (atau planned ATR SL Engine 2 <= 4.5%)
+       - Funding rendah <0.1%/hari (Lapis 2, khusus Engine 1)
        - Progressive Trailing Stop / Early Zero-Risk Lock (Lapis 4)
        - Off-Hours Early Lock (+0.25% saat profit >= +0.40% di sesi non-OPEN)
        Pilih SL yang paling aman & menguntungkan (strictly better).
@@ -2246,20 +2327,43 @@ def evaluate_and_apply_position_risk(
             "detail": "entry_price tidak valid",
         }
 
+    is_forecast_pos = getattr(pos, "signal_source", "funding") == "price_forecast"
+    flip_threshold = (
+        FORECAST_ADVERSE_FUNDING_CLOSE_THRESHOLD
+        if is_forecast_pos
+        else FUNDING_FLIP_CLOSE_THRESHOLD
+    )
+
     # --- 1. Lapis 2: Funding Flip Sign (dengan Hysteresis) -> Tutup Posisi Segera ---
     funding_flipped = (
         (pos.side == "long" and current_funding_daily > 0)
         or (pos.side == "short" and current_funding_daily < 0)
     )
-    if funding_flipped and abs(current_funding_daily) >= FUNDING_FLIP_CLOSE_THRESHOLD:
+    if funding_flipped and abs(current_funding_daily) >= flip_threshold:
+        close_lbl = (
+            f"Engine 2 Adverse Funding (>={flip_threshold*100:.2f}%/hari)"
+            if is_forecast_pos
+            else "Funding Flip Sign"
+        )
         log.warning(
             f"[L2] {pos.base_asset}: funding flip sign ({current_funding_daily*100:+.3f}%/hari >= "
-            f"{FUNDING_FLIP_CLOSE_THRESHOLD*100:.2f}%) -> tutup posisi riil"
+            f"{flip_threshold*100:.2f}%) -> tutup posisi riil"
         )
         preview = client.preview_close(pos.contract_id)
         return _execute_validated_close(
-            client, pos, preview, reason="Funding Flip Sign", detail="Funding Flip Sign -> Close Posisi"
+            client, pos, preview, reason=close_lbl, detail=f"{close_lbl} -> Close Posisi"
         )
+
+    # --- 1a. Engine 2 Time-Stop (khusus posisi directional price_forecast) ---
+    if is_forecast_pos and now_utc is not None and pos.max_hold_hours:
+        age_h = _parse_position_age_hours(pos.opened_at, now_utc)
+        if age_h is not None and age_h >= float(pos.max_hold_hours) and pos.profit_pct_price < 0.0080:
+            ts_reason = f"Engine 2 Time-Stop ({float(pos.max_hold_hours):.0f}h, hold={age_h:.1f}h)"
+            log.warning(f"[TIME-STOP] {pos.base_asset}: {ts_reason} -> tutup posisi riil")
+            preview = client.preview_close(pos.contract_id)
+            return _execute_validated_close(
+                client, pos, preview, reason=ts_reason, detail=f"{ts_reason} -> Close Posisi"
+            )
 
     # --- 1b. Hybrid Cost-Aware Off-Hours & Pre-Close Policy ---
     off_hours_policy: Optional[dict[str, Any]] = None
@@ -2279,10 +2383,20 @@ def evaluate_and_apply_position_risk(
                 detail=f"{close_reason} -> Close Posisi",
             )
 
-    # --- 2. Evaluasi Target TP (Lapis 1 Baseline & Windfall) ---
-    target_tp, target_sl = compute_baseline_tpsl(
-        pos.side, pos.entry_price, asset=pos.base_asset, funding_daily=current_funding_daily
-    )
+    # --- 2. Evaluasi Target TP (Lapis 1 Baseline & Windfall, atau Engine 2 Planned TP/SL) ---
+    if is_forecast_pos:
+        plan_tp_pct = max(0.020, float(pos.planned_tp_pct or 0.025))
+        plan_sl_pct = min(0.045, max(DEFAULT_SL_PCT, float(pos.planned_sl_pct or 0.035)))
+        if pos.side == "long":
+            target_tp = round(pos.entry_price * (1.0 + plan_tp_pct), 4)
+            target_sl = round(pos.entry_price * (1.0 - plan_sl_pct), 4)
+        else:
+            target_tp = round(pos.entry_price * (1.0 - plan_tp_pct), 4)
+            target_sl = round(pos.entry_price * (1.0 + plan_sl_pct), 4)
+    else:
+        target_tp, target_sl = compute_baseline_tpsl(
+            pos.side, pos.entry_price, asset=pos.base_asset, funding_daily=current_funding_daily
+        )
 
     new_tp = None
     tp_reason = None
@@ -2302,13 +2416,13 @@ def evaluate_and_apply_position_risk(
     candidate_sl = None
     sl_reason = None
 
-    # A. Kandidat dari Baseline DEFAULT_SL_PCT (Lapis 1)
+    # A. Kandidat dari Baseline SL (DEFAULT_SL_PCT atau Engine 2 planned_sl_pct)
     if not pos.sl or _sl_is_improvement(pos, target_sl):
         candidate_sl = target_sl
-        sl_reason = "L1 Baseline"
+        sl_reason = "Engine 2 ATR SL" if is_forecast_pos else "L1 Baseline"
 
-    # B. Kandidat dari Funding Lemah / Flip di bawah threshold <0.1% (Lapis 2)
-    if abs(current_funding_daily) < FUNDING_FLIP_CLOSE_THRESHOLD:
+    # B. Kandidat dari Funding Lemah / Flip di bawah threshold <0.1% (Lapis 2 — khusus Engine 1)
+    if not is_forecast_pos and abs(current_funding_daily) < FUNDING_FLIP_CLOSE_THRESHOLD:
         l2_sl = round(pos.entry_price, 4)
         l2_valid_side = (
             (pos.side == "long" and l2_sl < pos.current_price)
@@ -2355,7 +2469,11 @@ def evaluate_and_apply_position_risk(
         or (pos.side == "short" and sl_check <= pos.current_price)
     )
     if sl_breached:
-        sl_breach_label = f"SL {DEFAULT_SL_PCT*100:.2f}% breached (migrasi)"
+        sl_breach_label = (
+            "SL Engine 2 breached"
+            if is_forecast_pos
+            else f"SL {DEFAULT_SL_PCT*100:.2f}% breached (migrasi)"
+        )
         log.warning(
             f"[GUARD] {pos.base_asset}: {sl_breach_label} (current=${pos.current_price:.4f}, sl=${sl_check:.4f}) → tutup posisi"
         )
@@ -2487,6 +2605,56 @@ def _infer_position_verdict(
     return "GO"
 
 
+def _record_forecast_position_meta(
+    contract_id: int,
+    opp: Opportunity,
+    regime_path: str = "logs/market_regime.json",
+) -> None:
+    """Simpan metadata posisi Engine 2 (SL/TP ATR & max_hold_hours) ke market_regime.json."""
+    try:
+        state = _load_execution_regime(regime_path)
+        meta_map = state.get("forecast_positions")
+        if not isinstance(meta_map, dict):
+            meta_map = {}
+        meta_map[str(contract_id)] = {
+            "asset": opp.base_asset,
+            "setup": opp.forecast_setup,
+            "signal_source": "price_forecast",
+            "planned_sl_pct": opp.planned_sl_pct,
+            "planned_tp_pct": opp.planned_tp_pct,
+            "max_hold_hours": opp.max_hold_hours,
+        }
+        state["forecast_positions"] = meta_map
+        _save_execution_regime(state, regime_path=regime_path)
+    except Exception as exc:
+        log.debug(f"Gagal simpan forecast_positions meta cid={contract_id}: {exc}")
+
+
+def _load_forecast_position_meta(regime_path: str = "logs/market_regime.json") -> dict[str, dict]:
+    try:
+        state = _load_execution_regime(regime_path)
+        raw = state.get("forecast_positions")
+        return dict(raw) if isinstance(raw, dict) else {}
+    except Exception as exc:
+        log.debug(f"Gagal load forecast_positions meta: {exc}")
+        return {}
+
+
+def _clear_forecast_position_meta(
+    contract_id: int,
+    regime_path: str = "logs/market_regime.json",
+) -> None:
+    try:
+        state = _load_execution_regime(regime_path)
+        meta_map = state.get("forecast_positions")
+        if isinstance(meta_map, dict) and str(contract_id) in meta_map:
+            meta_map.pop(str(contract_id), None)
+            state["forecast_positions"] = meta_map
+            _save_execution_regime(state, regime_path=regime_path)
+    except Exception as exc:
+        log.debug(f"Gagal hapus forecast_positions meta cid={contract_id}: {exc}")
+
+
 def _record_open_position_verdict(
     contract_id: int,
     base_asset: str,
@@ -2616,7 +2784,11 @@ def count_go_opportunities(
       sebagai kandidat potensial sebelum riset dijalankan).
     - Jika `researches` None: hitung jumlah peluang yang memenuhi |funding_daily| >= MIN_FUNDING_DAILY.
     """
-    qualifying = [o for o in opps if abs(o.funding_daily) >= MIN_FUNDING_DAILY]
+    qualifying = [
+        o for o in opps
+        if abs(o.funding_daily) >= MIN_FUNDING_DAILY
+        or getattr(o, "signal_source", "funding") == "price_forecast"
+    ]
     if researches is None:
         return len(qualifying)
     go_total = 0
@@ -2656,7 +2828,11 @@ def evaluate_execution_gear(
         (mengangkat batas `max_otf_calls` & `CRYPTO_RESEARCH_TOP_N`).
     Return (gear_label, interval_minutes, reason).
     """
-    qualifying = [o for o in opps if abs(o.funding_daily) >= MIN_FUNDING_DAILY]
+    qualifying = [
+        o for o in opps
+        if abs(o.funding_daily) >= MIN_FUNDING_DAILY
+        or getattr(o, "signal_source", "funding") == "price_forecast"
+    ]
     effective_go = len(qualifying) if go_count is None else max(0, int(go_count))
     gear3_override = (
         full_research_mode
@@ -3463,6 +3639,13 @@ def _run_single_monitor_pass(
     remaining_positions: list[Position] = []
     invalid_entry_assets: list[str] = []
     effective_now = now_utc or datetime.now(timezone.utc)
+    forecast_meta = _load_forecast_position_meta()
+    active_cids_str = {str(p_raw.get("contract_id")) for p_raw in active_positions}
+    for stale_cid in [k for k in list(forecast_meta.keys()) if k not in active_cids_str]:
+        try:
+            _clear_forecast_position_meta(int(stale_cid))
+        except (TypeError, ValueError):
+            pass
 
     for p_raw in active_positions:
         cid = p_raw["contract_id"]
@@ -3482,6 +3665,7 @@ def _run_single_monitor_pass(
         sl_val = ac.get("stop_loss", {}).get("trigger_price_quote")
 
         pos_key = make_position_dedupe_key(p_raw)
+        fc_info = forecast_meta.get(str(cid)) or {}
         pos = Position(
             contract_id=cid,
             base_asset=p_raw["contract_base_asset"],
@@ -3496,6 +3680,10 @@ def _run_single_monitor_pass(
             liquidation_price=float(p_raw["liquidation_price"]),
             position_id=pos_key,
             opened_at=str(p_raw.get("opened_at") or p_raw.get("created_at") or ""),
+            signal_source=str(fc_info.get("signal_source") or "funding"),
+            planned_sl_pct=fc_info.get("planned_sl_pct"),
+            planned_tp_pct=fc_info.get("planned_tp_pct"),
+            max_hold_hours=fc_info.get("max_hold_hours"),
         )
         current_funding_daily = float(contract["funding_rate_hourly"]) * 24
 
@@ -3508,6 +3696,7 @@ def _run_single_monitor_pass(
                 if res.get("action") == "CLOSE":
                     current_snapshot.pop(pos_key, None)
                     current_snapshot.pop(str(cid), None)
+                    _clear_forecast_position_meta(cid)
                     closed_now = True
                 elif res.get("action") == "UPDATE_AUTO_CLOSE":
                     if res.get("tp") is not None:
@@ -4460,6 +4649,46 @@ def market_execute(
     opps = rank_opportunities(contracts_data["contracts"], allowed_assets=target_universe)
 
     category_key: Literal["market", "crypto"] = "crypto" if target_universe == ALLOWED_CRYPTO else "market"
+
+    # Engine 2 (khusus Crypto 24/7): pindai sinyal OOS V5 4h + V4 1h ketika funding < 0.50%/hari
+    if category_key == "crypto" and is_crypto_forecast_engine_enabled():
+        try:
+            import price_forecast
+
+            fc_opps = price_forecast.scan_crypto_price_opportunities(
+                contracts_data["contracts"],
+                allowed_assets=target_universe,
+                exclude_assets={o.base_asset for o in opps},
+                min_vol_24h=MIN_VOL_24H,
+            )
+            for fc in fc_opps:
+                opps.append(Opportunity(
+                    contract_id=int(fc["contract_id"]),
+                    base_asset=str(fc["asset"]),
+                    funding_daily=float(fc.get("funding_daily") or 0.0),
+                    volume_24h=float(fc.get("volume_24h") or MIN_VOL_24H),
+                    max_leverage=int(fc.get("max_leverage") or MAX_LEVERAGE),
+                    side=fc["side"],
+                    min_size_base=float(fc.get("min_size_base") or 0.0),
+                    max_size_base=float(fc.get("max_size_base") or 0.0),
+                    max_size_quote=float(fc.get("max_size_quote") or 0.0),
+                    price_slippage=float(fc.get("price_slippage") or 0.0),
+                    signal_source="price_forecast",
+                    forecast_setup=str(fc.get("setup") or ""),
+                    planned_sl_pct=float(fc["sl_pct"]),
+                    planned_tp_pct=float(fc["tp_pct"]),
+                    max_hold_hours=float(fc["max_hold_hours"]),
+                    expected_net_edge_pct=float(fc["expected_net_edge_pct"]),
+                    forecast_reason=str(fc.get("reason") or ""),
+                ))
+            if fc_opps:
+                log.info(
+                    f"📈 [ENGINE 2 CRYPTO] Menambahkan {len(fc_opps)} kandidat fade OOS: "
+                    + ", ".join(f"{x['asset']}({x['setup']}/{x['side']})" for x in fc_opps)
+                )
+        except Exception as exc:
+            log.warning(f"Engine 2 Crypto scan dilewati: {exc}")
+
     gear_label, gear_interval_min, gear_reason = _update_regime_state(
         category_key, opps, mark_executed=True
     )
@@ -4562,14 +4791,20 @@ def market_execute(
         if not (o.base_asset in ALLOWED_STOCKS and not us_stocks_open)
     ]
     go_count_now = count_go_opportunities(eligible_now, researches=cached_researches)
-    if go_count_now != len([o for o in opps if abs(o.funding_daily) >= MIN_FUNDING_DAILY]) or os.getenv("GEAR_3_FULL_RESEARCH", "false").strip().lower() in ("1", "true", "yes", "on"):
+    if go_count_now != len([
+        o for o in opps
+        if abs(o.funding_daily) >= MIN_FUNDING_DAILY or getattr(o, "signal_source", "funding") == "price_forecast"
+    ]) or os.getenv("GEAR_3_FULL_RESEARCH", "false").strip().lower() in ("1", "true", "yes", "on"):
         gear_label, gear_interval_min, gear_reason = _update_regime_state(
             category_key, eligible_now, mark_executed=True, go_count=go_count_now
         )
         log.info(f"⚙️ [ADAPTIVE GEAR - {category_key.upper()} REFINED] {gear_label} ({gear_interval_min}m): {gear_reason}")
 
     full_research_gear3 = is_gear3_full_research(gear_label)
-    exec_opp_count = len([o for o in eligible_now if abs(o.funding_daily) >= MIN_FUNDING_DAILY])
+    exec_opp_count = len([
+        o for o in eligible_now
+        if abs(o.funding_daily) >= MIN_FUNDING_DAILY or getattr(o, "signal_source", "funding") == "price_forecast"
+    ])
     exec_is_idle = gear_label.startswith("GEAR_0") or exec_opp_count <= 1
     use_glm_routing = _lr.should_use_glm_for_secondary_voters(
         opportunity_count=exec_opp_count, is_idle=exec_is_idle
@@ -4713,20 +4948,35 @@ def market_execute(
             })
             continue
 
-        econ_ok, _exp_fr, _cost, econ_note = check_funding_vs_fee_gate(
-            opp.funding_daily, effective_price_slippage(opp.price_slippage))
-        if not econ_ok:
-            skip_msg = f"gerbang ekonomi funding vs fee gagal ({econ_note})"
-            log.info(f"  SKIP {opp.base_asset}: {skip_msg}")
-            executions.append({
-                "asset": opp.base_asset,
-                "side": opp.side,
-                "leverage": MAX_LEVERAGE,
-                "verdict": "SKIP",
-                "reason": skip_msg,
-            })
-            continue
-        reason = f"{reason} | {econ_note}"
+        if getattr(opp, "signal_source", "funding") == "price_forecast":
+            net_edge_fc = float(getattr(opp, "expected_net_edge_pct", 0.0) or 0.0)
+            if net_edge_fc < 0.0015:
+                skip_msg = f"gerbang ekonomi Engine 2 gagal (net_edge={net_edge_fc*100:+.2f}% < +0.15%)"
+                log.info(f"  SKIP {opp.base_asset}: {skip_msg}")
+                executions.append({
+                    "asset": opp.base_asset,
+                    "side": opp.side,
+                    "leverage": MAX_LEVERAGE,
+                    "verdict": "SKIP",
+                    "reason": skip_msg,
+                })
+                continue
+            reason = f"{reason} | {opp.forecast_setup} net_edge={net_edge_fc*100:+.2f}%"
+        else:
+            econ_ok, _exp_fr, _cost, econ_note = check_funding_vs_fee_gate(
+                opp.funding_daily, effective_price_slippage(opp.price_slippage))
+            if not econ_ok:
+                skip_msg = f"gerbang ekonomi funding vs fee gagal ({econ_note})"
+                log.info(f"  SKIP {opp.base_asset}: {skip_msg}")
+                executions.append({
+                    "asset": opp.base_asset,
+                    "side": opp.side,
+                    "leverage": MAX_LEVERAGE,
+                    "verdict": "SKIP",
+                    "reason": skip_msg,
+                })
+                continue
+            reason = f"{reason} | {econ_note}"
 
         margin = calculate_dynamic_margin(
             available_balance=available,
@@ -4822,6 +5072,8 @@ def market_execute(
                 _record_open_position_verdict(
                     opp.contract_id, opp.base_asset, opp.side, verdict, actual_margin, order_price
                 )
+                if getattr(opp, "signal_source", "funding") == "price_forecast":
+                    _record_forecast_position_meta(opp.contract_id, opp)
                 record_entry_execution(opp.base_asset)
                 deployed += actual_margin
             else:

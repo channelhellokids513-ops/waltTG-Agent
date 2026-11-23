@@ -253,6 +253,16 @@ Di Walt Perps, biaya atau pendapatan inap berasal dari `funding_rate_hourly` yan
 - **Pre-Close Overnight (`20:35–21:00 UTC`, Sen–Kam, Saham AS):** Tetap ditahan jika *carry* searah `>= +0.20%/hari` atau posisi sudah terkunci profit (`SL >= Entry + 0.25%`); jika *carry* lemah `< +0.20%/hari` dan belum terkunci profit, posisi ditutup sebelum penutupan pasar.
 - **Pre-Close Weekend (`20:35–21:00 UTC`, Jum, Saham AS & Komoditas):** Posisi hanya diizinkan menginap melewati libur akhir pekan bila **sudah terkunci profit** ATAU *carry* searah kuat **`>= +0.50%/hari`** dengan floating PnL masih aman (`>= -0.50%`). Selain itu posisi ditutup aman menjelang akhir pekan.
 
+### 6.2 Crypto Engine 2: Mean-Reversion Fade 4H/1H (`CRYPTO_FORECAST_ENGINE=on`)
+
+Selain Engine 1 (*Funding Carry*, ambang `MIN_FUNDING_DAILY = 0.50%/hari`), jalur `crypto_execute` kini mengaktifkan **Engine 2 (*Price Forecast Mean-Reversion Fade*, toggle `CRYPTO_FORECAST_ENGINE=on`)** khusus **10 aset `ALLOWED_CRYPTO`** untuk menangkap peluang pembalikan harga jangka pendek berbasis penolakan struktur magnet (*Market Gravity Rejection* + *Comfort Point*):
+
+- **Hasil Uji Walk-Forward OOS (4 Fold Kronologis, Data Publik Hyperliquid 10 Aset Tier-1):**
+  - **`V4_1H_EXTREME_FADE` (`1h`, Prioritas 1, Hold Maks `24h`):** `24` trade OOS, win `58.3%`, gross `+1.027%`, net (biaya `0.28%`) `+0.747%`, net (biaya `0.45%`) `+0.577%`, PF `1.73` vs `NULL_FLIPPED` `-0.782%`.
+  - **`V5_4H_REJ_COMFORT` (`4h`, Prioritas 2, Hold Maks `72h`):** `340` trade OOS, win `54.7%`, gross `+0.470%`, net (biaya `0.28%`) `+0.190%`, net (biaya `0.45%`) `+0.020%`, PF `1.12` vs `NULL_FLIPPED` `-0.496%` (4/4 fold positif gross).
+  - Setup `MOMENTUM_BREAKOUT` (1h) dan `STOCK` (1h) terbukti negatif OOS sehingga **tidak** diaktifkan.
+- **Filter Carry Masuk & Keluar:** Sinyal Engine 2 hanya lolos jika *adverse funding* `<= 0.30%/hari` (`FORECAST_MAX_ADVERSE_FUNDING_DAILY`). Saat posisi Engine 2 aktif (`logs/market_regime.json`), `risk-monitor` tetap menerapkan **Lapis 4 Trailing/Profit Lock**, namun mengganti batas pengaman dengan **Time-Stop (`24h`/`72h`)**, **ATR Stop Loss adaptif (`<= 4.5%` / `FORECAST_SL_CAP_PCT`)**, dan **penutupan paksa bila *adverse funding* `>= 0.30%/hari`** (`FORECAST_ADVERSE_FUNDING_CLOSE_THRESHOLD`). Engine 1 (*Funding Carry*) beserta Saham AS & Komoditas tetap terisolasi tanpa perubahan.
+
 ---
 
 ## 7. Arsitektur Deployment & Jadwal Otomasi GitHub Actions
@@ -310,7 +320,7 @@ Sistem beroperasi dengan arsitektur hibrida: cron internal GitHub Actions diduku
 | [daily-scan.yml](file:///.github/workflows/daily-scan.yml) | **07:17 & 19:17 WIB** (2x Sehari) | `17 0,12 * * *` | `walt-daily-scan` | Master Scan 31 aset diizinkan (Saham US hanya di jam reguler AS `13:30–21:00 UTC`), pengayaan OAK Research MCP, Swarm AI (`GLM-5.3` CRO), eksekusi GO/HALF, simpan 5 tab Google Sheets (`Daily_Scans` 30 kolom & `Data Training`). |
 | [risk-monitor.yml](file:///.github/workflows/risk-monitor.yml) | **Dinamis 5–10 Menit** (6x–12x/Jam + Smart Idle) | `*/10 * * * *` | `walt-risk-monitor` | Evaluasi risiko adaptif 24/7 (True Zero-Risk Trailing & Asymmetric R:R). Fast-exit <2 detik saat 0 posisi; otomatis mempercepat ke **tiap ~5 menit (12x/jam)** jika $\ge 3$ posisi aktif, kategori `HALF`, atau dekat TP ($\ge +0.70\%$) / SL ($\le -1.00\%$); dan stabil **10 menit** untuk posisi `GO` tenang. |
 | [market-execute.yml](file:///.github/workflows/market-execute.yml) | **4-Tier Gear 0–3** (Dinamis) | `43 */2 * * *` | `walt-market-execute` | Eksekusi Saham US (`13:30–21:00 UTC`) & Komoditas (24/7) dengan **4-Tier Execution Gear**: **Gear 0 (`0` GO)** = maks 2x selama jam bursa AS (`225m`); **Gear 1 (`< 2` GO)** = `120m` (2 jam); **Gear 2 (`2..5` GO)** = `60m` (1 jam); **Gear 3 (`> 5` GO / `GEAR_3_FULL_RESEARCH=true`)** = `60m` + izin riset AI penuh untuk setiap keputusan trading. |
-| [crypto-execute.yml](file:///.github/workflows/crypto-execute.yml) | **4-Tier Gear 0–3** (Dinamis) | `11 */2 * * *` | `walt-crypto-execute` | Eksekusi mandiri Crypto Bluechip (10 Tier-1, 24/7) memakai **4-Tier Execution Gear** (`Gear 0` `720m` / 2x sehari; `Gear 1` `120m`; `Gear 2` `60m`; `Gear 3` `60m` Full AI Research) + *3-hour re-entry cooldown*. |
+| [crypto-execute.yml](file:///.github/workflows/crypto-execute.yml) | **4-Tier Gear 0–3** (Dinamis) | `11 */2 * * *` | `walt-crypto-execute` | Eksekusi mandiri Crypto Bluechip (10 Tier-1, 24/7) memakai **Engine 1 Funding Carry** + **Engine 2 Price Forecast Mean-Reversion Fade** (`CRYPTO_FORECAST_ENGINE=on`: `V4_1H_EXTREME_FADE` & `V5_4H_REJ_COMFORT`) dengan **4-Tier Execution Gear** (`Gear 0` `720m` / 2x sehari; `Gear 1` `120m`; `Gear 2` `60m`; `Gear 3` `60m` Full AI Research) + *3-hour re-entry cooldown*. |
 
 ### 7.2 Otomasi Rotasi Token OAuth (`token_manager.py`)
 - Akses ke Walt API menggunakan protokol OAuth 2.0 PKCE dengan Bearer token yang memiliki masa berlaku terbatas.
@@ -358,7 +368,8 @@ Sistem beroperasi dengan arsitektur hibrida: cron internal GitHub Actions diduku
 
 ## 9. Ringkasan File & Komponen Terkait
 
-- [`walt_bot.py`](file:///walt_bot.py) — Core bot orchestrator (Gear 0–3, US stock hours UTC, 4-layer risk monitor, order size clamping).
+- [`walt_bot.py`](file:///walt_bot.py) — Core bot orchestrator (Gear 0–3, US stock hours UTC, Engine 1 + Engine 2 Crypto Price Forecast, 4-layer risk monitor & Time-Stop, order size clamping).
+- [`price_forecast.py`](file:///price_forecast.py) — Mesin Crypto Engine 2 (*Mean-Reversion Fade* `V4_1H_EXTREME_FADE` 1H & `V5_4H_REJ_COMFORT` 4H berbasis *Market Gravity Rejection* + ATR SL/TP & filter *adverse funding*).
 - [`token_manager.py`](file:///token_manager.py) — Otomasi refresh OAuth token Walt dan sinkronisasi secret GitHub via PyNaCl.
 - [`oak_mcp_client.py`](file:///oak_mcp_client.py) — Klien Streamable HTTP OAK Research MCP (`https://oakresearch.io/api/mcp`) + auto-rotate refresh token ke `.env` & GitHub Secrets.
 - [`setup_oak_oauth.py`](file:///setup_oak_oauth.py) — Skrip interaktif otentikasi awal OAuth 2.1 PKCE OAK Research MCP.
