@@ -45,6 +45,7 @@ from telegram_auth import (
     owner_only_mode,
     require_google_auth_strict,
 )
+import account_lock
 import walt_bot
 
 
@@ -270,6 +271,7 @@ class WaltTelegramBot:
         self._owner_gate_misconfig_logged = False
         # Guard anti-tabrak token + memori perintah terakhir utk tombol "🔁 Coba Lagi"
         self._last_cmd: dict[int, str] = {}
+        self._account_lock_held = False
 
     def _idle_gate(self, tg_id: int, chat_id: int, username: str, cmd: str) -> bool:
         """True = boleh lanjut (bursa/idle); False = perintah dijeda karena run trading aktif."""
@@ -294,7 +296,26 @@ class WaltTelegramBot:
             )
         elif detail == "check_error":
             self.auth.log_audit("RUN_GUARD_UNAVAILABLE", tg_id, username=username, detail=cmd)
+        # ---- proteksi dua-arah: kunci akun bersama (CI/CLI/bot) sebelum menyentuh token ----
+        info = account_lock.peek()
+        if info and not info["free"] and info["holder"] and not info["holder"].startswith("telegram"):
+            self.auth.log_audit("ACCOUNT_LOCK_BLOCKED", tg_id, username=username,
+                                 detail=f"{cmd} | holder={info['holder']}")
+            self.api.send_message(
+                chat_id,
+                f"⏳ *`{cmd}` dijeda* — proses `{info['holder']}` sedang menggenggam akun "
+                f"(sisa ~{info['remaining_sec']:.0f}s).\nKetuk *🔁 Coba Lagi* setelahnya.",
+            )
+            return False
+        ok, why = account_lock.acquire("telegram", ttl_sec=240, wait_sec=8)
+        if not ok:
+            self.auth.log_audit("ACCOUNT_LOCK_BLOCKED", tg_id, username=username,
+                                detail=f"{cmd} | {why}")
+            self.api.send_message(chat_id, f"⏳ Akun sedang dipakai proses lain (`{why}`). Coba lagi sebentar.")
+            return False
+        self._account_lock_held = why in ("acquired",)
         return True
+
 
 
     def _owner_gate(self, update: dict[str, Any]) -> bool:
@@ -414,6 +435,15 @@ class WaltTelegramBot:
         self.handle_text(tg_id, chat_id, username, text)
 
     def handle_text(self, tg_id: int, chat_id: int, username: str, text: str) -> None:
+        """Router perintah — SELALU melepas lock akun di akhir, apa pun jalannya."""
+        try:
+            self._handle_text_inner(tg_id, chat_id, username, text)
+        finally:
+            if self._account_lock_held:
+                account_lock.release("telegram")
+                self._account_lock_held = False
+
+    def _handle_text_inner(self, tg_id: int, chat_id: int, username: str, text: str) -> None:
         text = (text or "").strip()
         # Tombol ReplyKeyboard (label ber-emoji) diterjemahkan dulu menjadi perintah
         if text in _LABEL_TO_CMD:
@@ -819,10 +849,18 @@ class WaltTelegramBot:
             gate = f"✅ **KHUSUS-OWNER** — hanya `{owner}` yang dijawab; yang lain dibisukan" if owner else "✅ **KHUSUS-OWNER** aktif tetapi ⚠️ TELEGRAM_CHAT_ID belum disetel (semua ditolak)"
         else:
             gate = "🟡 Multi-user RBAC (`BOT_OWNER_ONLY=false`)"
+        lk = account_lock.peek()
+        if lk is None:
+            lock_line = "🔓 Lock akun: backend tidak terbaca (fail-open)"
+        elif lk["free"]:
+            lock_line = "🔓 Lock akun: **bebas**"
+        else:
+            lock_line = f"🔒 Lock akun dipegang `{lk['holder']}` (sisa ~{lk['remaining_sec']:.0f}s)"
         self.api.send_message(
             chat_id,
             f"🛡️ *Status Konfigurasi Keamanan*\n"
             f"• Gerbang Akses: {gate}\n"
+            f"• {lock_line}\n"
             f"• Google OAuth 2.0: {g_ok}\n"
             f"• Kebijakan Auth: {strict}\n"
             f"• Total User Terdaftar: `{len(self.auth.list_users())}`\n\n"

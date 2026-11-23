@@ -30,6 +30,7 @@ from typing import Any, Literal, Optional
 import httpx  # pip install httpx
 
 from token_manager import TokenManager
+import account_lock
 from llm_research import (
     QwenClient,
     GeminiClient,
@@ -1310,6 +1311,7 @@ class Opportunity:
     min_margin_2x: float = 0.0   # minimum margin efektif di lev 2x
     signal_source: str = "funding"  # "funding" | "price_forecast"
     forecast_setup: str = ""        # "V5_4H_REJ_COMFORT" | "V4_1H_EXTREME_FADE"
+    grav_bull_pressure: Optional[float] = None  # bullish_pressure % Market Gravity saat sinyal terbentuk
     planned_sl_pct: Optional[float] = None
     planned_tp_pct: Optional[float] = None
     max_hold_hours: Optional[float] = None
@@ -1515,20 +1517,23 @@ def research_stock(
     recommended_side: Optional[str] = None,
     opportunity_count: int = 0,
     is_idle: Optional[bool] = None,
+    grav_pressure: Optional[float] = None,
 ) -> Research:
     """Full research bundle untuk 1 aset (Qwen + Gemini saat Idle, Qwen + GLM saat banyak peluang > 1)."""
     log.info(f"🔍 Researching {ticker}...")
     if qwen or gemini:
         import llm_research
-        return llm_research.research_stock(
-            ticker,
-            qwen=qwen,
-            gemini=gemini,
-            funding_daily=funding_daily,
-            recommended_side=recommended_side,
-            opportunity_count=opportunity_count,
-            is_idle=is_idle,
-        )
+        _rkw: dict[str, Any] = {
+            "qwen": qwen,
+            "gemini": gemini,
+            "funding_daily": funding_daily,
+            "recommended_side": recommended_side,
+            "opportunity_count": opportunity_count,
+            "is_idle": is_idle,
+        }
+        if grav_pressure is not None:
+            _rkw["grav_pressure"] = grav_pressure
+        return llm_research.research_stock(ticker, **_rkw)
     days = check_earnings_date(ticker)
     sentiment, narrative = get_news_sentiment(ticker)
     return Research(
@@ -4287,6 +4292,7 @@ def _convert_forecast_dicts_to_opps(fc_raw: list[dict], log_label: str) -> list[
             max_hold_hours=float(fc["max_hold_hours"]),
             expected_net_edge_pct=float(fc["expected_net_edge_pct"]),
             forecast_reason=str(fc.get("reason") or ""),
+            grav_bull_pressure=fc.get("bull_pressure"),
         ))
     if fc_raw:
         log.info(
@@ -4451,6 +4457,7 @@ def daily_scan(client: WaltClient, now_utc: Optional[datetime] = None) -> dict:
                 "max_hold_hours": getattr(o, "max_hold_hours", 0.0),
                 "expected_net_edge_pct": getattr(o, "expected_net_edge_pct", 0.0),
                 "forecast_reason": getattr(o, "forecast_reason", ""),
+                "grav_bull_pressure": getattr(o, "grav_bull_pressure", None),
             }
             for o in top_candidates
         ],
@@ -4529,6 +4536,7 @@ def format_summary_telegram(
             planned_sl_pct=float(opp.get("planned_sl_pct") or 0.0),
             planned_tp_pct=float(opp.get("planned_tp_pct") or 0.0),
             max_hold_hours=float(opp.get("max_hold_hours") or 0.0),
+            grav_bull_pressure=opp.get("grav_bull_pressure"),
         )
         verdict, reason, mult = decide_go_nogo(pseudo_opp, research)  # type: ignore
 
@@ -4815,6 +4823,7 @@ def scan_with_research(
                             recommended_side=opp.side,
                             opportunity_count=opp_count,
                             is_idle=scan_is_idle,
+                            **({"grav_pressure": _gp_scan} if (_gp_scan := getattr(opp, "grav_bull_pressure", None)) is not None else {}),
                         )
                         record_research_health(asset, researches[asset])
                     except Exception as e:
@@ -5045,6 +5054,7 @@ def scan_with_research(
                 planned_sl_pct=float(opp.get("planned_sl_pct") or 0.0),
                 planned_tp_pct=float(opp.get("planned_tp_pct") or 0.0),
                 max_hold_hours=float(opp.get("max_hold_hours") or 0.0),
+                grav_bull_pressure=opp.get("grav_bull_pressure"),
             )
             v_str, r_str, _ = decide_go_nogo(pseudo, res_obj)
             sample = build_training_sample(
@@ -5315,6 +5325,7 @@ def market_execute(
                         recommended_side=opp.side,
                         opportunity_count=exec_opp_count,
                         is_idle=exec_is_idle,
+                        **({"grav_pressure": _gp_exec} if (_gp_exec := getattr(opp, "grav_bull_pressure", None)) is not None else {}),
                     )
                     record_research_health(opp.base_asset, researches[opp.base_asset])
                 except Exception as e:
@@ -6426,6 +6437,29 @@ def load_local_env(path: str = ".env") -> dict[str, bool]:
     return applied
 
 
+def cli_account_lock_enter(command: str) -> Optional[str]:
+    """Genggam kunci dua-arah akun untuk perintah CLI yang menyentuh token Walt/OAK.
+
+    `stats` hanya membaca ledger lokal -> tanpa lock. Fail-open: kegagalan backend
+    lock TIDAK pernah menghentikan kerja trading (lihat account_lock.acquire).
+    """
+    if command == "stats":
+        return None
+    prefix = "ci" if (os.getenv("GITHUB_ACTIONS") or "").strip().lower() in {"1", "true"} else "cli"
+    holder = f"{prefix}:{command}"
+    ok, why = account_lock.acquire(holder, ttl_sec=1800, wait_sec=300)
+    if not ok:
+        log.warning(f"🔐 [ACCOUNT-LOCK] {why} — lanjut best-effort; proses lain mungkin masih aktif")
+    elif why not in ("acquired", "disabled"):
+        log.info(f"🔐 [ACCOUNT-LOCK] {why} — berjalan tanpa lock")
+    return holder
+
+
+def cli_account_lock_exit(holder: Optional[str]) -> None:
+    if holder:
+        account_lock.release(holder)
+
+
 def main(command: str = "scan"):
     """
     CLI entry point.
@@ -6543,4 +6577,8 @@ if __name__ == "__main__":
     # state yang nyata ada (paritas dengan `state_probe` di workflow) — bukan default "hangat".
     os.environ.setdefault(STATE_WARM_ENV, probe_local_state_warm())
     cmd = sys.argv[1] if len(sys.argv) > 1 else "scan"
-    main(cmd)
+    _lock_holder = cli_account_lock_enter(cmd)
+    try:
+        main(cmd)
+    finally:
+        cli_account_lock_exit(_lock_holder)

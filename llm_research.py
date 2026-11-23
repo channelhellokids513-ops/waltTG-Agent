@@ -686,6 +686,7 @@ def _build_strategy_context_block(
     ticker: str,
     funding_daily: Optional[float] = None,
     recommended_side: Optional[str] = None,
+    grav_pressure: Optional[float] = None,
 ) -> str:
     if funding_daily is None and not recommended_side:
         return (
@@ -699,10 +700,31 @@ def _build_strategy_context_block(
         if side_txt == "SHORT"
         else "Waspadai katalis aksi jual / flash crash yang bisa memicu SL 1.5%."
     )
+    grav_txt = ""
+    if grav_pressure is not None:
+        try:
+            from strategy_config import load_strategy_config
+            _cfg = load_strategy_config()
+            _lt = float(_cfg.get("grav_long_min_bull_pressure", 0.0) or 0.0)
+            _st = float(_cfg.get("grav_short_min_bear_pressure", 0.0) or 0.0)
+        except Exception:
+            _lt = _st = 0.0
+        bias = "BULLISH (magnet atas dominan)" if grav_pressure >= 55.0 else (
+            "BEARISH (magnet bawah dominan)" if grav_pressure <= 45.0 else "SEIMBANG")
+        gate_txt = (
+            f"Gerbang mesin: LONG butuh bull pressure >= {_lt:.0f}%, "
+            f"SHORT butuh bear pressure >= {_st:.0f}%."
+            if (_lt > 0 or _st > 0) else "Gerbang mesin pressure sedang nonaktif."
+        )
+        grav_txt = (
+            f" Data Market Gravity terkini: bullish_pressure={grav_pressure:.1f}% "
+            f"(bearish {100.0 - grav_pressure:.1f}%) — struktur {bias}. {gate_txt} "
+            "Faktor P4 momentummu HARUS memperhitungkan tekanan struktur ini."
+        )
     return (
         f"Konteks Strategi: Bot sedang mempertimbangkan posisi {side_txt} pada {ticker} "
         f"untuk memanen funding rate ({fr_txt}) dengan SL 1.5% & TP 2.0%-2.5% (horizon 24-72 jam). "
-        f"{risk_note}"
+        f"{risk_note}{grav_txt}"
     )
 
 
@@ -1408,6 +1430,7 @@ def research_stock(
     opportunity_count: int = 0,
     is_idle: Optional[bool] = None,
     mode: Optional[str] = None,
+    grav_pressure: Optional[float] = None,
 ) -> Research:
     """
     Eksekusi pipeline riset aset lengkap:
@@ -1416,6 +1439,8 @@ def research_stock(
           2. Skip Yahoo headlines bila OAK sudah menyuplai >= 2 berita; skip Yahoo earnings untuk crypto/ETF
           3. Single Deep Analyst 1-pass (ClassAI `claude-opus-5.5`/`gpt-6.1-sol` -> fallback DashScope fast)
       - Mode `swarm` (RESEARCH_MODE=swarm): 4-Voter Swarm + Meta-Aggregator.
+      - `grav_pressure`: bullish_pressure % Market Gravity terkini -> ikut menjadi bahan konteks
+        voters/analyst untuk memutuskan LONG vs SHORT (gerbang tekanan ada di engine 2).
     """
     now_iso = datetime.now(timezone.utc).isoformat()
     active_mode = (mode or get_research_mode()).strip().lower()
@@ -1426,6 +1451,7 @@ def research_stock(
         ticker,
         funding_daily=funding_daily,
         recommended_side=recommended_side,
+        grav_pressure=grav_pressure,
     )
 
     # OAK-First: tarik konteks makro, kalender, berita, & metrik aset dari OAK MCP lebih dulu

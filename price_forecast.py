@@ -16,6 +16,7 @@ Tiga Pilar Perkiraan 24 Jam:
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import logging
 import math
 import statistics
 import time
@@ -24,6 +25,8 @@ from typing import Any, Literal, Mapping, Optional, Sequence
 
 from market_chart import compute_ema, compute_rsi
 from market_gravity import GravitySnapshot, analyze_market_gravity, comfort_points
+
+log = logging.getLogger("walt_bot")
 
 CRYPTO_SYMBOLS: frozenset[str] = frozenset({
     "BTC", "ETH", "SOL", "BNB", "XRP", "AVAX", "SUI", "LINK", "NEAR", "AAVE",
@@ -55,6 +58,55 @@ FORECAST_MAX_SIGNALS = 5
 STOCK_FORECAST_MAX_ADVERSE_FUNDING_DAILY = 0.0015  # 0.15%/hari batas adverse funding masuk Saham AS
 STOCK_FORECAST_MAX_SIGNALS = 3
 _ATR_CACHE: dict[str, tuple[float, Optional[float]]] = {}
+
+# --- gerbang tekanan Market Gravity (MG) untuk Engine 2 ---------------------------------
+_MG_GATES_CACHE: tuple[float, float, float] = (0.0, 0.0, 0.0)  # (long_thr, short_thr, monotonic)
+
+
+def _mg_pressure_gates() -> tuple[float, float]:
+    """(grav_long_min_bull_pressure, grav_short_min_bear_pressure) dengan cache TTL 60s."""
+    global _MG_GATES_CACHE
+    now = time.monotonic()
+    if now - _MG_GATES_CACHE[2] < 60.0:
+        return _MG_GATES_CACHE[0], _MG_GATES_CACHE[1]
+    try:
+        from strategy_config import load_strategy_config
+        cfg = load_strategy_config()
+        long_thr = float(cfg.get("grav_long_min_bull_pressure", 0.0) or 0.0)
+        short_thr = float(cfg.get("grav_short_min_bear_pressure", 0.0) or 0.0)
+    except Exception:
+        long_thr = short_thr = 0.0
+    _MG_GATES_CACHE = (long_thr, short_thr, now)
+    return long_thr, short_thr
+
+
+def _gravity_bull_pressure(candles: Optional[Sequence[Mapping[str, Any]]]) -> Optional[float]:
+    """bullish_pressure % dari Market Gravity; None bila data tak memadai (gerbang pass-through)."""
+    if not candles or len(candles) < 75:
+        return None
+    try:
+        res = analyze_market_gravity(candles, trace_every=0)
+        if not res.usable:
+            return None
+        return float(res.bullish_pressure)
+    except Exception:
+        return None
+
+
+def _mg_pressure_gate_ok(side: str, bull_pressure: Optional[float]) -> tuple[bool, str]:
+    """Kembalikan (lolos, keterangan). Ambang 0 / pressure tak terbaca -> selalu lolos."""
+    long_thr, short_thr = _mg_pressure_gates()
+    if bull_pressure is None or (side == "long" and long_thr <= 0.0) or (side != "long" and short_thr <= 0.0):
+        return True, ""
+    if side == "long":
+        if bull_pressure < long_thr:
+            return False, f"MG gate LONG: bull_pressure {bull_pressure:.1f}% < {long_thr:.0f}%"
+        return True, ""
+    bear = 100.0 - bull_pressure
+    if bear < short_thr:
+        return False, f"MG gate SHORT: bear_pressure {bear:.1f}% < {short_thr:.0f}%"
+    return True, ""
+
 
 
 def estimate_asset_atr_24h_pct(
@@ -633,6 +685,11 @@ def evaluate_crypto_live_fade_signal(
             elif (d1.z_move_24h <= -2.2 and d1.rsi_14 <= 22.0) or (rej_dn1 and cp1 > d1.close and d1.z_move_24h <= -1.5):
                 side1 = "long"
             if side1 is not None:
+                bull1 = _gravity_bull_pressure(candles_1h)
+                gate_ok1, gate_note1 = _mg_pressure_gate_ok(side1, bull1)
+                if not gate_ok1:
+                    log.info(f"  🧲 {sym}: {gate_note1} — V4_1H_EXTREME_FADE {side1.upper()} diveto struktur")
+            if side1 is not None and gate_ok1:
                 sl_pct = round(_clamp(1.0 * d1.atr_24h_pct, 0.015, FORECAST_SL_CAP_PCT), 4)
                 tp_pct = round(max(0.020, 1.2 * sl_pct), 4)
                 candidate = {
@@ -645,6 +702,7 @@ def evaluate_crypto_live_fade_signal(
                     "expected_gross_pct": 0.0102,
                     "z_move_24h": round(d1.z_move_24h, 3),
                     "rsi_14": round(d1.rsi_14, 2),
+                    "bull_pressure": None if bull1 is None else round(bull1, 1),
                     "reason": (
                         f"V4 1h Fade {side1.upper()} (z={d1.z_move_24h:+.2f}, RSI={d1.rsi_14:.1f}, "
                         f"SL={sl_pct*100:.2f}%, TP={tp_pct*100:.2f}%, hold=24h)"
@@ -662,6 +720,11 @@ def evaluate_crypto_live_fade_signal(
             elif rej_dn4 and cp4 > d4.close and d4.rsi_14 <= 50.0:
                 side4 = "long"
             if side4 is not None:
+                bull4 = _gravity_bull_pressure(candles_4h)
+                gate_ok4, gate_note4 = _mg_pressure_gate_ok(side4, bull4)
+                if not gate_ok4:
+                    log.info(f"  🧲 {sym}: {gate_note4} — V5_4H_REJ_COMFORT {side4.upper()} diveto struktur")
+            if side4 is not None and gate_ok4:
                 sl_pct = round(_clamp(1.0 * d4.atr_24h_pct, 0.015, FORECAST_SL_CAP_PCT), 4)
                 tp_pct = round(max(0.020, 1.0 * sl_pct), 4)
                 candidate = {
@@ -674,6 +737,7 @@ def evaluate_crypto_live_fade_signal(
                     "expected_gross_pct": 0.0050,
                     "z_move_24h": round(d4.z_move_24h, 3),
                     "rsi_14": round(d4.rsi_14, 2),
+                    "bull_pressure": None if bull4 is None else round(bull4, 1),
                     "reason": (
                         f"V5 4h Fade {side4.upper()} (Rejected->Comfort, z={d4.z_move_24h:+.2f}, "
                         f"RSI={d4.rsi_14:.1f}, SL={sl_pct*100:.2f}%, TP={tp_pct*100:.2f}%, hold=72h)"
@@ -879,6 +943,10 @@ def evaluate_stock_live_dip_signal(
     if candles_1h and len(candles_1h) >= 80:
         d1 = compute_price_delta_24h(sym, candles_1h, interval="1h", asset_class="stock")
         if d1 is not None and d1.z_move_24h <= -1.8 and d1.rsi_14 <= 32.0:
+            bull1 = _gravity_bull_pressure(candles_1h)
+            if not _mg_pressure_gate_ok("long", bull1)[0]:
+                log.info(f"  🧲 {sym}: {_mg_pressure_gate_ok('long', bull1)[1]} — S1_1H_LONG_DIP diveto struktur")
+                return None
             sl_pct = round(_clamp(1.0 * d1.atr_24h_pct, 0.015, FORECAST_SL_CAP_PCT), 4)
             tp_pct = round(max(0.020, 1.3 * sl_pct), 4)
             candidate = {
@@ -891,6 +959,7 @@ def evaluate_stock_live_dip_signal(
                 "expected_gross_pct": 0.0068,
                 "z_move_24h": round(d1.z_move_24h, 3),
                 "rsi_14": round(d1.rsi_14, 2),
+                "bull_pressure": None if bull1 is None else round(bull1, 1),
                 "reason": (
                     f"S1 1h Stock Dip LONG (z={d1.z_move_24h:+.2f}, RSI={d1.rsi_14:.1f}, "
                     f"SL={sl_pct*100:.2f}%, TP={tp_pct*100:.2f}%, hold=48h)"
@@ -901,6 +970,10 @@ def evaluate_stock_live_dip_signal(
     if candidate is None and candles_1d and len(candles_1d) >= 80:
         d_day = compute_price_delta_24h(sym, candles_1d, interval="1d", asset_class="stock")
         if d_day is not None and d_day.z_move_24h <= -1.8 and d_day.rsi_14 <= 32.0:
+            bulld = _gravity_bull_pressure(candles_1d)
+            if not _mg_pressure_gate_ok("long", bulld)[0]:
+                log.info(f"  🧲 {sym}: {_mg_pressure_gate_ok('long', bulld)[1]} — S2_1D_LONG_DIP diveto struktur")
+                return None
             sl_pct = round(_clamp(1.0 * d_day.atr_24h_pct, 0.015, FORECAST_SL_CAP_PCT), 4)
             tp_pct = round(max(0.020, 1.3 * sl_pct), 4)
             candidate = {
@@ -913,6 +986,7 @@ def evaluate_stock_live_dip_signal(
                 "expected_gross_pct": 0.0082,
                 "z_move_24h": round(d_day.z_move_24h, 3),
                 "rsi_14": round(d_day.rsi_14, 2),
+                "bull_pressure": None if bulld is None else round(bulld, 1),
                 "reason": (
                     f"S2 1d Stock Dip LONG (z={d_day.z_move_24h:+.2f}, RSI={d_day.rsi_14:.1f}, "
                     f"SL={sl_pct*100:.2f}%, TP={tp_pct*100:.2f}%, hold=120h)"
