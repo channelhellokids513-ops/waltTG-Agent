@@ -107,10 +107,18 @@ class TelegramAPI:
             payload["parse_mode"] = parse_mode
         if reply_markup:
             payload["reply_markup"] = json.dumps(reply_markup)
-        r = self.client.post(f"{self.base}/sendMessage", data=payload, timeout=20.0)
+        r = self.client.post(f"{self.base}/sendMessage", data=payload, timeout=40.0)
+        if r.status_code == 429:
+            retry_after = 10
+            try:
+                retry_after = int((r.json().get("parameters") or {}).get("retry_after") or r.headers.get("Retry-After") or 10)
+            except Exception:
+                retry_after = 10
+            time.sleep(min(35, max(2, retry_after + 1)))
+            r = self.client.post(f"{self.base}/sendMessage", data=payload, timeout=40.0)
         if r.status_code == 400 and parse_mode:
             payload.pop("parse_mode", None)
-            self.client.post(f"{self.base}/sendMessage", data=payload, timeout=20.0)
+            self.client.post(f"{self.base}/sendMessage", data=payload, timeout=40.0)
 
     def send_photo(
         self,
