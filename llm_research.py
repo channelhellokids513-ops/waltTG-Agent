@@ -370,21 +370,32 @@ class GeminiClient:
 # DATA FETCHING UTILITIES
 # =============================================================================
 
+_CRYPTO_NEWS_TICKERS: frozenset[str] = frozenset({
+    "BTC", "ETH", "SOL", "BNB", "XRP", "AVAX", "SUI", "LINK", "NEAR", "AAVE",
+    "ARB", "OP", "DOGE", "ADA", "DOT", "ATOM", "LTC", "UNI", "APT", "SEI", "HYPE",
+})
+
+
 def fetch_headlines(ticker: str, limit: int = 10) -> list[str]:
-    """Ambil headlines berita 7 hari terakhir dari Yahoo Finance."""
-    try:
-        r = httpx.get(
-            "https://query1.finance.yahoo.com/v1/finance/search",
-            params={"q": ticker, "newsCount": limit},
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=15.0,
-        )
-        r.raise_for_status()
-        news = r.json().get("news", [])
-        return [n.get("title", "") for n in news[:limit] if n.get("title")]
-    except Exception as e:
-        log.warning(f"fetch_headlines {ticker}: {e}")
-        return []
+    """Ambil headlines berita 7 hari terakhir dari Yahoo Finance (fallback `<TICKER>-USD` untuk crypto)."""
+    sym = str(ticker or "").strip().upper()
+    queries = [f"{sym}-USD", f"{sym} crypto", sym] if sym in _CRYPTO_NEWS_TICKERS else [ticker]
+    for query in queries:
+        try:
+            r = httpx.get(
+                "https://query1.finance.yahoo.com/v1/finance/search",
+                params={"q": query, "newsCount": limit},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=15.0,
+            )
+            r.raise_for_status()
+            news = r.json().get("news", [])
+            titles = [n.get("title", "") for n in news[:limit] if n.get("title")]
+            if titles:
+                return titles
+        except Exception as e:
+            log.warning(f"fetch_headlines {ticker} (q={query}): {e}")
+    return []
 
 
 # --- Sesi Yahoo bersama (cookie + crumb) -------------------------------------
@@ -1126,6 +1137,7 @@ def research_stock(
     headlines = fetch_headlines(ticker)
 
     # Perkaya konteks riset & berita dari OAK Research MCP Server (fail-safe bila belum dikonfigurasi)
+    oak_block = ""
     try:
         import oak_mcp_client
 
@@ -1146,6 +1158,15 @@ def research_stock(
                 headlines = merged_h[:12]
     except Exception as exc:
         log.warning(f"OAK MCP enrichment dilewati untuk {ticker}: {exc}")
+
+    if not headlines and oak_block:
+        headlines = [
+            f"[OAK Research MCP Real-Time Data untuk {ticker}] "
+            "Analisa berdasarkan blok [DATA REAL-TIME OAK RESEARCH MCP] pada konteks strategi."
+        ]
+        log.info(
+            f"🌳 {ticker}: Yahoo headlines kosong, lanjutkan Swarm AI memakai data real-time OAK Research MCP."
+        )
 
     if not headlines:
         return Research(
