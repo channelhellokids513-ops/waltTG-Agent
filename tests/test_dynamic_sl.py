@@ -43,15 +43,16 @@ def test_compute_dynamic_tpsl_scales_with_atr_and_respects_fixed_killswitch(monk
     assert sl2 == pytest.approx(97.62)
     assert tp2 == pytest.approx(round(100.0 * (1.0 + tp2_pct), 4))
 
-    # 3. ATR ekstrem (6.0%) -> plafon 2.5% untuk aset kalem (SPY), 3.5% untuk volatil (SOL/NVDA)
+    # 3. ATR ekstrem (6.0%) -> plafon 2.0% untuk aset kalem (SPY), 2.5% untuk volatil (SOL/NVDA)
+    #    K3-3 (2025-11-25): plafon diturunkan dari 2.5%/3.5% agar risiko per trade <= 0.75% ekuitas.
     _, sl_calm, _, sl_calm_pct = compute_dynamic_tpsl("long", 100.0, asset="SPY", atr_24h_pct=0.060)
-    assert sl_calm_pct == pytest.approx(0.025)
-    assert sl_calm == pytest.approx(97.5)
+    assert sl_calm_pct == pytest.approx(0.020)
+    assert sl_calm == pytest.approx(98.0)
 
     _, sl_vol, tp_vol_pct, sl_vol_pct = compute_dynamic_tpsl("short", 100.0, asset="NVDA", atr_24h_pct=0.060)
-    assert sl_vol_pct == pytest.approx(0.035)
-    assert tp_vol_pct == pytest.approx(round(1.35 * 0.035, 4))
-    assert sl_vol == pytest.approx(103.5)
+    assert sl_vol_pct == pytest.approx(0.025)
+    assert tp_vol_pct == pytest.approx(round(1.35 * 0.025, 4))
+    assert sl_vol == pytest.approx(102.5)
 
     # 4. Fallback saat ATR tidak tersedia: kalem 1.5%, crypto 2.2%, saham volatil 2.5%
     assert compute_dynamic_tpsl("long", 100.0, asset="XAU", atr_24h_pct=None)[3] == pytest.approx(0.015)
@@ -157,7 +158,8 @@ def test_round_price_and_engine1_dynamic_sl_meta_persistence(monkeypatch):
     c_e1.latest_rate.return_value = {"rate": "150.0"}
     res_e1 = walt_bot.open_position(c_e1, opp_e1, margin=3.0, leverage=2, resolved=(3.0, 150.0))
     assert res_e1 is not None
-    assert res_e1["sl_pct"] == pytest.approx(round(0.85 * 0.033, 4))  # 0.0281
+    # K3-3: ATR 3.3% x 0.85 = 2.81% DIPANGKAS ke plafon volatil 2.5% (bukan 2.81%).
+    assert res_e1["sl_pct"] == pytest.approx(0.025)
     walt_bot._record_forecast_position_meta(opp_e1.contract_id, opp_e1, sl_pct=res_e1["sl_pct"], tp_pct=res_e1["tp_pct"])
     loaded = walt_bot._load_forecast_position_meta()["55"]
     assert loaded["signal_source"] == "funding"

@@ -269,7 +269,7 @@ def test_l4_trailing_tier_beats_off_hours_early_lock():
     res = evaluate_and_apply_position_risk(client, pos, current_funding_daily=-0.0050, now_utc=tue_overnight)
     assert res is not None
     assert res["action"] == "UPDATE_AUTO_CLOSE"
-    assert res["sl"] == pytest.approx(100.35)
+    assert res["sl"] == pytest.approx(100.60)
 
 
 # ---------------------------------------------------------------------------

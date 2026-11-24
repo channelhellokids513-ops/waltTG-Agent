@@ -245,8 +245,11 @@ except Exception as _cfg_exc:
     )
 
 # Tangga Trailing Stop Progresif Baseline (ruang napas lebih lega agar tidak mudah tersapu noise)
+# K3-4 (2025-11-25): tier-1 mengunci +0.60% (BUKAN +0.35%). Biaya round-trip taker 0.18% +
+# slippage terukur 0.26% = 0.44%; mengunci di +0.35% membuat "menang" tetap rugi bersih setelah
+# biaya, dan itu penyebab utama payoff 0.50 (avg win $0.0439 vs avg loss $0.0881, 21-24 Nov).
 TRAILING_TIERS = [
-    (0.0100, "lock_0035"),  # Tier 1: profit >= +1.00% → SL di entry +0.35% (ruang napas 0.65%)
+    (0.0100, "lock_0060"),  # Tier 1: profit >= +1.00% → SL di entry +0.60% (menutup biaya + buffer)
     (0.0180, "lock_0095"),  # Tier 2: profit >= +1.80% → SL di entry +0.95% (ruang napas 0.85%)
     (0.0250, 0.0070),       # Tier 3: profit >= +2.50% → Trailing stop 0.70% di bawah running price
 ]
@@ -254,11 +257,26 @@ _DEFAULT_TRAILING_TIERS = list(TRAILING_TIERS)
 
 DYNAMIC_SL_MODE_ENV = "DYNAMIC_SL_MODE"
 DYNAMIC_SL_ATR_MULT = 0.85
-DYNAMIC_SL_CALM_CAP_PCT = 0.025        # Maks 2.5% untuk aset kalem (SPY, US100, AAPL, XAU)
-DYNAMIC_SL_VOLATILE_CAP_PCT = 0.035    # Maks 3.5% untuk aset volatil & crypto
+# K3-3 (2025-11-25): plafon SL diturunkan agar risiko per trade <= 0.75% ekuitas pada margin floor.
+# Sebelumnya 3.5% (volatil) = 7% margin = 1.3% ekuitas pada ekuitas mikro — satu SL bisa menghapus
+# 4-9 hari pendapatan funding. 2.5%/2.0% sejalan dengan TP 2.5%/3.0% (R:R >= 1.35).
+DYNAMIC_SL_CALM_CAP_PCT = 0.020        # Maks 2.0% untuk aset kalem (SPY, US100, AAPL, XAU)
+DYNAMIC_SL_VOLATILE_CAP_PCT = 0.025    # Maks 2.5% untuk aset volatil & crypto
 DYNAMIC_TP_RR_MULT = 1.35              # TP minimal 1.35x SL dinamis (menjaga R:R asimetris)
 L2_BREAKEVEN_MIN_PROFIT_PCT = 0.0050   # Syarat profit minimal +0.50% sebelum L2 geser SL ke entry
 CALM_SL_ASSETS: frozenset[str] = frozenset({"SPY", "US100", "AAPL", "XAU"})
+
+# K3-1 (2025-11-25): funding flip TIDAK boleh menjadi exit utama sebelum biaya round-trip tertutup.
+# Median umur posisi 21-24 Nov hanya 0.95 jam (7 dari 12 < 1 jam), sementara gerbang E5 membenarkan
+# biaya dengan asumsi hold 24 jam. Pengecualian: rugi harga sudah >= separuh jarak SL (risiko nyata
+# lebih besar daripada sekadar biaya) — maka tutup segera tetap diizinkan.
+MIN_HOLD_BEFORE_FUNDING_FLIP_EXIT_H = 6.0
+FUNDING_FLIP_LOSS_OVERRIDE_FRACTION = 0.5
+
+# K3-2 (2025-11-25): TP/SL dihitung dari harga KEPUTUSAN; bila fill bursa menyimpang lebih dari
+# ambang ini, TP/SL digeser ke harga fill. MON 24 Nov: keputusan 0.0102 -> fill 0.01015, SL desain
+# 3.5% menjadi 4.43% riil (rugi 8.8% margin). 0.15% = 15 bps, di bawah biaya round-trip.
+FILL_REANCHOR_MIN_DRIFT_PCT = 0.0015
 
 
 def round_price(val: float) -> float:
@@ -2017,6 +2035,66 @@ def is_min_size_rejection(exc: BaseException) -> bool:
     return _MIN_SIZE_MARKER in text
 
 
+def _apply_auto_close_with_retry(
+    client: "WaltClient",
+    contract_id: int,
+    tp: float,
+    sl: float,
+    asset: str = "",
+    attempts: int = 3,
+) -> bool:
+    """Pasang/geser TP-SL di bursa dengan retry terbatas. True bila bursa mengonfirmasi.
+
+    Satu jalur untuk dua kebutuhan: (a) preview open tidak membawa `autoClose`, (b) TP/SL harus
+    digeser ke harga fill (K3-2). Sebelumnya logika ini hanya ada di dalam open_position.
+    """
+    label = f" {asset}" if asset else ""
+    for attempt in range(1, attempts + 1):
+        time.sleep(3)
+        try:
+            ac_preview = client.preview_auto_close(contract_id, tp=tp, sl=sl)
+            if ac_preview and ac_preview.get("ok"):
+                ac_res = client.execute(ac_preview["confirmationToken"])
+                if ac_res and not (isinstance(ac_res, dict) and ac_res.get("ok") is False):
+                    log.info(f"   TP/SL{label} diset (attempt {attempt}): TP=${tp}, SL=${sl}")
+                    return True
+            log.warning(f"   Attempt {attempt}/{attempts} set TP/SL{label} belum berhasil: {ac_preview}")
+        except Exception as e:
+            log.warning(f"   Gagal set TP/SL{label} (attempt {attempt}/{attempts}): {e}")
+    return False
+
+
+def _plan_fill_reanchor(
+    opp: "Opportunity",
+    decision_price: float,
+    fill_price: Optional[float],
+    tp_pct: float,
+    sl_pct: float,
+) -> Optional[dict]:
+    """K3-2: rencana TP/SL berbasis harga FILL bila menyimpang dari harga keputusan.
+
+    SL/TP yang dihitung dari harga keputusan menjadi lebih lebar dari desain begitu fill
+    menyimpang (MON 24 Nov: keputusan 0.0102 → fill 0.01015, SL 3.5% menjadi 4.43% riil).
+    Di bawah ambang `FILL_REANCHOR_MIN_DRIFT_PCT` tidak ada tindakan — menghindari update
+    TP/SL yang tidak perlu dan tetap berada di bawah biaya round-trip.
+    """
+    if fill_price is None or not decision_price or decision_price <= 0:
+        return None
+    try:
+        drift = abs(float(fill_price) - float(decision_price)) / float(decision_price)
+    except (TypeError, ValueError):
+        return None
+    if drift < FILL_REANCHOR_MIN_DRIFT_PCT:
+        return None
+    if opp.side == "long":
+        tp = round_price(float(fill_price) * (1.0 + tp_pct))
+        sl = round_price(float(fill_price) * (1.0 - sl_pct))
+    else:
+        tp = round_price(float(fill_price) * (1.0 - tp_pct))
+        sl = round_price(float(fill_price) * (1.0 + sl_pct))
+    return {"tp": tp, "sl": sl, "drift": drift, "fill": float(fill_price)}
+
+
 def open_position(
     client: WaltClient,
     opp: Opportunity,
@@ -2128,51 +2206,65 @@ def open_position(
     order_id = result.get("order", {}).get("order_id") if isinstance(result, dict) else None
     # Pengukuran slippage entry: respons execute tidak selalu memuat harga fill, jadi
     # helper ini membaca ulang posisi terbuka bila perlu (3 detik). Kegagalannya tidak
-    # pernah boleh menghentikan jalur entry.
+    # pernah boleh menghentikan jalur entry. Nilai `fill` dipakai K3-2 di bawah.
+    fill_price: Optional[float] = None
     try:
-        client.record_open_slippage(opp.contract_id, result)
+        slip = client.record_open_slippage(opp.contract_id, result)
+        if isinstance(slip, dict):
+            fill_price = _parse_positive_finite_price(slip.get("fill"))
     except Exception as exc:
         log.debug(f"open_position: pengukuran slippage dilewati ({type(exc).__name__})")
+
+    # K3-2: TP/SL mengikuti harga FILL, bukan harga keputusan.
+    reanchor = _plan_fill_reanchor(opp, price, fill_price, tp_pct, sl_pct)
+    tp_final, sl_final = (reanchor["tp"], reanchor["sl"]) if reanchor else (tp, sl)
+
     log.info(
         f"✅ {opp.side.upper()} {opp.base_asset} opened: margin ${applied_margin} @ ${price:.4f}, "
-        f"TP ${tp}, SL ${sl}, order_id={order_id}"
+        f"TP ${tp_final}, SL ${sl_final}, order_id={order_id}"
+        + (
+            f", fill ${reanchor['fill']:.6f} (drift {reanchor['drift']*100:+.2f}% → TP/SL digeser)"
+            if reanchor
+            else ""
+        )
     )
 
-    # Jika preview berhasil tanpa TP/SL, set terpisah dengan retry maksimal 3x.
+    # TP/SL dipasang bila preview tidak membawanya ATAU wajib digeser ke harga fill (K3-2).
     # Cek sisa waktu setelah order terisi hanya untuk warning; order sudah terisi sehingga
     # autoClose WAJIB tetap dicoba sampai selesai (tidak boleh berhenti di tengah).
-    if "autoClose" not in preview.get("action", {}).get("request", {}):
-        if not has_enough_job_time(AUTO_CLOSE_RETRY_BUDGET_MIN):
+    need_autoclose_set = "autoClose" not in preview.get("action", {}).get("request", {})
+    if need_autoclose_set or reanchor is not None:
+        if need_autoclose_set and not has_enough_job_time(AUTO_CLOSE_RETRY_BUDGET_MIN):
             rem_min = get_job_remaining_minutes()
             log.warning(
                 f"{opp.base_asset}: sisa waktu job tinggal {rem_min:.1f}m (< {AUTO_CLOSE_RETRY_BUDGET_MIN:.1f}m), "
                 f"tetapi order sudah terisi — tetap lanjutkan pemasangan TP/SL autoClose hingga tuntas"
             )
-        ac_ok = False
-        for attempt in range(1, 4):
-            time.sleep(3)
-            try:
-                ac_preview = client.preview_auto_close(opp.contract_id, tp=tp, sl=sl)
-                if ac_preview and ac_preview.get("ok"):
-                    ac_res = client.execute(ac_preview["confirmationToken"])
-                    if ac_res and not (isinstance(ac_res, dict) and ac_res.get("ok") is False):
-                        log.info(f"   TP/SL set terpisah (attempt {attempt}): TP=${tp}, SL=${sl}")
-                        ac_ok = True
-                        break
-                log.warning(f"   Attempt {attempt}/3 set TP/SL terpisah belum berhasil: {ac_preview}")
-            except Exception as e:
-                log.warning(f"   Gagal set TP/SL terpisah (attempt {attempt}/3): {e}")
+        ac_ok = _apply_auto_close_with_retry(
+            client, opp.contract_id, tp_final, sl_final, opp.base_asset
+        )
         if not ac_ok:
-            log.error(f"⚠️ POSISI TANPA SL: {opp.base_asset}")
-            send_telegram(f"⚠️ POSISI TANPA SL: {opp.base_asset}")
+            if need_autoclose_set:
+                log.error(f"⚠️ POSISI TANPA SL: {opp.base_asset}")
+                send_telegram(f"⚠️ POSISI TANPA SL: {opp.base_asset}")
+            else:
+                log.warning(
+                    f"⚠️ {opp.base_asset}: TP/SL gagal digeser ke harga fill; SL lama ${sl} tetap aktif"
+                )
+        elif reanchor:
+            log.info(
+                f"   TP/SL digeser ke fill ${reanchor['fill']:.6f} "
+                f"(drift {reanchor['drift']*100:+.2f}% dari harga keputusan ${price:.6f})"
+            )
 
     if isinstance(result, dict):
         result["actual_margin"] = applied_margin
-        result["tp"] = tp
-        result["sl"] = sl
+        result["tp"] = tp_final
+        result["sl"] = sl_final
         result["sl_pct"] = sl_pct
         result["tp_pct"] = tp_pct
         result["price"] = price
+        result["fill_price"] = fill_price
     return result
 
 
@@ -2183,7 +2275,8 @@ def open_position(
 # Registrasi handler untuk tier lock string di TRAILING_TIERS: {action_name: (lock_pct, label)}
 # Satu-satunya tempat untuk mendaftarkan parameter lock tier string baru.
 _TRAILING_HANDLERS: dict[str, tuple[float, str]] = {
-    "lock_0035": (0.0035, "L4 True Zero-Risk"),
+    "lock_0060": (0.0060, "L4 True Zero-Risk"),   # K3-4: di atas biaya round-trip 0.44%
+    "lock_0035": (0.0035, "L4 True Zero-Risk"),   # warisan: tetap dikenali bila config lama dipakai
     "lock_0095": (0.0095, "L4 Lock Cuan"),
 }
 
@@ -2212,7 +2305,7 @@ def _resolve_trailing_sl(pos: Position, profit: float) -> Optional[tuple[float, 
     ):
         sl_ref = min(0.045, float(pos.planned_sl_pct))
         t1 = max(0.0100, round(0.55 * sl_ref, 4))
-        lock1 = max(0.0035, round(0.20 * sl_ref, 4))
+        lock1 = max(0.0060, round(0.20 * sl_ref, 4))  # K3-4: lock tier-1 >= biaya round-trip
         t2 = max(0.0180, round(0.90 * sl_ref, 4))
         lock2 = max(0.0095, round(0.50 * sl_ref, 4))
         t3 = max(0.0250, round(1.20 * sl_ref, 4))
@@ -2247,7 +2340,6 @@ def _resolve_trailing_sl(pos: Position, profit: float) -> Optional[tuple[float, 
     handler_spec = _TRAILING_HANDLERS.get(action) if isinstance(action, str) else None
     if handler_spec is not None:
         lock_pct, label = handler_spec
-        _is_zero_risk_tier = True if action == "lock_0035" else False
         sl_price = (
             pos.entry_price * (1.0 + lock_pct)
             if pos.side == "long"
@@ -2627,6 +2719,45 @@ def _parse_position_age_hours(opened_at: str, now_utc: datetime) -> Optional[flo
         return None
 
 
+def _funding_flip_exit_allowed(
+    pos: Position, now_utc: Optional[datetime] = None
+) -> tuple[bool, str]:
+    """K3-1: bolehkan exit `Funding Flip Sign` (Engine 1) untuk aset ini SEKARANG?
+
+    Alasan fisik: funding adalah aliran harian (0.1-1.0%/hari), sedangkan biaya round-trip taker +
+    slippage 0.44% dibayar SEKALI di depan. Menutup posisi pada menit ke-6 karena arah funding
+    berbalik berarti membayar biaya penuh tanpa pernah menerima satu pembayaran funding — persis
+    pola 21-24 Nov (median hold 0.95 jam, funding terealisasi $0.0169 dari 20 trade).
+
+    Aturan:
+    - Rugi harga sudah >= `FUNDING_FLIP_LOSS_OVERRIDE_FRACTION` dari jarak SL → IZINKAN (risiko
+      harga sudah lebih besar daripada sekadar biaya; menahan hanya menambah kerugian).
+    - Umur posisi tidak diketahui (`opened_at` kosong/rusak) → IZINKAN (perilaku lama; menutup
+      tetap lebih aman daripada menahan posisi tanpa dasar).
+    - Umur < `MIN_HOLD_BEFORE_FUNDING_FLIP_EXIT_H` dan rugi masih ringan → TAHAN.
+    """
+    try:
+        planned_sl = float(pos.planned_sl_pct) if pos.planned_sl_pct else float(DEFAULT_SL_PCT)
+    except (TypeError, ValueError):
+        planned_sl = float(DEFAULT_SL_PCT)
+    if planned_sl <= 0:
+        planned_sl = float(DEFAULT_SL_PCT)
+    loss_frac = max(0.0, -float(pos.profit_pct_price)) / planned_sl
+    if loss_frac >= FUNDING_FLIP_LOSS_OVERRIDE_FRACTION:
+        return True, f"rugi harga {loss_frac*100:.0f}% jarak SL"
+
+    age_h = _parse_position_age_hours(pos.opened_at, now_utc or datetime.now(timezone.utc))
+    if age_h is None:
+        return True, "umur posisi tidak diketahui"
+    if age_h >= MIN_HOLD_BEFORE_FUNDING_FLIP_EXIT_H:
+        return True, f"umur {age_h:.1f} jam"
+    return (
+        False,
+        f"umur {age_h:.1f} jam < {MIN_HOLD_BEFORE_FUNDING_FLIP_EXIT_H:.0f} jam dan rugi masih "
+        f"{loss_frac*100:.0f}% jarak SL (biaya round-trip 0.44% belum tertutup)",
+    )
+
+
 def evaluate_and_apply_position_risk(
     client: WaltClient,
     pos: Position,
@@ -2679,13 +2810,25 @@ def evaluate_and_apply_position_risk(
             if is_forecast_pos
             else "Funding Flip Sign"
         )
-        log.warning(
-            f"[L2] {pos.base_asset}: funding flip sign ({current_funding_daily*100:+.3f}%/hari >= "
-            f"{flip_threshold*100:.2f}%) -> tutup posisi riil"
-        )
-        preview = client.preview_close(pos.contract_id)
-        return _execute_validated_close(
-            client, pos, preview, reason=close_lbl, detail=f"{close_lbl} -> Close Posisi"
+        # K3-1: untuk Engine 1 (funding carry), flip sign TIDAK otomatis menutup posisi pada
+        # menit-menit awal — biaya round-trip 0.44% harus punya waktu tertutup oleh funding.
+        # Engine 2 (directional price_forecast) tetap keluar segera: thesis-nya bukan carry.
+        allow_exit, hold_note = True, ""
+        if not is_forecast_pos:
+            allow_exit, hold_note = _funding_flip_exit_allowed(pos, now_utc)
+        if allow_exit:
+            log.warning(
+                f"[L2] {pos.base_asset}: funding flip sign ({current_funding_daily*100:+.3f}%/hari >= "
+                f"{flip_threshold*100:.2f}%) -> tutup posisi riil"
+                + (f" [{hold_note}]" if hold_note else "")
+            )
+            preview = client.preview_close(pos.contract_id)
+            return _execute_validated_close(
+                client, pos, preview, reason=close_lbl, detail=f"{close_lbl} -> Close Posisi"
+            )
+        log.info(
+            f"[K3-1] {pos.base_asset}: funding flip {current_funding_daily*100:+.3f}%/hari DITAHAN — "
+            f"{hold_note}; SL/TP tetap dievaluasi"
         )
 
     # --- 1a. Engine 2 Time-Stop (khusus posisi directional price_forecast) ---
@@ -2893,10 +3036,13 @@ def apply_layer2_funding(
         or (pos.side == "short" and current_funding_daily < 0)
     )
     if funding_flipped and abs(current_funding_daily) >= FUNDING_FLIP_CLOSE_THRESHOLD:
-        preview = client.preview_close(pos.contract_id)
-        if preview and preview.get("ok"):
-            return client.execute(preview["confirmationToken"])
-        return None
+        # K3-1: gate yang sama seperti jalur utama — jangan bayar biaya round-trip tanpa funding.
+        allow_exit, _hold_note = _funding_flip_exit_allowed(pos)
+        if allow_exit:
+            preview = client.preview_close(pos.contract_id)
+            if preview and preview.get("ok"):
+                return client.execute(preview["confirmationToken"])
+            return None
     if abs(current_funding_daily) < FUNDING_FLIP_CLOSE_THRESHOLD and pos.profit_pct_price >= L2_BREAKEVEN_MIN_PROFIT_PCT:
         new_sl = round_price(pos.entry_price)
         if _sl_is_improvement(pos, new_sl):

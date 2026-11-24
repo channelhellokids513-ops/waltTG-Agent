@@ -291,10 +291,11 @@ def test_p1_2_sheet_webhook_retries_then_succeeds_and_fallback_csv(monkeypatch, 
     [
         ("long", 0.0099, None),
         ("short", 0.0099, None),
-        ("long", 0.0100, 100.35),
-        ("short", 0.0100, 99.65),
-        ("long", 0.0179, 100.35),
-        ("short", 0.0179, 99.65),
+        # K3-4: lock tier-1 = +0.60% (bukan +0.35%) sejak 2025-11-25
+        ("long", 0.0100, 100.60),
+        ("short", 0.0100, 99.40),
+        ("long", 0.0179, 100.60),
+        ("short", 0.0179, 99.40),
         ("long", 0.0180, 100.95),
         ("short", 0.0180, 99.05),
         ("long", 0.0250, round(102.5 * 0.9930, 4)),
@@ -348,18 +349,32 @@ def test_p2_2_3_4_dynamic_sl_label_and_config_constants(monkeypatch):
 
 
 def test_p12c_guard_no_dead_trailing_tier_branches_in_walt_bot():
+    """Guard tier mati — versi K3-4 (2025-11-25).
+
+    Dispatch tier string KINI lewat registry `_TRAILING_HANDLERS` (satu tempat pendaftaran),
+    bukan cabang `if action == "..."` literal. Guard diperkuat, bukan dilonggarkan:
+      1. setiap tier string yang AKTIF di TRAILING_TIERS wajib punya handler di registry;
+      2. cabang literal `action == "..."` yang masih tersisa tidak boleh menunjuk tier non-aktif;
+      3. nama tier mati tidak boleh muncul sama sekali.
+    Alasan perubahan: cabang literal lama (`action == "lock_0035"`) adalah kode mati yang justru
+    membuat guard ini lulus secara semu.
+    """
     import re
     from pathlib import Path
 
     src = (Path(__file__).resolve().parent.parent / "walt_bot.py").read_text(encoding="utf-8")
     active_str_tiers = {action for _, action in walt_bot.TRAILING_TIERS if isinstance(action, str)}
 
+    # 1. Setiap tier string aktif wajib punya handler (registry = jalur dispatch sebenarnya).
+    missing_handlers = sorted(t for t in active_str_tiers if t not in walt_bot._TRAILING_HANDLERS)
+    assert missing_handlers == [], f"Tier aktif tanpa handler: {missing_handlers}"
+
+    # 2. Tidak boleh ada cabang literal yang menunjuk tier non-aktif.
     branch_matches = re.findall(r'(?:el)?if\s+action\s*==\s*["\']([^"\']+)["\']', src)
-    assert branch_matches, "Harus ada minimal 1 cabang aktif action == tier di walt_bot.py"
     stale_tiers = [t for t in branch_matches if t not in active_str_tiers]
     assert stale_tiers == [], f"Ditemukan cabang tier mati di walt_bot.py: {stale_tiers}"
 
-    # Pastikan nama tier lama tidak muncul lagi sebagai cabang kondisi
+    # 3. Pastikan nama tier lama tidak muncul lagi sebagai cabang kondisi
     for dead_name in ("lock_0010", "lock_0022", "lock_0030", "lock_0020", "lock_0025", "lock_0050", "lock_008", "lock_0100", "lock_015"):
         assert f'"{dead_name}"' not in src and f"'{dead_name}'" not in src, f"Tier mati masih ada: {dead_name}"
 

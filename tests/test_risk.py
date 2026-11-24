@@ -228,19 +228,20 @@ def test_funding_flip_hysteresis_closes_only_at_or_above_threshold(monkeypatch):
 # -----------------------------------------------------------------------------
 
 def test_true_zero_risk_trailing_tiers():
+    # K3-4 (2025-11-25): lock tier-1 = +0.60% (di atas biaya round-trip 0.44%), bukan +0.35%.
     assert TRAILING_TIERS == [
-        (0.0100, "lock_0035"),
+        (0.0100, "lock_0060"),
         (0.0180, "lock_0095"),
         (0.0250, 0.0070),
     ]
 
-    # Tier 1: profit +1.10% (>= 1.00%) pada LONG -> SL di entry +0.35% (100.35)
+    # Tier 1: profit +1.10% (>= 1.00%) pada LONG -> SL di entry +0.60% (100.60)
     client1 = _make_mock_client()
     pos_t1_long = _make_pos(side="long", entry=100.0, current=101.10, tp=103.0, sl=98.5)
     res1 = evaluate_and_apply_position_risk(client1, pos_t1_long, current_funding_daily=-0.006)
     assert res1 is not None
     assert res1["action"] == "UPDATE_AUTO_CLOSE"
-    assert res1["sl"] == pytest.approx(100.35)
+    assert res1["sl"] == pytest.approx(100.60)
 
     # Tier 2: profit +1.90% (>= 1.80%) pada LONG -> SL di entry +0.95% (100.95)
     client2 = _make_mock_client()
@@ -283,7 +284,7 @@ def test_true_zero_risk_trailing_tiers():
     # apply_layer4_trailing wrapper
     client4 = _make_mock_client()
     apply_layer4_trailing(client4, pos_t1_long)
-    client4.preview_auto_close.assert_called_once_with(pos_t1_long.contract_id, sl=100.35)
+    client4.preview_auto_close.assert_called_once_with(pos_t1_long.contract_id, sl=100.60)
 
 
 # -----------------------------------------------------------------------------
