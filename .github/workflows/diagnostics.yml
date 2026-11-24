@@ -56,8 +56,13 @@ on:
           - '1'
 
 concurrency:
-  group: walt-diagnostics
-  cancel-in-progress: true
+  # R8/K5: diagnostics MEMAKAI kredensial Walt (WALT_REFRESH_TOKEN single-use, WALT_TOKEN_SYNC=on),
+  # jadi tidak boleh berjalan bersamaan dengan workflow trading. Semua workflow trading memakai group
+  # `walt-trading-account`; diagnostics ikut group itu supaya rotasi token tidak pernah balapan
+  # (invalid_grant bisa mematikan kredensial untuk SEMUA run berikutnya).
+  # Trade-off: diagnostics menunggu di antrean (maks ±8 menit) — jauh lebih murah daripada kehilangan token.
+  group: walt-trading-account
+  cancel-in-progress: false
 
 permissions:
   contents: read
