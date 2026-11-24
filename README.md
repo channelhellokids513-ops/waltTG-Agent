@@ -12,7 +12,7 @@ Autonomous delta-neutral & directional funding rate arbitrage trading system unt
 ## 🎯 Tujuan Repository
 
 1. **Passive Yield Harvest:** Menangkap funding rate ekstrem pada bursa perpetual futures Walt sebagai sumber pendapatan pasif terukur (Target: **$100.00 USDC / bulan**) dengan leverage konservatif (1x–2x).
-2. **Zero Directional Disaster:** Melindungi modal dengan model **True Funding Carry & Asymmetric R:R** (TP `+2.0%/+2.5%`, SL seragam `1.5%`, **True Zero-Risk Trailing Tiers** `+0.80% → +0.35%`, `+1.40% → +0.85%`, `+2.00% → Trailing 0.60%`, serta **3-Hour Re-Entry Cooldown**) sehingga profit terlindungi bersih setelah biaya *taker* (`0.18%` *round-trip* + *spread*).
+2. **Zero Directional Disaster:** Melindungi modal dengan model **True Funding Carry & Asymmetric R:R** (TP `+2.0%/+2.5%`, SL seragam `1.5%` dengan plafon ATR `2.0%/2.5%`, **True Zero-Risk Trailing Tiers** `+1.00% → +0.60%`, `+1.80% → +0.95%`, `+2.50% → Trailing 0.70%`, serta **6-Hour Re-Entry Cooldown**) sehingga profit terlindungi bersih setelah biaya *taker* (`0.18%` *round-trip* + *spread*).
 3. **100% Zero-Cost & Autonomous:** Beroperasi penuh 24/7 di atas Free Tier cloud (GitHub Actions, Google Cloud Scheduler, Google Sheets, Telegram Bot API) tanpa memerlukan PC/server lokal aktif.
 4. **Independent Asset Modules:** Memisahkan workflow eksekusi saham US/komoditas dengan crypto bluechip agar keduanya dapat diaktifkan/dinonaktifkan secara independen sesuai kondisi pasar.
 
@@ -75,16 +75,16 @@ Menghindari *fee bleed* (`0.18%` round-trip taker fee + spread) dengan *Risk-to-
 - **Windfall Rule:** Jika $2.5\times$ funding harian berada di rentang $1.5\% \le \text{windfall} < \text{TP baseline}$, TP dimajukan ke level tersebut di server bursa.
 
 ### 3. True Zero-Risk Trailing Stop & 3-Hour Re-Entry Cooldown
-- **Tier 1 (Profit $\ge +0.80\%$):** Lock SL otomatis ke `Entry + 0.35%` (`lock_0035` — surplus bersih setelah menutup round-trip taker fee `0.18%` + spread).
-- **Tier 2 (Profit $\ge +1.40\%$):** Lock SL otomatis ke `Entry + 0.85%` (`lock_0085`).
-- **Tier 3 (Profit $\ge +2.00\%$):** Trailing stop dinamis `0.60%` di bawah puncak harga berjalan (tanpa *Pinch TP* atau *Instant Market-TP* agar profit tidak terpotong terlalu dini).
+- **Tier 1 (Profit $\ge +1.00\%$):** Lock SL otomatis ke `Entry + 0.60%` (`lock_0060` — di atas round-trip taker fee `0.18%` + slippage terukur `0.26%`, sehingga "menang" benar-benar surplus).
+- **Tier 2 (Profit $\ge +1.80\%$):** Lock SL otomatis ke `Entry + 0.95%` (`lock_0095`).
+- **Tier 3 (Profit $\ge +2.50\%$):** Trailing stop dinamis `0.70%` di bawah puncak harga berjalan (tanpa *Pinch TP* atau *Instant Market-TP* agar profit tidak terpotong terlalu dini).
 - **3-Hour Re-Entry Cooldown:** Setiap aset yang posisinya baru ditutup otomatis masuk jeda 3 jam (tercatat di `logs/market_regime.json`) agar bot tidak melakukan *churning* membuka ulang aset yang sama berkali-kali.
 - **Lapis 3 (Volatility Cut):** *Deprecated* (digantikan sepenuhnya oleh SL baseline 1.5%).
 - **Funding Flip Hysteresis (`0.1%/hari`):** Posisi hanya ditutup karena funding berbalik arah jika `abs(funding_daily) >= 0.1%/hari`. Jika berbalik arah tetapi `< 0.1%/hari`, SL digeser ke *breakeven* (`Entry`).
 - **Kebijakan Menahan Posisi Saat Pasar Tutup (`OFF_HOURS_HOLD_POLICY=hybrid`, Opsi B):**
   - *Cakupan:* **Saham AS** (*overnight* Sen–Kam `21:00–13:30 UTC` & *weekend* Jum `21:00`–Sen `13:30 UTC`) dan **Komoditas** (`XAU`, `XAG`, `BRENTOIL` khusus *weekend* Jum `21:00`–Min `22:00 UTC`); **Crypto** tetap 24/7.
   - *Nol Biaya Inap:* Jika *funding rate* berbalik arah menjadi beban biaya inap (`< 0%`, berapa pun nilainya) saat pre-close/pasar tutup, posisi langsung ditutup tanpa menunggu ambang `0.10%/hari`.
-  - *Pre-Close Overnight (`20:35–21:00 UTC` Sen–Kam, Saham AS):* Tetap ditahan bila *carry* searah `>= +0.20%/hari` atau sudah profit-locked (menghindari *fee bleed* tutup-buka `0.28%–0.45%`); bila profit `>= +0.40%` (di bawah Tier 1 `+0.80%`), SL otomatis dikunci lebih dini ke `Entry +/- 0.25%`.
+  - *Pre-Close Overnight (`20:35–21:00 UTC` Sen–Kam, Saham AS):* Tetap ditahan bila *carry* searah `>= +0.20%/hari` atau sudah profit-locked (menghindari *fee bleed* tutup-buka `0.28%–0.45%`); bila profit `>= +0.40%` (di bawah Tier 1 `+1.00%`), SL otomatis dikunci lebih dini ke `Entry +/- 0.25%`.
   - *Pre-Close Weekend (`20:35–21:00 UTC` Jum, Saham AS & Komoditas):* Hanya menginap melewati libur akhir pekan bila sudah profit-locked (`SL >= Entry + 0.25%`) atau *carry* kuat `>= +0.50%/hari` dengan floating PnL `>= -0.50%`.
 - **Guard Sisi Salah & Migrasi Posisi Lama:** Memvalidasi SL/TP terhadap harga berjalan sebelum mengirim `auto_close` dan otomatis menutup posisi lama yang sudah melewati batas SL 1.5% (`SL 1.5% breached (migrasi)`).
 - **Audit Penutupan & Statistik (`Closed_Positions` & `PnL_Tracker`):** Seluruh penutupan posisi (baik oleh monitor maupun TP/SL bursa) tercatat ke sheet `Closed_Positions` (`logs/closed_history.csv`), progres harian ke `PnL_Tracker`, dan dapat dianalisis via `python walt_bot.py stats`.
@@ -366,7 +366,7 @@ status sistem bisa dibaca tanpa menebak. Di GitHub: **Settings → Secrets and v
 | `CRYPTO_FORECAST_ENGINE` | `on` | Aktifkan Engine 2 Crypto Mean-Reversion Fade teruji OOS (`V5 4h Rejected->Comfort` + `V4 1h Extreme Fade`, ATR SL `<= 4.5%`, Time-Stop `24h/72h`) di `crypto_execute` & `daily_scan`. |
 | `CRYPTO_FORECAST_UNIVERSE` | `all` | Cakupan aset Crypto Engine 2: `all` (seluruh kontrak crypto likuid >= $1M, top 50, maks 5 sinyal/siklus) atau `tier1` (khusus 10 `ALLOWED_CRYPTO`). |
 | `STOCK_FORECAST_ENGINE` | `on` | Aktifkan Engine 2 Saham AS **LONG-ONLY Dip-Buy** (`S1 1h z <= -1.8 & RSI <= 32`, hold 48h; `S2 1d`, hold 120h) di `market_execute` & `daily_scan` saat jam bursa AS buka (wajib riset AI segar & E3). |
-| `DYNAMIC_SL_MODE` | `atr` | Mode SL/TP dinamis berbasis ATR 24 jam (`0.85 * atr_24h_pct`, kalem `1.5%–2.5%`, volatil/crypto `1.5%–3.5%`, TP `>= 1.35x SL`, trailing proporsional). Set `fixed` untuk kembali ke SL `1.5%` seragam. |
+| `DYNAMIC_SL_MODE` | `atr` | Mode SL/TP dinamis berbasis ATR 24 jam (`0.85 * atr_24h_pct`, kalem `1.5%–2.0%`, volatil/crypto `1.5%–2.5%`, TP `>= 1.35x SL`, trailing proporsional). Set `fixed` untuk kembali ke SL `1.5%` seragam. |
 | `GEAR_3_FULL_RESEARCH` | `false` | Jika `true` (atau peluang `GO > 5`), mengaktifkan **Gear 3** agar setiap kandidat trading mendapat riset AI penuh tanpa cap. |
 | `TRAINING_DATA_LOGGING` | `on` | Otomatis menyimpan dataset SFT `<think>...</think>` ke Google Sheet tab `Data Training` dan `logs/training_dataset.jsonl`. |
 | `WALT_TOKEN_SYNC` | `on` | `off` **menolak refresh** (bukan "refresh lalu buang hasilnya") — wajib `on` untuk workflow yang butuh OAuth. |
