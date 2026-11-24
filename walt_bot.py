@@ -2768,6 +2768,8 @@ def evaluate_and_apply_position_risk(
     Evaluasi 4 Lapis Risiko Terpadu + Kebijakan Off-Hours + Engine 2 Time-Stop & Eksekusi Atomik Tunggal:
     1. Lapis 2 (Funding Flip Sign): Tutup posisi bila funding flip melampaui ambang
        (0.10%/hari untuk Engine 1 carry, atau 0.30%/hari untuk Engine 2 price_forecast).
+       K3-1: untuk Engine 1, penutupan ditahan sampai umur posisi >= 6 jam ATAU rugi harga
+       >= 50% jarak SL (biaya round-trip 0.44% harus punya waktu tertutup oleh funding).
     1a. Engine 2 Time-Stop: Untuk `signal_source == "price_forecast"`, tutup posisi bila umur
         sudah melewati `max_hold_hours` (24h/72h) dan belum masuk trailing profit (>= +0.80%).
     1b. Off-Hours Hybrid Cost-Aware Policy (saat `now_utc` diberikan / di risk-monitor):
