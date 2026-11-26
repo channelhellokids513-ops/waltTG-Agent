@@ -1080,7 +1080,7 @@ class WaltTelegramBot:
             f"• `min_funding_daily`: `{cfg['min_funding_daily']*100:.2f}%/hari` (`{cfg['min_funding_daily']}`)\n"
             f"• `reentry_cooldown_hours`: `{cfg['reentry_cooldown_hours']} jam`\n"
             f"• `max_slots_cap`: `{cfg['max_slots_cap']}`\n"
-            f"• `dry_run`: `{cfg['dry_run']}`\n\n"
+            f"• `DRY_RUN` (env/variable): `{os.environ.get('DRY_RUN', 'false').strip().lower() == 'true'}`\n\n"
             f"Diubah terakhir oleh: `{cfg.get('updated_by', 'default')}`\n"
             f"{editable}"
         )
