@@ -99,13 +99,14 @@ def _write_state(value_json: str) -> tuple[bool, str]:
     if not token or not repo:
         return False, "backend_unavailable"
     url = f"https://api.github.com/repos/{repo}/actions/variables/{VAR_NAME}"
+    create_url = f"https://api.github.com/repos/{repo}/actions/variables"
     body = {"name": VAR_NAME, "value": value_json}
     try:
         r = httpx.patch(url, headers=_headers(), json=body, timeout=10.0)
         if r.status_code in (200, 204):
             return True, ""
         if r.status_code == 404:
-            r = httpx.post(url, headers=_headers(), json=body, timeout=10.0)
+            r = httpx.post(create_url, headers=_headers(), json=body, timeout=10.0)
             if r.status_code in (200, 201):
                 return True, ""
         _log_backend_diag("PATCH variable", r.status_code)
