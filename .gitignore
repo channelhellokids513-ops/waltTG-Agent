@@ -27,3 +27,5 @@ Antigravity_prompt_archive_*.md
 # Verbatim Original Code stays out of the repo; MG_PORT_SPEC.md is the port's own
 # transcription with line citations, and market_gravity.py carries the licence notice.
 MG_SOURCE_EXCERPTS.md
+order_plan_*.json
+order_plan_*.csv
