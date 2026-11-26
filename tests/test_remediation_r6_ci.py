@@ -263,3 +263,14 @@ def test_mode_off_tidak_menulis_secret_karena_menolak_refresh(monkeypatch, caplo
     assert local == [], "mode read-only tidak menyentuh .env lokal"
     assert alerts == [], "penolakan terjadi sebelum apa pun: tidak ada alert"
     assert tm.refresh_token == "refresh-lama", "token tidak boleh terbuang diam-diam"
+
+
+def test_semua_workflow_eksekusi_meneruskan_dry_run():
+    """Keempat workflow yang bisa membuka posisi wajib meneruskan vars.DRY_RUN."""
+    for nama in ("daily-scan.yml", "market-execute.yml", "crypto-execute.yml", "risk-monitor.yml"):
+        env = _env_of_run_steps(_load(f".github/workflows/{nama}"))
+        val = str(env.get("DRY_RUN", ""))
+        assert "vars.DRY_RUN" in val, (
+            f"{nama}: wajib meneruskan env DRY_RUN dari vars.DRY_RUN agar mode DRY_RUN "
+            "tidak bisa dibypass oleh jalur adaptive execute"
+        )
