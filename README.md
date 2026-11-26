@@ -25,6 +25,7 @@ Autonomous delta-neutral & directional funding rate arbitrage trading system unt
 │               GOOGLE CLOUD SCHEDULER (Jakarta asia-southeast2)        │
 │    • walt-market-execute (Tiap 2 Jam di menit 43 / Adaptive Gear 0-3)  │
 │    • walt-daily-scan     (14:33 & 18:33 UTC / 21:33 & 01:33 WIB)       │
+│    • walt-daily-scan-noon(12:33 UTC / 19:33 WIB)                       │
 │    • walt-risk-monitor   (Tiap 10 Menit)                               │
 └───────────────────────────────────┬────────────────────────────────────┘
                                     │ (Exact-second HTTP POST trigger)
@@ -121,7 +122,7 @@ gcloud scheduler jobs list --location=asia-southeast2
 
 | Komponen / Workflow | Trigger Resmi | Timeout / Guard | Deskripsi |
 |---|---|---|---|
-| [`daily-scan.yml`](.github/workflows/daily-scan.yml) | **Cloud Scheduler (`workflow_dispatch`)** — 14:33 & 18:33 UTC (21:33 & 01:33 WIB) | `15m` (`JOB_TIMEOUT_MIN=15`, guard `< 6m`) | Master Scan **31 aset Engine 1** (`18 Saham US + 3 Komoditas + 10 Crypto`) + **Engine 2 Crypto (`CRYPTO_FORECAST_ENGINE=on`)** + **Engine 2 Saham AS (`STOCK_FORECAST_ENGINE=on`, jam AS)**, filter **Jam Bursa Reguler Saham AS (`Sen–Jum 13:30–21:00 UTC`, `US_STOCK_HOURS_ONLY=true`)** untuk `ALLOWED_STOCKS`, pengayaan **4-Voter AI Swarm paralel antar-aset (`RESEARCH_MODE=swarm`, murni data berita + OAKresearch MCP untuk mengisi skor P1–P7)**, eksekusi GO/HALF, simpan ke Google Sheets (30 kolom `Daily_Scans` + SFT `Data Training`) & notif Telegram. |
+| [`daily-scan.yml`](.github/workflows/daily-scan.yml) | **Cloud Scheduler (`workflow_dispatch`)** — 12:33, 14:33 & 18:33 UTC (19:33, 21:33 & 01:33 WIB) | `15m` (`JOB_TIMEOUT_MIN=15`, guard `< 6m`) | Master Scan **31 aset Engine 1** (`18 Saham US + 3 Komoditas + 10 Crypto`) + **Engine 2 Crypto (`CRYPTO_FORECAST_ENGINE=on`)** + **Engine 2 Saham AS (`STOCK_FORECAST_ENGINE=on`, jam AS)**, filter **Jam Bursa Reguler Saham AS (`Sen–Jum 13:30–21:00 UTC`, `US_STOCK_HOURS_ONLY=true`)** untuk `ALLOWED_STOCKS`, pengayaan **4-Voter AI Swarm paralel antar-aset (`RESEARCH_MODE=swarm`, murni data berita + OAKresearch MCP untuk mengisi skor P1–P7)**, eksekusi GO/HALF, simpan ke Google Sheets (30 kolom `Daily_Scans` + SFT `Data Training`) & notif Telegram. |
 | [`market-execute.yml`](.github/workflows/market-execute.yml) | **Cloud Scheduler (`workflow_dispatch`)** — Tiap 2 jam (menit 43) | `12m` (`JOB_TIMEOUT_MIN=12`, guard `< 6m`) | Eksekusi **4-Tier Execution Gear (`0..3`)** Saham US (**Engine 1 Carry + Engine 2 LONG-ONLY Dip-Buy `STOCK_FORECAST_ENGINE=on`** saat jam bursa reguler AS `13:30–21:00 UTC`) & Komoditas (24/7 Engine 1): **Gear 0 (`0` GO)** = maks 2x selama jam bursa AS (`225m`); **Gear 1 (`< 2` GO)** = `120m` (2 jam, konservatif); **Gear 2 (`2..5` GO)** = `60m` (1 jam, aktif); **Gear 3 (`> 5` GO atau `GEAR_3_FULL_RESEARCH=true`)** = `60m` + izin riset & analisa AI penuh untuk setiap keputusan trading. Dilengkapi *3-hour re-entry cooldown*. |
 | [`crypto-execute.yml`](.github/workflows/crypto-execute.yml) | **Cloud Scheduler (`workflow_dispatch`)** — Tiap 2 jam (menit 11) | `12m` (`JOB_TIMEOUT_MIN=12`, guard `< 6m`) | Eksekusi mandiri 24/7 Dual-Engine Crypto: Engine 1 Funding Carry (`10` Bluechip) + **Engine 2 Mean-Reversion Fade (`CRYPTO_FORECAST_ENGINE=on`, `CRYPTO_FORECAST_UNIVERSE=all` seluruh kontrak Crypto likuid: `V5 4h` + `V4 1h`, ATR SL `<= 4.5%`, Time-Stop `24h/72h`)** dg 4-Tier Gear `0..3` & *3-hour re-entry cooldown*. |
 | [`risk-monitor.yml`](.github/workflows/risk-monitor.yml) | **Cloud Scheduler (`workflow_dispatch`)** — Tiap 10 menit | `20m` (`JOB_TIMEOUT_MIN=20`, guard sisa `< 6m`) | Pengawas risiko adaptif (5–10 menit + *Smart Fast-Exit Idle*). Guard waktu otomatis melewati *sub-cycle* & *adaptive execute* jika sisa waktu job `< 6 menit` agar order tidak terpotong sebelum TP/SL terpasang. |
@@ -353,7 +354,7 @@ status sistem bisa dibaca tanpa menebak. Di GitHub: **Settings → Secrets and v
 | Variable | Default (bila tidak diset) | Fungsi |
 |---|---|---|
 | `MAINTENANCE_MODE` | `false` | Kill-switch: membungkam workflow entry + risiko saat pemulihan kredensial. |
-| `DRY_RUN` | `false` | `true` = pantau nyata, entry disimulasikan (`verdict: DRY_RUN`). Dipakai untuk pelepasan bertahap. |
+| `DRY_RUN` | `false` | Satu-satunya saklar simulasi (`true` = pantau nyata, entry disimulasikan sebagai `verdict: DRY_RUN`). Tidak diduplikasi di `STRATEGY_CONFIG_JSON`. |
 | `WALT_COLD_REHYDRATE` | `report` | Start dingin (cache Actions ter-eviksi): `report` = ukur & bunyikan jarak ledger-vs-bursa; `write` = tutup jarak lewat jalur backfill (backup dulu, PnL tetap *belum terukur*, dan diblokir selama `DRY_RUN=true`). |
 | `DASHSCOPE_MODEL_V1` | `glm-5.2-fast-preview` | Model Voter 1 (DashScope cepat & hemat). |
 | `DASHSCOPE_MODEL` | `glm-5.3-prime` | Model Voter 2 (DashScope #1 OAK Benchmark). |
@@ -375,7 +376,7 @@ status sistem bisa dibaca tanpa menebak. Di GitHub: **Settings → Secrets and v
 | `WALT_TOKEN_SYNC` | `on` | `off` **menolak refresh** (bukan "refresh lalu buang hasilnya") — wajib `on` untuk workflow yang butuh OAuth. |
 | `WALT_WATCHDOG_DISPATCH_ENTRY` | `false` | `true` mengizinkan watchdog men-dispatch ulang workflow entry; default *alert-only* karena dispatch membuka order nyata. |
 | `GOOGLE_SHEET_ID` | — | ID spreadsheet ledger (yang benar bersidik jari `06bded7f`). |
-| `STRATEGY_CONFIG_JSON` | berkas `strategy_config.json` | Override parameter strategi dari CI tanpa commit. |
+| `STRATEGY_CONFIG_JSON` | berkas `strategy_config.json` | Override parameter strategi dari CI tanpa commit (termasuk `max_slots_cap` 1–15 yang membatasi `get_effective_max_slots`). |
 
 
 ### 2c. Status Webhook v2 & Panduan Redeploy Apps Script

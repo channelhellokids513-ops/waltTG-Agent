@@ -127,6 +127,12 @@ def get_dynamic_max_slots(available_balance: float) -> int:
         return min(15, max(10, int(available_balance / 15.0)))
 
 
+def get_effective_max_slots(available_balance: float, cap: Optional[int] = None) -> int:
+    """Kembalikan batas slot efektif `min(get_dynamic_max_slots, MAX_SLOTS_CAP)`."""
+    eff_cap = MAX_SLOTS_CAP if cap is None else cap
+    return min(get_dynamic_max_slots(available_balance), max(1, int(eff_cap)))
+
+
 def calculate_dynamic_margin(
     available_balance: float,
     active_slots: int = 0,
@@ -161,7 +167,7 @@ def calculate_dynamic_margin(
     """
     equity = total_equity if (total_equity is not None and total_equity > 0) else available_balance
     if max_slots is None:
-        max_slots = get_dynamic_max_slots(equity)
+        max_slots = get_effective_max_slots(equity)
 
     remaining_slots = max(1, max_slots - active_slots)
     deployable = available_balance * (1.0 - MIN_BUFFER_PCT)
@@ -225,6 +231,7 @@ MAX_ENTRIES_PER_ASSET_24H = 2   # E4: maks 2 entry per aset per 24 jam
 MAX_ENTRIES_PER_DAY = 8         # E4: maks 8 entry total per 24 jam
 DAILY_LOSS_LIMIT_PCT = 0.05     # E4: circuit breaker penurunan ekuitas harian >= 5%
 EXPECTED_HOLD_HOURS = 24.0      # E5: asumsi hold time (jam) untuk gerbang funding vs fee
+MAX_SLOTS_CAP = 15              # Batas atas slot posisi terbuka dari STRATEGY_CONFIG_JSON
 
 try:
     from strategy_config import load_strategy_config as _load_strategy_config
@@ -239,6 +246,7 @@ try:
     MAX_ENTRIES_PER_DAY = int(_rt_cfg.get("max_entries_per_day", MAX_ENTRIES_PER_DAY))
     DAILY_LOSS_LIMIT_PCT = float(_rt_cfg.get("daily_loss_limit_pct", DAILY_LOSS_LIMIT_PCT))
     EXPECTED_HOLD_HOURS = float(_rt_cfg.get("expected_hold_hours", EXPECTED_HOLD_HOURS))
+    MAX_SLOTS_CAP = max(1, min(15, int(_rt_cfg.get("max_slots_cap", MAX_SLOTS_CAP))))
 except Exception as _cfg_exc:
     logging.getLogger("walt-bot").warning(
         f"Gagal memuat konfigurasi strategi bersama ({_cfg_exc}); fallback ke DEFAULT_STRATEGY_CONFIG."
@@ -4314,7 +4322,7 @@ def _maybe_run_adaptive_executions(
             if str(p.get("status", "open")).lower() in ("open", "active")
         ]
         total_eq = get_total_equity(bal, open_pos)
-        max_slots = get_dynamic_max_slots(total_eq)
+        max_slots = get_effective_max_slots(total_eq)
         if len(open_list) >= max_slots or available < 3.0:
             log.info(
                 f"💤 [GEAR 0 GATEKEEPER] Adaptive execute ditunda: Slot {len(open_list)}/{max_slots}, Available ${available:.2f}"
@@ -5044,7 +5052,7 @@ def scan_with_research(
 
         total_equity = get_total_equity(accounts, existing)
         active_slot_count = len(existing_contracts)
-        max_slots = get_dynamic_max_slots(total_equity)
+        max_slots = get_effective_max_slots(total_equity)
         log.info(
             f"Dynamic Elastic Slot & Conviction Sizing: Equity ${total_equity:.2f} (Available ${available:.2f}) | "
             f"Posisi Aktif {active_slot_count}/{max_slots} | Max Allowed Slots: {max_slots}"
@@ -5469,7 +5477,7 @@ def market_execute(
 
     # Dynamic Slot Elasticity berbasis Total Ekuitas (available + margin open positions)
     total_equity = get_total_equity(balance_data, existing)
-    max_slots = get_dynamic_max_slots(total_equity)
+    max_slots = get_effective_max_slots(total_equity)
     active_slot_count = len(open_contract_ids)
 
     # GEAR 0 Smart Idle Gatekeeper: Jika slot sudah penuh, langsung fast-exit tanpa memanggil riset AI!

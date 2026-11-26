@@ -21,7 +21,6 @@ from strategy_config import DEFAULT_STRATEGY_CONFIG  # noqa: E402
 
 def main() -> int:
     cfg = dict(DEFAULT_STRATEGY_CONFIG)
-    cfg["dry_run"] = False  # simulasi dikendalikan variable DRY_RUN, bukan dari config bersama
     body = json.dumps(cfg, sort_keys=True)
 
     tulis = subprocess.run(
@@ -49,7 +48,7 @@ def main() -> int:
     sama = hasil == json.loads(body)
     print(f"kunci             = {len(hasil)}")
     print(f"max_research_age  = {hasil.get('max_research_age_hours')}")
-    print(f"dry_run           = {hasil.get('dry_run')}")
+    print(f"max_slots_cap     = {hasil.get('max_slots_cap')}")
     print(f"sama_dengan_kode  = {sama}")
     if not sama:
         print("PERINGATAN: variable produksi berbeda dari DEFAULT_STRATEGY_CONFIG -> cek kunci:")

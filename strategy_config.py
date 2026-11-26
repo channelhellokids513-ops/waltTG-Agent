@@ -59,7 +59,6 @@ DEFAULT_STRATEGY_CONFIG: dict[str, Any] = {
     "forecast_max_scan_assets": 50,  # Engine 2: kandidat yang diperiksa; 0 = SELURUH kontrak likuid
     "crypto_research_top_n": 5,      # batas riset AI crypto/komoditas (|funding| terbesar)
     "stock_forecast_max_signals": 3, # jumlah maksimum sinyal dip-buy saham AS per siklus
-    "dry_run": False,
 }
 
 # Batasan aman agar perubahan dari Telegram tidak merusak proteksi modal
@@ -84,7 +83,6 @@ STRATEGY_PARAM_SPECS: dict[str, dict[str, Any]] = {
     "forecast_max_scan_assets": {"type": "int", "min": 0, "max": 200, "desc": "Engine 2 crypto: jumlah kandidat yang diperiksa per scan; 0 = seluruh kontrak likuid Walt"},
     "crypto_research_top_n": {"type": "int", "min": 1, "max": 30, "desc": "Batas aset crypto/komoditas yang diriset AI per scan (|funding| terbesar)"},
     "stock_forecast_max_signals": {"type": "int", "min": 1, "max": 10, "desc": "Jumlah maksimum sinyal dip-buy saham AS yang diproses per siklus"},
-    "dry_run": {"type": "bool", "desc": "Mode simulasi tanpa order riil (true/false)"},
 }
 
 
