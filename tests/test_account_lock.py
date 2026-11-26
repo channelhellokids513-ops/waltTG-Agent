@@ -171,3 +171,30 @@ def test_cli_lock_warns_but_proceeds_when_held(backend, monkeypatch):
     # release NO-OP aman: lease tidak pernah kita pegang -> state telegram tak tersentuh
     assert released == ["ci:market_execute"]
 
+
+def test_write_state_404_fallback_posts_to_collection_endpoint(monkeypatch):
+    monkeypatch.setenv("GH_PAT", "pat_dummy")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
+    calls = []
+
+    class _Resp:
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+    def fake_patch(url, **kw):
+        calls.append(("PATCH", url, kw.get("json")))
+        return _Resp(404)
+
+    def fake_post(url, **kw):
+        calls.append(("POST", url, kw.get("json")))
+        return _Resp(201)
+
+    monkeypatch.setattr(al.httpx, "patch", fake_patch)
+    monkeypatch.setattr(al.httpx, "post", fake_post)
+
+    ok, reason = al._write_state('{"holder":"ci:monitor"}')
+    assert ok is True and reason == ""
+    assert calls[0][0] == "PATCH" and calls[0][1].endswith("/actions/variables/ACCOUNT_LOCK_STATE")
+    assert calls[1][0] == "POST" and calls[1][1].endswith("/actions/variables")
+    assert calls[1][2] == {"name": "ACCOUNT_LOCK_STATE", "value": '{"holder":"ci:monitor"}'}
+
