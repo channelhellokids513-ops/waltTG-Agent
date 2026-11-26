@@ -4,6 +4,11 @@ name: Walt Risk Monitor (10-Min Smart Guard)
 # Cron GitHub Actions dihapus untuk mencegah eksekusi dobel / terlambat berjam-jam.
 on:
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (preview only, no execute)"
+        required: false
+        default: "false"
 
 concurrency:
   group: walt-trading-account
@@ -77,6 +82,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GOOGLE_SHEET_ID: ${{ vars.GOOGLE_SHEET_ID || secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SHEET_WEBHOOK_URL: ${{ secrets.GOOGLE_SHEET_WEBHOOK_URL }}
+          DRY_RUN: ${{ (github.event.inputs.dry_run == 'true' || vars.DRY_RUN == 'true') && 'true' || 'false' }}
           GH_PAT: ${{ secrets.GH_PAT || secrets.GH_PATH || secrets.GITHUB_PAT || secrets.PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           JOB_TIMEOUT_MIN: "20"
