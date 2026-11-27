@@ -220,7 +220,12 @@ FUNDING_FLIP_CLOSE_THRESHOLD = 0.001  # 0.1%/hari hysteresis untuk tutup posisi 
 REENTRY_COOLDOWN_SEC = 3 * 3600       # Cooldown 3 jam pasca penutupan aset (cegah whipsaw & boros fee)
 
 # Target income
-MONTHLY_TARGET = 100.0      # USDC
+MONTHLY_TARGET = 100.0      # USDC (target nominal; dipertahankan untuk kompatibilitas sheet)
+# K4: target berbasis ekuitas. $100/bulan mustahil pada ekuitas mikro saat ini: dengan 85%
+# deploy, leverage 2x, dan funding 0.5%/hari plafonnya hanya beberapa dolar per bulan.
+# 5%/bulan setara ~$1 pada ekuitas mikro dan naik otomatis saat ekuitas bertumbuh -> target
+# yang jujur untuk skala mikro.
+MONTHLY_TARGET_PCT = 0.05
 
 # Risk management parameters (True Funding Carry + Asymmetric R:R)
 DEFAULT_SL_PCT = 0.015      # 1.5% default SL (beri ruang napas noise intraday, R:R >= 1:1.33)
@@ -280,6 +285,141 @@ CALM_SL_ASSETS: frozenset[str] = frozenset({"SPY", "US100", "AAPL", "XAU"})
 # lebih besar daripada sekadar biaya) — maka tutup segera tetap diizinkan.
 MIN_HOLD_BEFORE_FUNDING_FLIP_EXIT_H = 6.0
 FUNDING_FLIP_LOSS_OVERRIDE_FRACTION = 0.5
+
+# K4 (2026-11-27): evaluasi 18-26 Nov membuktikan gerbang E5 dan mekanika exit tidak lagi
+# berbicara tentang hal yang sama. E5 membenarkan biaya dengan asumsi hold 24 jam, sementara
+# exit menutup posisi pada median 2.9 jam -> funding terealisasi $0.0217 vs fee $0.2616 (8.3%).
+# Empat aturan di bawah menyelaraskan keduanya pada SATU horizon: 24 jam.
+#
+# 1) `FUNDING_COVER_MULTIPLIER` / `FUNDING_BREAKEVEN_MAX_HOURS`: entry hanya boleh bila funding
+#    mampu menutup biaya round-trip (fee 2x0.09% + slippage terukur) DI DALAM 24 jam, dengan
+#    margin keamanan 1.5x. Funding 0.23%/hari (kandidat hari ini) butuh ~29 jam -> ditolak.
+FUNDING_COVER_MULTIPLIER = 1.5
+FUNDING_BREAKEVEN_MAX_HOURS = 24.0
+# 2) `FUNDING_FLIP_MAX_HOLD_HOURS`: exit `Funding Flip Sign` menunggu sampai funding yang SUDAH
+#    dibayar menutup biaya round-trip posisi itu, dan tidak pernah menahan lebih dari 24 jam.
+#    Ini mengganti patokan "6 jam" yang buta terhadap besarnya funding.
+FUNDING_FLIP_MAX_HOLD_HOURS = 24.0
+# 3) `OFF_HOURS_MIN_ADVERSE_FUNDING_DAILY`: zero-tolerance biaya inap hanya berlaku bila biaya
+#    inap itu sendiri >= biaya menutup posisi dalam 24 jam (fee 0.18% + slippage 0.10% = 0.28%
+#    notional -> 0.28%/hari pada horizon 24 jam). 26 Nov posisi ditutup demi 0.077%/hari, yang
+#    butuh ~87 jam untuk sekadar impas terhadap fee.
+OFF_HOURS_MIN_ADVERSE_FUNDING_DAILY = 0.0028
+# 4) `ALLOW_ENGINE1_SHORT`: leg SHORT Engine 1 dinonaktifkan. Bukti 18-26 Nov: 16 SHORT hanya
+#    menang 2x (12.5%), net -$0.879 = 87% dari seluruh kerugian; LONG 12 trade net -$0.130.
+#    Hidupkan kembali hanya lewat env/GitHub Variable `ALLOW_ENGINE1_SHORT=true`.
+ALLOW_ENGINE1_SHORT_ENV = "ALLOW_ENGINE1_SHORT"
+ALLOW_ENGINE1_SHORT_DEFAULT = False
+
+
+def allow_engine1_short() -> bool:
+    """True bila leg SHORT Engine 1 (funding carry) diizinkan. Default: NONAKTIF (K4)."""
+    raw = (os.getenv(ALLOW_ENGINE1_SHORT_ENV, "") or "").strip().lower()
+    if not raw:
+        return ALLOW_ENGINE1_SHORT_DEFAULT
+    return raw in {"1", "true", "yes", "on"}
+
+
+def required_equity_for_nominal_target(
+    nominal_target: float = MONTHLY_TARGET,
+    funding_daily_pct: float = 0.50,
+    deploy_pct: float = 1.0 - MIN_BUFFER_PCT,
+    leverage: int = MAX_LEVERAGE,
+) -> Optional[float]:
+    """Ekuitas yang dibutuhkan agar funding harian `funding_daily_pct` menghasilkan target/bulan.
+
+    Target harian = nominal/30. Notional = target_harian / (funding_daily_pct/100);
+    margin = notional/leverage; ekuitas = margin / deploy_pct.
+    Contoh 0.50%/hari: notional $667 -> margin $333 -> ekuitas $392.
+    Mengembalikan None bila input tidak masuk akal (funding <= 0 atau leverage < 1).
+    """
+    if funding_daily_pct <= 0 or leverage < 1 or deploy_pct <= 0:
+        return None
+    daily_target = float(nominal_target) / 30.0
+    notional = daily_target / (float(funding_daily_pct) / 100.0)
+    return round((notional / int(leverage)) / float(deploy_pct), 2)
+
+
+def compute_target_progress(
+    funding_earned: float,
+    total_equity: float,
+    monthly_target: Optional[float] = None,
+    monthly_target_pct: Optional[float] = None,
+    funding_daily_pct: float = 0.50,
+) -> dict:
+    """Progres target dalam dua satuan: nominal ($100) dan berbasis ekuitas (%/bulan).
+
+    Nominal dipakai agar kontinu dengan sheet/Telegram lama; berbasis ekuitas agar target tetap
+    bermakna pada modal mikro. `required_equity_for_nominal` menjawab pertanyaan "kapan $100/bulan
+    masuk akal?" tanpa mengubah angka target yang dilaporkan.
+    """
+    target_nominal = MONTHLY_TARGET if monthly_target is None else float(monthly_target)
+    pct = MONTHLY_TARGET_PCT if monthly_target_pct is None else float(monthly_target_pct)
+    equity = max(0.0, float(total_equity or 0.0))
+    earned = float(funding_earned or 0.0)
+    target_by_equity = equity * pct
+    return {
+        "funding_earned": round(earned, 6),
+        "target_nominal": target_nominal,
+        "progress_nominal_pct": round(
+            (earned / target_nominal * 100.0) if target_nominal > 0 else 0.0, 4
+        ),
+        "monthly_target_pct": pct,
+        "target_by_equity": round(target_by_equity, 4),
+        "progress_equity_pct": round(
+            (earned / target_by_equity * 100.0) if target_by_equity > 0 else 0.0, 2
+        ),
+        "required_equity_for_nominal": required_equity_for_nominal_target(
+            nominal_target=target_nominal,
+            funding_daily_pct=funding_daily_pct,
+        ),
+        "required_equity_funding_daily_pct": float(funding_daily_pct),
+    }
+
+
+def summarize_funding_window(
+    trades: list[dict],
+    hours: float = 24.0,
+    now_utc: Optional[datetime] = None,
+) -> dict:
+    """Ringkasan jendela bergulir `hours` terakhir: apakah funding menutup fee? (`K4`)
+
+    `trades` memakai bentuk yang sama dengan `compute_closed_stats` (kunci `funding_usd`,
+    `fee_usd`, `pnl_usd`, `closed_at`/`timestamp_utc`). Tujuannya menjawab kebutuhan
+    "untung dalam 24 jam berjalan" dengan angka nyata, bukan asumsi 24 jam di gerbang E5.
+    """
+    window_h = max(0.0, float(hours))
+    now = now_utc or datetime.now(timezone.utc)
+    selected: list[dict] = []
+    for t in trades or []:
+        raw = str(t.get("closed_at") or t.get("timestamp_utc") or "").strip()
+        if not raw:
+            continue
+        try:
+            ts = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        age_h = (now - ts).total_seconds() / 3600.0
+        if 0.0 <= age_h <= window_h:
+            selected.append(t)
+
+    funding = sum(float(t.get("funding_usd") or 0.0) for t in selected)
+    fees = sum(float(t.get("fee_usd") or 0.0) for t in selected)
+    price_pnl = sum(float(t.get("pnl_usd") or 0.0) for t in selected)
+    cover = (funding / fees) if fees > 0 else None
+    return {
+        "window_hours": window_h,
+        "trades": len(selected),
+        "funding_usd": round(funding, 6),
+        "fee_usd": round(fees, 6),
+        "price_pnl_usd": round(price_pnl, 6),
+        "net_usd": round(price_pnl + funding - fees, 6),
+        "funding_cover_ratio": round(cover, 4) if cover is not None else None,
+        "funding_covered_fees": (cover >= 1.0) if cover is not None else None,
+    }
+
 
 # K3-2 (2025-11-25): TP/SL dihitung dari harga KEPUTUSAN; bila fill bursa menyimpang lebih dari
 # ambang ini, TP/SL digeser ke harga fill. MON 24 Nov: keputusan 0.0102 -> fill 0.01015, SL desain
@@ -749,8 +889,10 @@ def evaluate_off_hours_position_policy(
     (`~0.28%-0.45%` notional) dan risiko gap pembukaan:
     1. Sesi `OPEN` / kill-switch `off`: tidak mengubah perilaku 24/7.
     2. Di seluruh sesi non-OPEN (`PRE_CLOSE_*` & `CLOSED_*`):
-       - **Zero-tolerance biaya inap:** bila funding berbalik menjadi beban biaya
-         (`favorable_funding < 0`), langsung rekomendasikan `CLOSE`.
+       - **Zero-tolerance biaya inap (ambang K4):** bila funding berbalik menjadi beban biaya
+         DAN bebannya >= `OFF_HOURS_MIN_ADVERSE_FUNDING_DAILY` (0.28%/hari = biaya round-trip
+         dalam 24 jam), rekomendasikan `CLOSE`. Di bawah ambang itu menutup posisi justru lebih
+         mahal daripada biaya inapnya (26 Nov: 4 posisi ditutup demi 0.077%/hari).
        - **Early Profit Lock:** bila profit harga `>= +0.40%` (sebelum Tier 1 `+0.80%`),
          kunci SL dini ke `Entry +/- 0.25%` untuk menutup round-trip taker fee `0.18%` + buffer.
     3. `PRE_CLOSE_OVERNIGHT` (Sen–Kam 20:35–21:00 UTC, Saham AS):
@@ -844,7 +986,8 @@ def evaluate_off_hours_position_policy(
             "reason": f"Engine 2 Saham AS overnight hold ({session_note})",
         }
 
-    if favorable_funding < -1e-9:
+    adverse_funding = max(0.0, -favorable_funding)
+    if adverse_funding > 0 and adverse_funding >= OFF_HOURS_MIN_ADVERSE_FUNDING_DAILY:
         return {
             "action": "CLOSE",
             "session": session,
@@ -852,7 +995,8 @@ def evaluate_off_hours_position_policy(
             "favorable_funding_daily": favorable_funding,
             "reason": (
                 f"Off-Hours Biaya Inap ({session}): funding berlawanan "
-                f"({favorable_funding*100:+.3f}%/hari)"
+                f"({favorable_funding*100:+.3f}%/hari >= ambang "
+                f"-{OFF_HOURS_MIN_ADVERSE_FUNDING_DAILY*100:.2f}%/hari)"
             ),
         }
 
@@ -1415,6 +1559,99 @@ class Position:
 # ASSET SELECTION & RANKING
 # =============================================================================
 
+def audit_universe(
+    contracts: list[dict],
+    allowed_assets: Optional[set[str]] = None,
+    min_vol: float = MIN_VOL_24H,
+    min_funding_daily: float = MIN_FUNDING_DAILY,
+    top_n: int = 10,
+) -> dict:
+    """Audit read-only: apakah whitelist kita memuat peluang funding terbaik, dan apakah ada drift?
+
+    Latar (evaluasi 27 Nov): Engine 1 memindai 139 kontrak dan 0 kandidat lolos ambang 0.50%/hari
+    di dalam whitelist, sementara di luar whitelist ada PRL +4.88%/hari, SKHY -3.30%/hari,
+    MU +0.60%/hari. MON (kerugian terbesar) volumenya kini $526k < floor $1M. Fungsi ini TIDAK
+    mengubah apa pun; ia hanya membuat keadaan itu terlihat tanpa perlu membedah log run.
+    """
+    allowed = ALLOWED_ASSETS if allowed_assets is None else allowed_assets
+    rows: list[dict] = []
+    for c in contracts or []:
+        if not isinstance(c, dict):
+            continue
+        asset = str(c.get("base_asset") or "").strip()
+        if not asset:
+            continue
+        try:
+            vol = float(c.get("volume_24h_usd") or 0.0)
+        except (TypeError, ValueError):
+            vol = 0.0
+        fr_daily: Optional[float]
+        if c.get("funding_rate_hourly") is not None:
+            try:
+                fr_daily = float(c.get("funding_rate_hourly")) * 24.0
+            except (TypeError, ValueError):
+                fr_daily = None
+        elif c.get("funding_daily") is not None:
+            try:
+                fr_daily = float(c.get("funding_daily"))
+            except (TypeError, ValueError):
+                fr_daily = None
+        else:
+            fr_daily = None
+        rows.append({
+            "asset": asset,
+            "volume_24h_usd": vol,
+            "funding_daily": fr_daily,
+            "in_whitelist": asset in allowed,
+        })
+
+    liquid = [r for r in rows if r["volume_24h_usd"] >= float(min_vol)]
+    with_funding = [r for r in liquid if r["funding_daily"] is not None]
+    ranked = sorted(with_funding, key=lambda r: abs(r["funding_daily"]), reverse=True)
+    top = ranked[: max(1, int(top_n))]
+
+    def _fmt(r: dict) -> dict:
+        fr = float(r["funding_daily"] or 0.0)
+        return {
+            "asset": r["asset"],
+            "funding_daily_pct": round(fr * 100.0, 4),
+            "side_for_carry": "short" if fr > 0 else "long",
+            "volume_24h_usd": round(r["volume_24h_usd"], 2),
+            "in_whitelist": bool(r["in_whitelist"]),
+            "passes_min_funding": abs(fr) >= float(min_funding_daily),
+        }
+
+    top_rows = [_fmt(r) for r in top]
+    outside = [r for r in top_rows if not r["in_whitelist"] and r["passes_min_funding"]]
+    whitelist_below_floor = [
+        {"asset": r["asset"], "volume_24h_usd": round(r["volume_24h_usd"], 2)}
+        for r in rows
+        if r["in_whitelist"] and r["volume_24h_usd"] < float(min_vol)
+    ]
+    eligible_inside = [
+        r for r in ranked
+        if r["in_whitelist"] and abs(r["funding_daily"]) >= float(min_funding_daily)
+    ]
+
+    return {
+        "total_contracts": len(rows),
+        "liquid_contracts": len(liquid),
+        "min_volume_floor_usd": float(min_vol),
+        "min_funding_daily_pct": float(min_funding_daily) * 100.0,
+        "whitelist_size": len(allowed),
+        "whitelist_liquid_assets": sum(1 for r in liquid if r["in_whitelist"]),
+        "eligible_inside_whitelist": len(eligible_inside),
+        "top_by_abs_funding": top_rows,
+        "top_outside_whitelist_passing_funding": outside,
+        "missed_top_pct": round(len(outside) / len(top_rows) * 100.0, 1) if top_rows else 0.0,
+        "whitelisted_below_volume_floor": whitelist_below_floor,
+        "verdict": (
+            f"{len(outside)}/{len(top_rows)} kontrak funding terkuat (vol >= ${float(min_vol):,.0f}) "
+            f"berada DI LUAR whitelist; {len(eligible_inside)} aset whitelist yang lolos ambang funding."
+        ),
+    }
+
+
 def rank_opportunities(
     contracts: list[dict], allowed_assets: Optional[set[str]] = None
 ) -> list[Opportunity]:
@@ -1706,6 +1943,18 @@ def _decide_go_nogo_ai(
     # Minimum funding threshold (hanya berlaku untuk jalur Engine 1 funding carry)
     if not is_forecast and abs(opp.funding_daily) < MIN_FUNDING_DAILY:
         return "SKIP", "funding kurang (<0.5%/hari)", 0.0
+
+    # K4 (2026-11-27): leg SHORT Engine 1 dinonaktifkan. Bukti 18-26 Nov: 16 SHORT hanya menang
+    # 2x (12.5%) dengan net -$0.879 (87% dari seluruh kerugian), sementara LONG net -$0.130.
+    # Funding positif menandakan long crowded, tetapi di pasar yang sedang naik shorting untuk
+    # memanen funding justru melawan momentum. Hidupkan lagi: ALLOW_ENGINE1_SHORT=true.
+    if not is_forecast and opp.side == "short" and not allow_engine1_short():
+        return (
+            "SKIP",
+            "leg SHORT Engine 1 nonaktif (K4: 16 SHORT 18-26 Nov, 2 menang, net -$0.879; "
+            "aktifkan lewat ALLOW_ENGINE1_SHORT=true)",
+            0.0,
+        )
 
     # Whitelist check: Engine 1 tetap 31 aset terkurasi; Engine 2 mencakup kontrak crypto likuid
     # dan Saham AS (`ALLOWED_STOCKS`, LONG-ONLY Dip-Buy); Komoditas tetap hanya di Engine 1.
@@ -2399,26 +2648,64 @@ TAKER_FEE_PER_SIDE = 0.0009  # 0.09% per sisi (0.18% round-trip)
 # Catatan: memindahkan konstanta fee ke strategy_config.py (config-driven) adalah pekerjaan terpisah di luar ronde 3.
 
 
+def round_trip_cost_pct(price_slippage: float = 0.0) -> float:
+    """Biaya round-trip sebagai fraksi notional: fee 2 sisi + slippage sisi masuk."""
+    return (2.0 * TAKER_FEE_PER_SIDE) + max(0.0, float(price_slippage or 0.0))
+
+
+def funding_breakeven_hours(funding_daily: float, price_slippage: float = 0.0) -> Optional[float]:
+    """Jam yang dibutuhkan funding untuk menutup biaya round-trip (None bila funding 0).
+
+    Contoh K4: funding 0.23%/hari + slippage 0.10% -> 0.28% / (0.23%/24) = 29.2 jam.
+    """
+    rate_hourly = abs(float(funding_daily or 0.0)) / 24.0
+    if rate_hourly <= 0:
+        return None
+    return round_trip_cost_pct(price_slippage) / rate_hourly
+
+
+def funding_round_trip_cost_quote(pos: "Position") -> float:
+    """Biaya round-trip sebuah posisi dalam quote (fee 2 sisi x notional)."""
+    margin = max(0.0, float(getattr(pos, "margin", 0.0) or 0.0))
+    leverage = max(1, int(getattr(pos, "leverage", 1) or 1))
+    return 2.0 * TAKER_FEE_PER_SIDE * margin * leverage
+
+
 def check_funding_vs_fee_gate(
     funding_daily: float,
     price_slippage: float = 0.0,
     expected_hold_hours: Optional[float] = None,
 ) -> tuple[bool, float, float, str]:
     """
-    E5: Gerbang ekonomi Funding vs Fee sebelum open_position:
+    E5 + K4: gerbang ekonomi Funding vs Fee sebelum open_position.
+
       expected_funding = |funding_daily| * (expected_hold_hours / 24)
-      biaya = 2 * TAKER_FEE_PER_SIDE (fee round-trip) + price_slippage
-    Entry hanya lolos jika expected_funding >= biaya * 1.5.
+      biaya            = 2 * TAKER_FEE_PER_SIDE (fee round-trip) + price_slippage
+      breakeven_hours  = biaya / (|funding_daily| / 24)
+
+    Entry lolos HANYA bila DUA syarat terpenuhi:
+      1. expected_funding >= biaya * FUNDING_COVER_MULTIPLIER (1.5x)
+      2. breakeven_hours <= min(expected_hold_hours, FUNDING_BREAKEVEN_MAX_HOURS)
+
+    Syarat (2) menjawab kebutuhan "untung dalam 24 jam berjalan": funding yang butuh lebih dari
+    satu hari hanya untuk menutup biaya tidak boleh dijadikan posisi carry. Contoh nyata 27 Nov:
+    kandidat 0.23%/hari (BNB/NEAR/XRP) butuh 29.2 jam -> SKIP.
     Return (passed, expected_funding, cost, summary_note).
     """
     hold_h = EXPECTED_HOLD_HOURS if expected_hold_hours is None else float(expected_hold_hours)
-    exp_funding = abs(float(funding_daily or 0.0)) * (hold_h / 24.0)
-    cost = (2.0 * TAKER_FEE_PER_SIDE) + max(0.0, float(price_slippage or 0.0))
-    required = cost * 1.5
-    passed = exp_funding >= required
+    rate = abs(float(funding_daily or 0.0))
+    exp_funding = rate * (hold_h / 24.0)
+    cost = round_trip_cost_pct(price_slippage)
+    required = cost * FUNDING_COVER_MULTIPLIER
+    breakeven_h = funding_breakeven_hours(rate, price_slippage)
+    horizon_h = min(hold_h, FUNDING_BREAKEVEN_MAX_HOURS)
+    within_horizon = breakeven_h is not None and breakeven_h <= horizon_h
+    passed = exp_funding >= required and within_horizon
+    breakeven_lbl = "n/a" if breakeven_h is None else f"{breakeven_h:.1f}h"
     note = (
         f"hold={hold_h:.0f}h, exp_funding={exp_funding*100:.3f}%, "
-        f"cost={cost*100:.3f}%, req={required*100:.3f}%"
+        f"cost={cost*100:.3f}%, req={required*100:.3f}%, "
+        f"breakeven={breakeven_lbl} (maks {horizon_h:.0f}h)"
     )
     return passed, round(exp_funding, 6), round(cost, 6), note
 
@@ -2559,6 +2846,97 @@ def _extract_close_exit_price(res: Any, pos: Position) -> tuple[Optional[float],
     return None, "unavailable"
 
 
+def _parse_finite_float(raw: Any) -> Optional[float]:
+    """Konversi nilai numerik terhingga (boleh negatif) untuk realized PnL."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return val if math.isfinite(val) else None
+
+
+def _exit_price_from_realized_pnl(
+    record: dict, entry_price: float, side: str
+) -> Optional[float]:
+    """Turunkan harga keluar dari realized PnL bursa + ukuran kontrak (fill nyata).
+
+    Endpoint `list_positions(statuses=["closed"])` tidak mengembalikan harga keluar, TETAPI
+    mengembalikan `realized_pnl_quote` dan `value_base` yang berasal dari fill nyata. PnL linear
+    terhadap ukuran kontrak: pnl = (exit - entry) * size (long) -> exit = entry + pnl / size.
+    Harga ini adalah harga eksekusi, bukan `mark_at_detection` yang tertinggal sampai 10 menit.
+    """
+    if not isinstance(record, dict) or entry_price <= 0:
+        return None
+    size_base = _parse_positive_finite_float(record.get("value_base"))
+    if size_base is None:
+        return None
+    raw_pnl = record.get("realized_pnl_quote")
+    if raw_pnl is None:
+        raw_pnl = record.get("pnl_quote")
+    if raw_pnl is None:
+        raw_pnl = record.get("realized_pnl")
+    pnl = _parse_finite_float(raw_pnl)
+    if pnl is None:
+        return None
+    delta = pnl / size_base
+    candidate = entry_price + delta if str(side).lower() == "long" else entry_price - delta
+    return _parse_sane_exit_price(candidate, entry_price)
+
+
+def _recover_realized_exit_fill(client: "WaltClient", pos: Position) -> Optional[tuple[float, str]]:
+    """Cari record posisi tertutup lalu turunkan harga fill dari realized PnL (best-effort).
+
+    Tidak pernah melempar: kegagalan pemulihan hanya berarti exit price tetap memakai rantai
+    fallback yang sudah ada (dan tetap tercatat jujur sebagai estimasi).
+    """
+    try:
+        resp = client.list_positions(statuses=["closed"])
+    except Exception as exc:
+        log.debug(f"Recover fill {pos.base_asset}: list_positions gagal ({type(exc).__name__}): {exc}")
+        return None
+    records = resp.get("positions", []) if isinstance(resp, dict) else (resp or [])
+    if not isinstance(records, list) or not records:
+        return None
+
+    target_key = make_position_dedupe_key({
+        "position_id": pos.position_id,
+        "contract_id": pos.contract_id,
+        "entry_price": pos.entry_price,
+        "opened_at": pos.opened_at,
+    })
+    target_cid = str(pos.contract_id)
+    try:
+        target_entry = round(float(pos.entry_price or 0.0), 6)
+    except (TypeError, ValueError):
+        target_entry = 0.0
+
+    match: Optional[dict] = None
+    for rec in records:
+        if isinstance(rec, dict) and pos.position_id and make_position_dedupe_key(rec) == target_key:
+            match = rec
+            break
+    if match is None and target_entry > 0:
+        for rec in records:
+            if not isinstance(rec, dict) or str(rec.get("contract_id", "")) != target_cid:
+                continue
+            rec_entry = rec.get("avg_entry_price") or rec.get("entry_price") or 0.0
+            try:
+                if round(float(rec_entry), 6) == target_entry:
+                    match = rec
+                    break
+            except (TypeError, ValueError):
+                continue
+    if match is None:
+        return None
+
+    price = _exit_price_from_realized_pnl(match, float(pos.entry_price or 0.0), pos.side)
+    if price is None:
+        return None
+    return price, "exchange_realized_pnl"
+
+
 # Ronde 6: sumber yang berarti harga datang dari DATA LOKAL, bukan dari respons execute.
 CLOSE_FALLBACK_SOURCES = ("snapshot_estimate", "entry_fallback", "unavailable")
 CLOSE_SCHEMA_PROBED: set[str] = set()
@@ -2638,6 +3016,15 @@ def _execute_validated_close(
             "result": res,
         }
     final_exit_price, exit_price_source = _extract_close_exit_price(res, pos)
+    if exit_price_source in CLOSE_FALLBACK_SOURCES:
+        # K4: respons `execute` untuk close tidak memuat harga fill. Sebelum jatuh ke estimasi
+        # mark/snapshot, coba pulihkan harga eksekusi riil dari realized PnL posisi tertutup.
+        recovered = _recover_realized_exit_fill(client, pos)
+        if recovered is not None:
+            final_exit_price, exit_price_source = recovered
+            log.info(
+                f"✅ [CLOSE-FILL] {pos.base_asset}: harga fill riil dipulihkan dari realized PnL bursa"
+            )
     _probe_close_response_shape(res, exit_price_source, pos.base_asset)
     price_lbl = f"{final_exit_price:.4f}" if final_exit_price is not None else "None"
     log.debug(
@@ -2730,19 +3117,18 @@ def _parse_position_age_hours(opened_at: str, now_utc: datetime) -> Optional[flo
 def _funding_flip_exit_allowed(
     pos: Position, now_utc: Optional[datetime] = None
 ) -> tuple[bool, str]:
-    """K3-1: bolehkan exit `Funding Flip Sign` (Engine 1) untuk aset ini SEKARANG?
+    """K4: bolehkan exit `Funding Flip Sign` (Engine 1) untuk aset ini SEKARANG?
 
-    Alasan fisik: funding adalah aliran harian (0.1-1.0%/hari), sedangkan biaya round-trip taker +
-    slippage 0.44% dibayar SEKALI di depan. Menutup posisi pada menit ke-6 karena arah funding
-    berbalik berarti membayar biaya penuh tanpa pernah menerima satu pembayaran funding — persis
-    pola 21-24 Nov (median hold 0.95 jam, funding terealisasi $0.0169 dari 20 trade).
-
-    Aturan:
-    - Rugi harga sudah >= `FUNDING_FLIP_LOSS_OVERRIDE_FRACTION` dari jarak SL → IZINKAN (risiko
-      harga sudah lebih besar daripada sekadar biaya; menahan hanya menambah kerugian).
-    - Umur posisi tidak diketahui (`opened_at` kosong/rusak) → IZINKAN (perilaku lama; menutup
-      tetap lebih aman daripada menahan posisi tanpa dasar).
-    - Umur < `MIN_HOLD_BEFORE_FUNDING_FLIP_EXIT_H` dan rugi masih ringan → TAHAN.
+    Alasan fisik: funding adalah aliran harian, sedangkan biaya round-trip taker + slippage
+    dibayar SEKALI di depan. Exit flip hanya dibenarkan bila salah satu benar:
+    - Rugi harga sudah >= `FUNDING_FLIP_LOSS_OVERRIDE_FRACTION` dari jarak SL (risiko harga
+      sudah lebih besar daripada sekadar biaya).
+    - Funding yang SUDAH diterima posisi ini >= biaya round-trip posisi itu sendiri
+      (`funding_paid` vs 2 x fee x notional) — carry-nya sudah membayar dirinya sendiri.
+    - Umur posisi mencapai `FUNDING_FLIP_MAX_HOLD_HOURS` (24 jam): horizon maksimum. Setelah
+      24 jam tanpa biaya tertutup, menahan posisi hanya menambah kerugian.
+    - Umur posisi tidak diketahui (`opened_at` kosong/rusak) -> izinkan (perilaku lama).
+    Selain itu TAHAN: jangan membayar biaya penuh tanpa pernah menerima funding.
     """
     try:
         planned_sl = float(pos.planned_sl_pct) if pos.planned_sl_pct else float(DEFAULT_SL_PCT)
@@ -2754,15 +3140,29 @@ def _funding_flip_exit_allowed(
     if loss_frac >= FUNDING_FLIP_LOSS_OVERRIDE_FRACTION:
         return True, f"rugi harga {loss_frac*100:.0f}% jarak SL"
 
+    cost_quote = funding_round_trip_cost_quote(pos)
+    funding_paid = float(getattr(pos, "funding_paid", 0.0) or 0.0)
+    if cost_quote > 0 and funding_paid >= cost_quote:
+        return True, (
+            f"biaya round-trip sudah tertutup funding "
+            f"(${funding_paid:.4f} >= ${cost_quote:.4f})"
+        )
+
     age_h = _parse_position_age_hours(pos.opened_at, now_utc or datetime.now(timezone.utc))
     if age_h is None:
         return True, "umur posisi tidak diketahui"
-    if age_h >= MIN_HOLD_BEFORE_FUNDING_FLIP_EXIT_H:
-        return True, f"umur {age_h:.1f} jam"
+    if age_h >= FUNDING_FLIP_MAX_HOLD_HOURS:
+        return True, f"umur {age_h:.1f} jam >= horizon {FUNDING_FLIP_MAX_HOLD_HOURS:.0f} jam"
+    if age_h < MIN_HOLD_BEFORE_FUNDING_FLIP_EXIT_H:
+        return (
+            False,
+            f"umur {age_h:.1f} jam < {MIN_HOLD_BEFORE_FUNDING_FLIP_EXIT_H:.0f} jam dan funding "
+            f"${funding_paid:.4f} belum menutup biaya ${cost_quote:.4f}",
+        )
     return (
         False,
-        f"umur {age_h:.1f} jam < {MIN_HOLD_BEFORE_FUNDING_FLIP_EXIT_H:.0f} jam dan rugi masih "
-        f"{loss_frac*100:.0f}% jarak SL (biaya round-trip 0.44% belum tertutup)",
+        f"funding ${funding_paid:.4f} belum menutup biaya ${cost_quote:.4f} "
+        f"(umur {age_h:.1f} jam, batas {FUNDING_FLIP_MAX_HOLD_HOURS:.0f} jam)",
     )
 
 
@@ -4012,6 +4412,12 @@ def _detect_and_log_exchange_closes(
             exit_price: Optional[float] = _parse_positive_finite_price(raw_exit)
             exit_source = "exchange_closed_field" if exit_price is not None else ""
 
+            if exit_price is None and cp and entry_price > 0:
+                derived_exit = _exit_price_from_realized_pnl(cp, entry_price, side)
+                if derived_exit is not None:
+                    exit_price = derived_exit
+                    exit_source = "exchange_realized_pnl"
+
             # Endpoint list positions(statuses=["closed"]) tidak mengembalikan harga keluar (17 kunci).
             # Bila record closed ditemukan & updated_at masih segar (<= CLOSE_EXIT_PROXY_MAX_AGE_H),
             # ambil mark live saat deteksi via latest_rate sebagai proksi jujur.
@@ -4709,7 +5115,8 @@ def daily_scan(client: WaltClient, now_utc: Optional[datetime] = None) -> dict:
     except Exception as e:
         log.warning(f"Gagal mengambil closed funding bulan berjalan: {e}")
     total_funding = round(open_funding + closed_funding, 6)
-    progress_pct = (total_funding / MONTHLY_TARGET) * 100
+    target_info = compute_target_progress(total_funding, total_equity)
+    progress_pct = target_info["progress_nominal_pct"]
 
     return {
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -4719,6 +5126,7 @@ def daily_scan(client: WaltClient, now_utc: Optional[datetime] = None) -> dict:
         "funding_earned": total_funding,
         "target": MONTHLY_TARGET,
         "progress_pct": progress_pct,
+        "target_progress": target_info,
         "top_opportunities": [
             {
                 "contract_id": o.contract_id,
@@ -4783,6 +5191,18 @@ def format_summary_telegram(
     pct = summary["progress_pct"]
     lines.append(f"\n*💵 Income Tracker Bulan Ini*")
     lines.append(f"Progress: `${earned:.4f} / ${target:.0f}` ({pct:.1f}%)")
+    tp = summary.get("target_progress") or {}
+    if tp:
+        lines.append(
+            f"Target ekuitas `{tp['monthly_target_pct']*100:.1f}%/bulan`: "
+            f"`${tp['funding_earned']:.4f} / ${tp['target_by_equity']:.2f}` "
+            f"({tp['progress_equity_pct']:.2f}%)"
+        )
+        if tp.get("required_equity_for_nominal"):
+            lines.append(
+                f"Butuh ekuitas ~`${tp['required_equity_for_nominal']:.0f}` untuk $100/bulan "
+                f"pada funding `{tp['required_equity_funding_daily_pct']:.2f}%/hari`"
+            )
     status = "🟢 ON TRACK" if pct >= 50 else "🟡 BEHIND" if pct >= 20 else "🔴 JAUH"
     lines.append(f"Status: {status}")
 
@@ -6134,6 +6554,17 @@ def compute_closed_stats(
             "cenderung scalping arah harga, bukan funding carry."
         )
 
+    # K4: jendela 24 jam berjalan — apakah funding menutup biaya? Angka ini yang dipakai
+    # memutuskan strategi benar-benar "profit dalam 24 jam", bukan asumsi hold di gerbang E5.
+    rolling_24h = summarize_funding_window(trades, hours=24.0)
+    rolling_warning: Optional[str] = None
+    if rolling_24h["trades"] > 0 and rolling_24h["funding_covered_fees"] is False:
+        rolling_warning = (
+            f"⚠️ 24 jam terakhir: funding ${rolling_24h['funding_usd']:.4f} vs fee "
+            f"${rolling_24h['fee_usd']:.4f} (cover {rolling_24h['funding_cover_ratio']*100:.0f}% "
+            "dari biaya) — carry belum membayar dirinya sendiri."
+        )
+
     # Pembanding perubahan ekuitas dari PnL_Tracker
     equity_start: Optional[float] = None
     equity_latest: Optional[float] = None
@@ -6194,6 +6625,8 @@ def compute_closed_stats(
         "median_hold_hours": median_hold_hours,
         "expected_hold_hours": EXPECTED_HOLD_HOURS,
         "hold_time_warning": hold_time_warning,
+        "rolling_24h": rolling_24h,
+        "rolling_24h_warning": rolling_warning,
         "strategy_version": get_strategy_version_hash(),
         "breakdown_by_reason": reason_breakdown,
         # R6-1: kejujuran sumber data. "0 trade" dari sheet yang tidak terbaca bukan performa nol.
@@ -6240,6 +6673,15 @@ def compute_closed_stats(
         if median_hold_hours is not None
         else f"Median Hold Time: `N/A` (target: `{EXPECTED_HOLD_HOURS:.0f} jam`)"
     )
+    cover_lbl = (
+        "n/a" if rolling_24h["funding_cover_ratio"] is None
+        else f"{rolling_24h['funding_cover_ratio']*100:.0f}%"
+    )
+    rolling_line = (
+        f"24 Jam Terakhir: `{rolling_24h['trades']}` trade | funding "
+        f"`${rolling_24h['funding_usd']:.4f}` vs fee `${rolling_24h['fee_usd']:.4f}` "
+        f"(cover `{cover_lbl}`) | net `${rolling_24h['net_usd']:+.4f}`"
+    )
     msg_lines = [
         f"*📈 Walt Perps — Closed Positions Stats* (Ver: `{stats['strategy_version']}`)",
         (
@@ -6251,6 +6693,7 @@ def compute_closed_stats(
         f"Win Rate (tanpa UNKNOWN): *{win_rate_pct:.1f}%*",
         eq_line,
         hold_line,
+        rolling_line,
         f"Avg Win: `${avg_win_usd:+.4f}` (`{avg_win_pct:+.2f}%`)",
         f"Avg Loss: `${avg_loss_usd:+.4f}` (`{avg_loss_pct:+.2f}%`)",
         f"Gross Price PnL: `${gross_pnl_usd:+.4f}`",
@@ -6261,6 +6704,8 @@ def compute_closed_stats(
     ]
     if hold_time_warning:
         msg_lines.insert(5, hold_time_warning)
+    if rolling_warning:
+        msg_lines.insert(6 if hold_time_warning else 5, rolling_warning)
     for k, v in reason_breakdown.items():
         msg_lines.append(f"• {k}: {v}")
 
@@ -6751,6 +7196,8 @@ def main(command: str = "scan"):
         python walt_bot.py market_execute        # execute US stocks & commodities
         python walt_bot.py crypto_execute        # execute bluechip crypto (BTC, ETH, SOL)
         python walt_bot.py stats                 # closed positions performance stats (dengan ledger_source)
+        python walt_bot.py universe_audit        # audit whitelist vs funding terkuat (read-only)
+        python walt_bot.py universe_audit --snapshot logs/contracts.json   # offline, tanpa bursa
         python walt_bot.py reconcile_history     # dry-run: ukur & bandingkan riwayat closed bursa vs ledger
         python walt_bot.py reconcile_history --write   # simpan kandidat backfill ke ledger lokal (backup dulu)
         python walt_bot.py reconcile_history --write --mirror-sheet  # + mirror ke Google Sheet (TIDAK bisa dibatalkan)
@@ -6763,6 +7210,32 @@ def main(command: str = "scan"):
     if command == "stats":
         result = compute_closed_stats()
         _emit_cli_result(command, result)
+        return
+
+    if command in ("universe_audit", "universe-audit"):
+        # Read-only. Tanpa `--snapshot` ia memakai kredensial Walt (jalankan di CI agar rotasi
+        # refresh token tetap tersinkron). Dengan `--snapshot` ia tidak menyentuh bursa sama sekali.
+        argv = sys.argv[2:]
+        snapshot: Optional[str] = None
+        if "--snapshot" in argv:
+            snap_idx = argv.index("--snapshot")
+            if snap_idx + 1 >= len(argv):
+                print("Penggunaan: universe_audit [--snapshot path/to/contracts.json]")
+                return
+            snapshot = argv[snap_idx + 1]
+        top_n = 10
+        if "--top" in argv:
+            top_idx = argv.index("--top")
+            if top_idx + 1 < len(argv):
+                top_n = max(1, int(argv[top_idx + 1]))
+        if snapshot:
+            with open(snapshot, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+            contracts = payload.get("contracts", []) if isinstance(payload, dict) else payload
+        else:
+            scan_client = WaltClient()
+            contracts = scan_client.list_contracts().get("contracts", [])
+        print(json.dumps(audit_universe(contracts, top_n=top_n), indent=2, default=str))
         return
 
     client = WaltClient()
@@ -6857,7 +7330,9 @@ if __name__ == "__main__":
     # state yang nyata ada (paritas dengan `state_probe` di workflow) — bukan default "hangat".
     os.environ.setdefault(STATE_WARM_ENV, probe_local_state_warm())
     cmd = sys.argv[1] if len(sys.argv) > 1 else "scan"
-    _lock_holder = cli_account_lock_enter(cmd)
+    _offline_audit = cmd in ("universe_audit", "universe-audit") and "--snapshot" in sys.argv
+    # Mode offline: hanya membaca berkas JSON, tidak menyentuh bursa -> tidak perlu account lock.
+    _lock_holder = None if _offline_audit else cli_account_lock_enter(cmd)
     try:
         main(cmd)
     finally:

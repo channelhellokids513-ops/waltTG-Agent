@@ -45,6 +45,8 @@ def test_us_stock_hours_kill_switch_false(monkeypatch):
 
 def test_market_execute_skips_us_stocks_outside_hours_but_runs_commodities(monkeypatch):
     monkeypatch.delenv("US_STOCK_HOURS_ONLY", raising=False)
+    # K4: test ini menguji filter jam bursa, bukan leg SHORT -> SHORT Engine 1 diizinkan.
+    monkeypatch.setenv("ALLOW_ENGINE1_SHORT", "true")
     monkeypatch.setattr(walt_bot, "has_enough_job_time", lambda *a, **kw: True)
     monkeypatch.setattr(walt_bot, "_update_regime_state", lambda *a, **kw: ("GEAR_1_CONSERVATIVE_120M", 120, "ok"))
     monkeypatch.setattr(walt_bot, "check_daily_circuit_breaker", lambda *a, **kw: (False, "OK"))

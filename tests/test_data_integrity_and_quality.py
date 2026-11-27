@@ -239,7 +239,9 @@ def test_e1_half_below_floor_returns_zero_skip():
     assert margin == 0.0
 
 
-def test_e2_high_p5_catalyst_returns_skip():
+def test_e2_high_p5_catalyst_returns_skip(monkeypatch):
+    # K4: leg SHORT Engine 1 default nonaktif; test ini menguji gerbang P5, jadi SHORT diizinkan.
+    monkeypatch.setenv("ALLOW_ENGINE1_SHORT", "true")
     opp = SimpleNamespace(base_asset="NVDA", side="short", funding_daily=0.006)
     res = llm_research.Research(
         ticker="NVDA", days_to_earnings=20, news_sentiment="bearish",
@@ -255,6 +257,8 @@ def test_e2_high_p5_catalyst_returns_skip():
 
 def test_e3_stale_research_ignored_and_stock_skips(tmp_path, monkeypatch):
     monkeypatch.setenv("GOOGLE_SHEET_WEBHOOK_URL", "")
+    # K4: test ini menguji E3 (riset basi), bukan leg SHORT -> SHORT diizinkan agar pesan E3 terlihat.
+    monkeypatch.setenv("ALLOW_ENGINE1_SHORT", "true")
     csv_path = tmp_path / "scan_history.csv"
     now = datetime(2026, 11, 19, 12, 0, 0, tzinfo=timezone.utc)
     stale_ts = (now - timedelta(hours=10)).isoformat()

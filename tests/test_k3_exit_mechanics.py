@@ -4,7 +4,9 @@ Empat invarian yang dikunci di sini — semuanya berasal dari pengukuran 21-24 N
 (median hold 0.95 jam, payoff 0.50, expectancy -0.0353/trade, MON -8.8% margin dalam 6 menit):
 
 1. `Funding Flip Sign` (Engine 1) TIDAK boleh menutup posisi sebelum biaya round-trip
-   punya waktu tertutup, kecuali rugi harga sudah >= separuh jarak SL.
+   punya waktu tertutup, kecuali rugi harga sudah >= separuh jarak SL. K4 (27 Nov 2026)
+   memperketat ini: exit baru boleh setelah funding yang SUDAH diterima menutup biaya
+   round-trip posisi itu, atau setelah horizon 24 jam.
 2. Engine 2 (price_forecast) tetap keluar segera — thesis-nya bukan carry.
 3. TP/SL dihitung ulang dari harga FILL bila drift melewati ambang.
 4. Lock trailing tier-1 harus di atas biaya round-trip, dan plafon SL dinamis <= 2.5%.
@@ -80,13 +82,49 @@ def test_funding_flip_ditahan_sebelum_biaya_round_trip_tertutup(monkeypatch):
     assert not (res and res.get("action") == "CLOSE")
 
 
-def test_funding_flip_diizinkan_setelah_min_hold(monkeypatch):
+def test_funding_flip_ditahan_sampai_funding_menutup_biaya(monkeypatch):
+    """K4: umur >= 6 jam TIDAK lagi cukup. Yang menentukan adalah funding yang sudah diterima
+    vs biaya round-trip posisi itu (margin 2.5 x leverage 2 x 0.18% = $0.009)."""
     monkeypatch.setattr(walt_bot, "_record_position_close", lambda *a, **k: None)
     now = datetime(2026, 11, 24, 15, 0, tzinfo=timezone.utc)
     pos = _pos(
         opened_at=_opened_hours_ago(now, walt_bot.MIN_HOLD_BEFORE_FUNDING_FLIP_EXIT_H + 1.0),
         current_price=99.9,
         planned_sl_pct=0.035,
+        funding_paid=0.0,
+    )
+    client = _RiskClient()
+    res = walt_bot.evaluate_and_apply_position_risk(client, pos, 0.004, now_utc=now)
+    assert client.preview_close_calls == [], "biaya round-trip belum tertutup -> tahan"
+    assert not (res and res.get("action") == "CLOSE")
+
+
+def test_funding_flip_diizinkan_setelah_funding_menutup_biaya(monkeypatch):
+    """K4: begitu funding yang diterima >= biaya round-trip, exit flip dibenarkan."""
+    monkeypatch.setattr(walt_bot, "_record_position_close", lambda *a, **k: None)
+    now = datetime(2026, 11, 24, 15, 0, tzinfo=timezone.utc)
+    cost = walt_bot.funding_round_trip_cost_quote(_pos())
+    pos = _pos(
+        opened_at=_opened_hours_ago(now, walt_bot.MIN_HOLD_BEFORE_FUNDING_FLIP_EXIT_H + 1.0),
+        current_price=99.9,
+        planned_sl_pct=0.035,
+        funding_paid=cost,
+    )
+    client = _RiskClient()
+    res = walt_bot.evaluate_and_apply_position_risk(client, pos, 0.004, now_utc=now)
+    assert client.preview_close_calls == [1]
+    assert res is not None and res["action"] == "CLOSE"
+
+
+def test_funding_flip_diizinkan_setelah_horizon_24_jam(monkeypatch):
+    """K4: horizon maksimum 24 jam — setelah itu menahan hanya menambah kerugian."""
+    monkeypatch.setattr(walt_bot, "_record_position_close", lambda *a, **k: None)
+    now = datetime(2026, 11, 24, 15, 0, tzinfo=timezone.utc)
+    pos = _pos(
+        opened_at=_opened_hours_ago(now, walt_bot.FUNDING_FLIP_MAX_HOLD_HOURS + 1.0),
+        current_price=99.9,
+        planned_sl_pct=0.035,
+        funding_paid=0.0,
     )
     client = _RiskClient()
     res = walt_bot.evaluate_and_apply_position_risk(client, pos, 0.004, now_utc=now)

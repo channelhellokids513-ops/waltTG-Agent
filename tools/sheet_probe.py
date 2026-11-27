@@ -32,7 +32,7 @@ LAST_HTTP_STATUS: dict[str, str] = {}
 IDX_ENTRY, IDX_EXIT, IDX_PNL, IDX_REASON, IDX_PID, IDX_CLOSED_AT, IDX_STRATEGY, IDX_OPENED_AT, IDX_SRC = (
     4, 5, 7, 9, 10, 11, 12, 13, 14,
 )
-MEASURED_SOURCES = ("exchange_fill", "response_position", "mark_at_detection", "mark_price_proxy",
+MEASURED_SOURCES = ("exchange_fill", "response_position", "exchange_realized_pnl", "mark_at_detection", "mark_price_proxy",
                     "exchange_history_no_exit", "snapshot_estimate")
 
 

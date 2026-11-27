@@ -110,6 +110,19 @@ Mengatasi limit bursa Walt pada aset berharga tinggi (seperti `NVDA` atau `MSTR`
 - **Portfolio Risk Ceiling:** Margin tiap posisi dibatasi maksimal 15% dari total ekuitas dengan floor aman $2.50 USDC dan cash buffer 15%.
 - **Fleksibel:** Jika pemilik akun melakukan penarikan dana (*withdraw*), ukuran margin dan slot otomatis menyesuaikan mengecil ke batas aman tanpa perlu restart atau konfigurasi manual.
 
+### 8. Ekonomi 24 Jam & Target Berbasis Ekuitas (`K4`, 27 November 2026)
+
+Evaluasi 18–26 Nov (28 trade terukur) menemukan bahwa gerbang E5 membenarkan biaya dengan asumsi hold **24 jam**, sementara exit menutup posisi pada median **2,9 jam** → funding terealisasi `$0.0217` vs fee `$0.2616` (8,3%), net `-$1.0092`, PF `0,24`. Empat aturan entry/exit menyelaraskan semuanya pada satu horizon **24 jam**; tiga catatan pengukuran menyertainya.
+
+- **Break-even gate:** entry hanya lolos bila `breakeven_hours = (2 × 0.09% + slippage) / (|funding_harian| / 24) <= 24` **dan** `expected_funding >= 1,5 ×` biaya. Kandidat `0,23%/hari` butuh `29,2` jam → **SKIP**; `0,50%/hari` butuh `13,4` jam → lolos.
+- **Exit funding-flip yang membayar dirinya sendiri:** posisi ditahan sampai `funding_paid >=` biaya round-trip-nya, dengan batas keras `24` jam (sebelumnya hanya patokan `6` jam yang buta terhadap besaran funding).
+- **Zero-tolerance biaya inap berambang:** hanya menutup bila beban biaya inap `>= 0,28%/hari`; di bawah itu menutup posisi justru lebih mahal daripada biayanya (kasus 26 Nov: 4 posisi ditutup demi `0,077%/hari`).
+- **Leg SHORT Engine 1 nonaktif** (`ALLOW_ENGINE1_SHORT=false`): 16 SHORT hanya menang `2×` dengan net `-$0.879` = 87% kerugian. Engine 2 tidak terpengaruh.
+- **Target jujur:** `MONTHLY_TARGET_PCT = 5%/bulan` dilaporkan berdampingan dengan target `$100/bulan`, plus `required_equity_for_nominal_target()` (pada funding `0,5%/hari` butuh ekuitas **~$392** untuk `$100/bulan`).
+- **Pengukuran exit:** `_recover_realized_exit_fill()` menurunkan harga eksekusi dari `realized_pnl_quote / value_base` posisi tertutup (`exit_price_source = exchange_realized_pnl`) alih-alih `mark_at_detection`.
+- **Jendela 24 jam berjalan:** laporan `stats` menampilkan `rolling_24h` (funding vs fee, rasio cover, net) dan memberi peringatan bila funding belum menutup biaya dalam 24 jam terakhir.
+- **Audit universe:** `python walt_bot.py universe_audit` (read-only) membandingkan whitelist dengan kontrak funding terkuat dan menandai drift likuiditas.
+
 ---
 
 ## ⏰ Jadwal Eksekusi Sistem
@@ -243,7 +256,7 @@ Langkah pemeliharaan aman:
 
 ### Gerbang Kualitas Entry & Alur Sinkronisasi Strategi (Telegram ↔ GitHub Actions)
 
-- **Filter Kualitas Entry (`E1`–`E5`):** `HALF` di bawah floor `$2.50` di-**SKIP**, `P5_risk_catalysts >= max_p5_risk` (`0.70`) di-**SKIP**, riset lebih tua dari `max_research_age_hours` (`6` jam) diabaikan, batas frekuensi **2 entry/aset/24 jam** & **8 entry/24 jam** berlaku untuk `HALF` (sementara verdict **`'GO'` otomatis melewati batas frekuensi 24 jam tersebut**), **circuit breaker harian** (`-5%` ekuitas dari awal hari UTC), cooldown re-entry 3 jam, batas slot dinamis, buffer kas 15%, serta gerbang ekonomi `expected_funding >= (2 × 0.0009 + slippage) × 1.5` (`expected_hold_hours = 24`).
+- **Filter Kualitas Entry (`E1`–`E5` + `K4`):** `HALF` di bawah floor `$2.50` di-**SKIP**, `P5_risk_catalysts >= max_p5_risk` (`0.70`) di-**SKIP**, riset lebih tua dari `max_research_age_hours` (`6` jam) diabaikan, batas frekuensi **2 entry/aset/24 jam** & **8 entry/24 jam** berlaku untuk `HALF` (sementara verdict **`'GO'` otomatis melewati batas frekuensi 24 jam tersebut**), **circuit breaker harian** (`-5%` ekuitas dari awal hari UTC), cooldown re-entry 3 jam, batas slot dinamis, buffer kas 15%, gerbang ekonomi `expected_funding >= (2 × 0.0009 + slippage) × 1.5` (`expected_hold_hours = 24`) **plus** `breakeven_hours <= 24` jam, serta leg `SHORT` Engine 1 nonaktif secara default (`ALLOW_ENGINE1_SHORT=false`).
 - Perubahan strategi lewat Bot Telegram (`/set_strategy` / `/reset_strategy`) divalidasi terhadap batas aman `STRATEGY_PARAM_SPECS`, disimpan lokal di `logs/strategy_config.json`, dan langsung disinkronkan via `GH_PAT` ke **GitHub Repository Variable `STRATEGY_CONFIG_JSON`**.
 - Setiap workflow GitHub Actions meneruskan `STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}` ke `walt_bot.py`. Jika parsing gagal atau ada nilai di luar batas aman, bot mencatat *warning* dan *fallback* otomatis ke `DEFAULT_STRATEGY_CONFIG`.
 - Profil pribadi End User (`logs/user_strategies.json`) dan data auth (`logs/telegram_auth.json`) **tidak pernah** disinkronkan ke variable atau sheet publik.
