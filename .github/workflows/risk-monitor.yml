@@ -90,6 +90,8 @@ jobs:
           JOB_TIMEOUT_MIN: "20"
           LOG_REDACT: "true"
           STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}
+          # K4 (2026-11-27): leg SHORT Engine 1 default NONAKTIF (16 SHORT, 2 menang, net -$0.879).
+          ALLOW_ENGINE1_SHORT: ${{ vars.ALLOW_ENGINE1_SHORT || 'false' }}
           US_STOCK_HOURS_ONLY: ${{ vars.US_STOCK_HOURS_ONLY }}
           OFF_HOURS_HOLD_POLICY: ${{ vars.OFF_HOURS_HOLD_POLICY || 'hybrid' }}
           WALT_STATE_WARM: ${{ steps.state_probe.outputs.warm }}

@@ -157,6 +157,8 @@ def test_meta_aggregator_rule_based_aligns_qwen_and_glm():
 
 
 def test_gear_four_tiers_and_gear3_lifts_research_caps(monkeypatch, tmp_path):
+    # K4: fixture peluang di sini SHORT (funding positif); yang diuji adalah gear, bukan leg SHORT.
+    monkeypatch.setenv("ALLOW_ENGINE1_SHORT", "true")
     # Uji transisi 4 tingkatan Gear berbasis jumlah peluang GO
     def _opp(i: int, asset: str, funding: float = 0.006):
         return walt_bot.Opportunity(

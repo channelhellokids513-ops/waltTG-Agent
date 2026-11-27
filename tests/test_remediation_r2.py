@@ -80,6 +80,8 @@ def test_p0_2_failed_close_execute_does_not_log_close_or_set_cooldown(monkeypatc
 
 
 def test_p0_1_time_guard_skips_candidates_with_partial_timeout(monkeypatch, tmp_path):
+    # K4: kandidat fixture XAU adalah SHORT; test ini menguji time guard, bukan leg SHORT.
+    monkeypatch.setenv("ALLOW_ENGINE1_SHORT", "true")
     monkeypatch.setattr(walt_bot, "has_enough_job_time", lambda *a, **kw: False)
     monkeypatch.setattr(walt_bot, "get_job_remaining_minutes", lambda *a, **kw: 2.5)
     open_calls = []
@@ -165,6 +167,8 @@ def test_p0_1_open_position_always_attempts_autoclose_after_order_filled(monkeyp
 
 
 def test_p1_1_single_margin_resolution_per_order_and_over_buffer_flag(monkeypatch):
+    # K4: kandidat fixture XAU adalah SHORT; test ini menguji resolusi margin, bukan leg SHORT.
+    monkeypatch.setenv("ALLOW_ENGINE1_SHORT", "true")
     monkeypatch.setattr(walt_bot, "has_enough_job_time", lambda *a, **kw: True)
     monkeypatch.setattr(walt_bot, "_update_regime_state", lambda *a, **kw: ("GEAR_1_CONSERVATIVE_120M", 120, "ok"))
     monkeypatch.setattr(walt_bot, "check_daily_circuit_breaker", lambda *a, **kw: (False, "OK"))

@@ -84,6 +84,8 @@ jobs:
           LOG_REDACT: "true"
           STRATEGY_CONFIG_JSON: ${{ vars.STRATEGY_CONFIG_JSON }}
           E5_SLIPPAGE_BASIS: ${{ vars.E5_SLIPPAGE_BASIS }}
+          # K4 (2026-11-27): leg SHORT Engine 1 default NONAKTIF (16 SHORT, 2 menang, net -$0.879).
+          ALLOW_ENGINE1_SHORT: ${{ vars.ALLOW_ENGINE1_SHORT || 'false' }}
           US_STOCK_HOURS_ONLY: ${{ vars.US_STOCK_HOURS_ONLY }}
           CRYPTO_FORECAST_ENGINE: ${{ vars.CRYPTO_FORECAST_ENGINE || 'on' }}
           CRYPTO_FORECAST_UNIVERSE: ${{ vars.CRYPTO_FORECAST_UNIVERSE || 'all' }}

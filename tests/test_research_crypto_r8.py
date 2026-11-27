@@ -28,13 +28,16 @@ def res(sent="bearish", score=-0.5, consensus="STRONG", level="STRONG", vendor="
     )
 
 
-def test_crypto_tanpa_riset_tetap_go_status_quo():
+def test_crypto_tanpa_riset_tetap_go_status_quo(monkeypatch):
+    # K4: fixture `opp()` default SHORT; test ini menguji peran riset, bukan leg SHORT.
+    monkeypatch.setenv("ALLOW_ENGINE1_SHORT", "true")
     verdict, reason, mult = walt_bot.decide_go_nogo(opp(), None)
     assert verdict == "GO" and mult == 1.0
     assert "status quo" in reason, "alasan harus bilang kenapa riset tidak memblokir"
 
 
-def test_crypto_boleh_diveto_ketika_berita_berlawanan_arah():
+def test_crypto_boleh_diveto_ketika_berita_berlawanan_arah(monkeypatch):
+    monkeypatch.setenv("ALLOW_ENGINE1_SHORT", "true")
     # side short + berita bullish = bertentangan
     verdict, reason, mult = walt_bot.decide_go_nogo(opp(side="short"), res(sent="bullish", score=0.6))
     assert verdict == "SKIP" and mult == 0.0
@@ -46,7 +49,8 @@ def test_crypto_katalis_risiko_tinggi_diveto():
     assert verdict == "SKIP" and "P5" in str(mult) or verdict == "SKIP"
 
 
-def test_crypto_konsensus_split_diturunkan_bukan_dibatalkan():
+def test_crypto_konsensus_split_diturunkan_bukan_dibatalkan(monkeypatch):
+    monkeypatch.setenv("ALLOW_ENGINE1_SHORT", "true")
     verdict, reason, mult = walt_bot.decide_go_nogo(
         opp(), res(consensus="CONFLICT", level="SPLIT", vendor="split",
                    qwen="bullish", gemini="bearish"))
@@ -54,7 +58,8 @@ def test_crypto_konsensus_split_diturunkan_bukan_dibatalkan():
     assert "SPLIT" in reason
 
 
-def test_crypto_searah_dengan_riset_go_ukuran_penuh():
+def test_crypto_searah_dengan_riset_go_ukuran_penuh(monkeypatch):
+    monkeypatch.setenv("ALLOW_ENGINE1_SHORT", "true")
     verdict, reason, mult = walt_bot.decide_go_nogo(opp(side="short"), res(sent="bearish"))
     assert verdict == "GO" and mult == 1.0
     assert "tidak bertentangan" in reason

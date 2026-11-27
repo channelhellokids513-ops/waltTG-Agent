@@ -178,7 +178,8 @@ Keempat voter menilai **7 Parameter Standar Validasi (P1-P7)** yang sama secara 
 - **HALF di Bawah Floor (`E1`):** Jika verdict `HALF` menghasilkan margin `< $2.50`, bot otomatis **SKIP** (`HALF di bawah floor exchange`), tidak lagi dinaikkan paksa ke `$2.50`.
 - **Batas Frekuensi 24 Jam (`E4`):** Maksimal **2 entry/aset/24 jam** (`max_entries_per_asset_24h`) dan **8 entry total/24 jam** (`max_entries_per_day`) untuk verdict `HALF` (dilacak di `logs/market_regime.json`), sedangkan **verdict `'GO'` otomatis melewati batas frekuensi 24 jam ini**.
 - **Circuit Breaker Harian UTC (`E4`):** Jika ekuitas turun $\ge 5\%$ (`daily_loss_limit_pct`) dari ekuitas awal hari UTC, seluruh entry baru dihentikan hingga `00:00 UTC` berikutnya disertai alert Telegram (risk monitor tetap berjalan normal).
-- **Gerbang Ekonomi Funding vs Fee (`E5`):** Entry hanya lolos jika `expected_funding = |funding_daily| × (expected_hold_hours / 24)` memenuhi `expected_funding >= (2 × 0.0009 + price_slippage) × 1.5` (`expected_hold_hours` default `24` jam). Laporan `stats` juga memantau *median hold time* dan memberi peringatan jika jauh di bawah target *carry*.
+- **Gerbang Ekonomi Funding vs Fee (`E5 + K4`):** Entry hanya lolos jika DUA syarat terpenuhi: (1) `expected_funding = |funding_daily| × (expected_hold_hours / 24) >= (2 × 0.0009 + price_slippage) × 1.5` (`expected_hold_hours` default `24` jam), dan (2) `breakeven_hours = (2 × 0.0009 + price_slippage) / (|funding_daily| / 24) <= 24` jam. Syarat kedua menjawab kebutuhan **untung dalam 24 jam berjalan**: funding `0.23%/hari` (kandidat 27 Nov: BNB/NEAR/XRP) butuh `29,2` jam untuk sekadar menutup biaya → **SKIP**. Laporan `stats` juga memantau *median hold time* dan memberi peringatan jika jauh di bawah target *carry*.
+- **Leg SHORT Engine 1 Nonaktif (`K4`):** Verdict `SKIP` untuk setiap `SHORT` di jalur funding carry (bukan Engine 2). Bukti 18–26 Nov: 16 SHORT hanya menang 2× (12,5%) dengan net `-$0.879` = 87% dari seluruh kerugian, sementara 12 LONG net `-$0.130`. Hidupkan kembali hanya lewat env/GitHub Variable `ALLOW_ENGINE1_SHORT=true`.
 
 *Aturan Alignment:*
 - `SHORT` + sentimen `bearish` = **Confirm** (berita bearish mendukung posisi Short).
@@ -232,7 +233,7 @@ Manajemen risiko berjalan otomatis secara adaptif (dinamis 5–10 menit dengan *
    - *Windfall Rule:* Jika $2.5\times$ funding harian berada di rentang $\text{SL} \le \text{windfall} < \text{TP}$, TP dimajukan ke level tersebut.
    - *Guard Sisi Salah & Migrasi:* Memvalidasi level SL/TP terhadap `current_price` sebelum mengirim `auto_close`; posisi ATR dinamis Engine 1 disimpan ke `logs/market_regime.json` (`planned_sl_pct`) agar `risk-monitor` mempertahankan ruang SL dinamisnya.
 2. **Lapis 2 (Dinamika Funding Rate dengan Hysteresis 0.1%/hari & Buffer +0.50%):**  
-   - **Hysteresis (`FUNDING_FLIP_CLOSE_THRESHOLD = 0.001`):** Jika arah funding berbalik (*funding flip sign*) DAN `abs(funding_daily) >= 0.1%/hari`, posisi Engine 1 **hanya ditutup bila** umur posisi `>= 6 jam` (`MIN_HOLD_BEFORE_FUNDING_FLIP_EXIT_H`) ATAU rugi harga sudah `>= 50%` jarak SL (`FUNDING_FLIP_LOSS_OVERRIDE_FRACTION`). Alasan: biaya round-trip `0.44%` dibayar di depan, sedangkan funding adalah aliran harian — menutup pada menit ke-6 hanya membayar biaya tanpa pernah menerima funding. Engine 2 (`price_forecast`) tetap keluar seketika karena thesis-nya bukan carry.
+   - **Hysteresis (`FUNDING_FLIP_CLOSE_THRESHOLD = 0.001`):** Jika arah funding berbalik (*funding flip sign*) DAN `abs(funding_daily) >= 0.1%/hari`, posisi Engine 1 **hanya ditutup bila** (a) rugi harga sudah `>= 50%` jarak SL (`FUNDING_FLIP_LOSS_OVERRIDE_FRACTION`), (b) funding yang **sudah diterima** posisi itu `>=` biaya round-trip-nya sendiri (`funding_paid >= 2 × 0.09% × notional`), atau (c) umur posisi mencapai `FUNDING_FLIP_MAX_HOLD_HOURS = 24` jam. Di luar ketiganya posisi **ditahan**. Alasan: biaya round-trip `0.28%` dibayar di depan, sedangkan funding adalah aliran harian — menutup pada menit ke-6 hanya membayar biaya tanpa pernah menerima funding (pola 21–24 Nov: median hold 0,95 jam, funding terealisasi `$0.0217` vs fee `$0.2616`). Engine 2 (`price_forecast`) tetap keluar seketika karena thesis-nya bukan carry.
    - Jika funding berbalik arah tetapi masih `< 0.1%/hari` atau meluruh `< 0.1%/hari`, stop loss hanya digeser ke harga entry (*breakeven*) bila profit harga sudah mencapai **`>= +0.50%` (`L2_BREAKEVEN_MIN_PROFIT_PCT`)** agar tidak tersapu *wick* tipis di dekat entry.
 3. **Lapis 3 (Volatilitas & Momentum Harga — Deprecated):**  
    - *Deprecated*: Digantikan oleh *Dynamic ATR SL/TP* (`DYNAMIC_SL_MODE=atr`) + 6h Cooldown.
@@ -247,7 +248,7 @@ Manajemen risiko berjalan otomatis secara adaptif (dinamis 5–10 menit dengan *
 Di Walt Perps, biaya atau pendapatan inap berasal dari `funding_rate_hourly` yang berjalan 24/7. Karena durasi bursa AS hanya **7,5 jam/hari** dan biaya *round-trip* tutup-lalu-buka mencapai **`0.28%–0.45%` notional** (`2 × 0.09%` taker + slippage min `0.10%`), menutup paksa setiap posisi setiap malam akan menimbulkan *fee bleed*. Sebaliknya, menahan posisi yang membayar biaya inap atau lemah menjelang libur akhir pekan berisiko tergerus carry negatif dan *opening gap*. Karena itu (`OFF_HOURS_HOLD_POLICY=hybrid`), berlaku aturan berikut pada `risk-monitor`:
 
 - **Cakupan Aset:** **Saham AS (`ALLOWED_STOCKS`)** pada *overnight* (Sen–Kam `21:00–13:30 UTC`) & *weekend* (Jum `21:00`–Sen `13:30 UTC`), serta **Komoditas (`XAU`, `XAG`, `BRENTOIL`)** khusus **akhir pekan** (Jum `21:00`–Min `22:00 UTC`). **Crypto Tier-1 tetap berjalan 24/7.**
-- **Zero-Tolerance Biaya Inap:** Begitu *funding* berubah menjadi beban biaya inap (`favorable_funding < 0%`, berapa pun nilainya) pada sesi *pre-close* maupun saat pasar tutup, posisi ditutup seketika tanpa menunggu ambang hysteresis `0.10%/hari`.
+- **Zero-Tolerance Biaya Inap (ambang `K4`):** *Funding* yang berubah menjadi beban biaya inap pada sesi *pre-close* maupun saat pasar tutup menutup posisi seketika **hanya bila bebannya `>= 0.28%/hari`** (`OFF_HOURS_MIN_ADVERSE_FUNDING_DAILY` = biaya round-trip `0.18%` fee + `0.10%` slippage dalam 24 jam). Di bawah ambang itu posisi ditahan: menutup posisi demi biaya inap `0.077%/hari` (kejadian 26 Nov, 4 posisi) butuh ~87 jam hanya untuk impas terhadap fee.
 - **Early Profit Lock (`>= +0.70%`):** Pada seluruh sesi *pre-close* & tutup pasar, jika profit harga mencapai `+0.70%` (ruang napas `0.45%`), SL otomatis dikunci lebih dini ke **`Entry +/- 0.25%`** (cukup menutup fee `0.18%` + buffer).
 - **Pre-Close Overnight (`20:35–21:00 UTC`, Sen–Kam, Saham AS):** Tetap ditahan jika *carry* searah `>= +0.20%/hari` atau posisi sudah terkunci profit (`SL >= Entry + 0.25%`); jika *carry* lemah `< +0.20%/hari` dan belum terkunci profit, posisi ditutup sebelum penutupan pasar.
 - **Pre-Close Weekend (`20:35–21:00 UTC`, Jum, Saham AS & Komoditas):** Posisi hanya diizinkan menginap melewati libur akhir pekan bila **sudah terkunci profit** ATAU *carry* searah kuat **`>= +0.50%/hari`** dengan floating PnL masih aman (`>= -0.50%`). Selain itu posisi ditutup aman menjelang akhir pekan.
@@ -306,7 +307,31 @@ Sebelum atau saat menjalankan Engine 2 secara penuh di akun live (`DRY_RUN=false
 
 ---
 
-## 7. Arsitektur Deployment & Jadwal Otomasi GitHub Actions
+### 6.5 Ekonomi 24 Jam (`K4`, 27 November 2026)
+
+Evaluasi 18–26 Nov (28 trade terukur) menunjukkan **thesis dan eksekusi tidak lagi berbicara tentang hal yang sama**: gerbang E5 membenarkan biaya dengan asumsi hold 24 jam, sementara exit menutup posisi pada median **2,9 jam**. Akibatnya funding yang terealisasi `$0.0217` sementara fee `$0.2616` (8,3%), net `-$1.0092`, PF 0,24, dan progres target 0,03%. Lima aturan berikut menyelaraskan semuanya pada satu horizon: **24 jam**.
+
+| Aturan | Nilai | Konsekuensi operasional |
+|---|---|---|
+| `FUNDING_COVER_MULTIPLIER` | `1.5` | Expected funding harus `>= 1,5 ×` biaya round-trip |
+| `FUNDING_BREAKEVEN_MAX_HOURS` | `24` | `breakeven_hours = biaya / (funding_harian/24)` harus `<= 24` |
+| `FUNDING_FLIP_MAX_HOLD_HOURS` | `24` | Exit funding-flip menunggu biaya tertutup, maksimum 24 jam |
+| `OFF_HOURS_MIN_ADVERSE_FUNDING_DAILY` | `0.0028` | Zero-tolerance biaya inap hanya bila `>= 0,28%/hari` |
+| `ALLOW_ENGINE1_SHORT` | `false` | Leg SHORT Engine 1 nonaktif (87% kerugian berasal dari sini) |
+
+**Aritmetika yang mendasari.** Biaya round-trip `0,18%` notional (fee 2 × 0,09%) + slippage terukur `0,10%` = `0,28%`. Pada funding `0,5%/hari` (`0,0208%/jam`), biaya itu baru tertutup setelah **8,6 jam**. Artinya:
+
+- Funding `0,23%/hari` → break-even `29,2 jam` → **tidak boleh entry** (kandidat 27 Nov: BNB/NEAR/XRP).
+- Funding `0,50%/hari` → break-even `13,4 jam` → lolos, tetapi posisi wajib ditahan sampai biayanya tertutup.
+- Funding `1,73%/hari` (COIN, 27 Nov) → break-even `3,9 jam`.
+
+**Pengukuran exit.** Respons `execute` untuk close tidak memuat harga fill (selalu string), sehingga 28/28 trade sebelumnya tercatat sebagai `mark_at_detection`/`snapshot_estimate`. `_recover_realized_exit_fill()` kini membaca posisi tertutup dari bursa dan menurunkan harga eksekusi dari `realized_pnl_quote / value_base` — sumber baru `exchange_realized_pnl`, bukan estimasi mark.
+
+**Jendela 24 jam berjalan.** `summarize_funding_window()` melaporkan funding vs fee pada 24 jam terakhir di laporan `stats` (kolom `rolling_24h`, plus peringatan bila funding belum menutup biaya) — jadi "untung dalam 24 jam" bisa diperiksa dengan angka, bukan diasumsikan.
+
+**Audit universe (read-only).** `python walt_bot.py universe_audit [--snapshot file.json]` (atau `tools/universe_audit.py`) membandingkan whitelist dengan kontrak funding terkuat, dan menandai aset whitelist yang volumenya sudah turun di bawah floor `$1 juta` (mis. MON `$526k` pada 27 Nov).
+
+---
 
 Sistem beroperasi 100% secara otonom di cloud GitHub Actions runners dengan nol biaya server:
 
@@ -388,8 +413,9 @@ Sistem beroperasi dengan arsitektur hibrida: cron internal GitHub Actions diduku
 
 ### 8.1 Target Finansial Owner
 - **Target Bulanan:** **$100.00 USDC / bulan** dari pendapatan funding rate.
+- **Target Berbasis Ekuitas (`K4`):** **5%/bulan** (`MONTHLY_TARGET_PCT`) dilaporkan berdampingan dengan target nominal, karena $100/bulan **tidak mungkin** pada ekuitas mikro: dengan 85% deploy, leverage 2×, dan funding 0,5%/hari, plafon pendapatan funding hanya beberapa dolar per bulan. `required_equity_for_nominal_target()` mencetak ekuitas yang dibutuhkan — pada funding 0,5%/hari, **~$392** untuk $100/bulan.
 - **Estimasi Modal Minimum:** $300 – $500 USDC dengan rata-rata *funding yield* 0.6%/hari (kombinasi 3–4 posisi).
-- **Struktur Biaya Transaksi:** Fee taker Walt sebesar 0.09% per sisi (ditutupi oleh akumulasi funding dalam waktu ~3–5 jam pertama).
+- **Struktur Biaya Transaksi:** Fee taker Walt sebesar 0.09% per sisi (round-trip `0,18%` notional). Pada funding `0,5%/hari`, titik impas fee saja adalah **8,6 jam** — karena itu entry kini mensyaratkan `breakeven_hours <= 24`.
 
 ### 8.2 Tahapan Pertumbuhan (Scaling Roadmap)
 

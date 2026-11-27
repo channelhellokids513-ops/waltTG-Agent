@@ -1,6 +1,6 @@
 """Unit tests untuk Kebijakan Menahan Posisi Saat Pasar Tutup (Hybrid Cost-Aware Opsi B)."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -33,6 +33,8 @@ def _make_pos(
     current: float = 100.0,
     tp: float | None = 102.5,
     sl: float | None = 98.5,
+    funding_paid: float = 0.02,
+    opened_at: str = "",
 ) -> Position:
     return Position(
         contract_id=42,
@@ -44,9 +46,10 @@ def _make_pos(
         current_price=current,
         tp=tp,
         sl=sl,
-        funding_paid=0.02,
+        funding_paid=funding_paid,
         liquidation_price=50.0 if side == "long" else 150.0,
         position_id=f"{asset}_{side}_42",
+        opened_at=opened_at,
     )
 
 
@@ -104,27 +107,60 @@ def test_classify_asset_market_session_boundaries(asset, dt_utc, expected_sessio
     ],
 )
 def test_biaya_inap_zero_tolerance_closes_stock_long_and_short(monkeypatch, dt_utc):
+    """Zero-tolerance (K4) hanya menyala bila biaya inap >= biaya menutup posisi dalam 24 jam
+    (`OFF_HOURS_MIN_ADVERSE_FUNDING_DAILY` = 0.28%/hari). Di atas ambang: tutup. Di bawah: tahan."""
     monkeypatch.delenv("OFF_HOURS_HOLD_POLICY", raising=False)
     monkeypatch.setattr(walt_bot, "_record_position_close", lambda *a, **kw: None)
     monkeypatch.setattr(walt_bot, "_set_asset_cooldown", lambda *a, **kw: None)
 
-    # LONG dengan funding_daily = +0.0004 (membayar -0.04%/hari, di bawah threshold L2 0.10%)
+    # Posisi berumur 1 jam & funding belum menutup biaya -> L2 (K4) menahan, sehingga
+    # keputusan yang diuji di sini benar-benar datang dari kebijakan off-hours.
+    opened_1h = (dt_utc - timedelta(hours=1)).isoformat()
+
+    # LONG membayar 0.60%/hari (> ambang 0.28%) -> CLOSE
     c_long = _make_client()
-    p_long = _make_pos(asset="NVDA", side="long", entry=100.0, current=100.1, sl=98.5)
-    res_long = evaluate_and_apply_position_risk(c_long, p_long, current_funding_daily=0.0004, now_utc=dt_utc)
+    p_long = _make_pos(asset="NVDA", side="long", entry=100.0, current=100.1, sl=98.5,
+                       funding_paid=0.0, opened_at=opened_1h)
+    res_long = evaluate_and_apply_position_risk(c_long, p_long, current_funding_daily=0.006, now_utc=dt_utc)
     assert res_long is not None
     assert res_long["action"] == "CLOSE"
     assert "Biaya Inap" in res_long["detail"]
     c_long.preview_close.assert_called_once()
 
-    # SHORT dengan funding_daily = -0.0004 (membayar -0.04%/hari)
+    # SHORT membayar 0.60%/hari -> CLOSE
     c_short = _make_client()
-    p_short = _make_pos(asset="NVDA", side="short", entry=100.0, current=99.9, sl=101.5)
-    res_short = evaluate_and_apply_position_risk(c_short, p_short, current_funding_daily=-0.0004, now_utc=dt_utc)
+    p_short = _make_pos(asset="NVDA", side="short", entry=100.0, current=99.9, sl=101.5,
+                        funding_paid=0.0, opened_at=opened_1h)
+    res_short = evaluate_and_apply_position_risk(c_short, p_short, current_funding_daily=-0.006, now_utc=dt_utc)
     assert res_short is not None
     assert res_short["action"] == "CLOSE"
     assert "Biaya Inap" in res_short["detail"]
     c_short.preview_close.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "funding_daily",
+    [0.0004, -0.0004, 0.0020, -0.0020],
+)
+def test_biaya_inap_di_bawah_ambang_tidak_menutup_posisi(monkeypatch, funding_daily):
+    """K4: 26 Nov ada posisi ditutup demi 0.077%/hari padahal fee 0.18% butuh ~87 jam untuk impas.
+    Di bawah ambang 0.28%/hari, posisi TIDAK boleh ditutup hanya karena biaya inap."""
+    monkeypatch.delenv("OFF_HOURS_HOLD_POLICY", raising=False)
+    monkeypatch.setattr(walt_bot, "_record_position_close", lambda *a, **kw: None)
+    monkeypatch.setattr(walt_bot, "_set_asset_cooldown", lambda *a, **kw: None)
+
+    closed_overnight = datetime(2026, 11, 24, 2, 0, tzinfo=timezone.utc)
+    client = _make_client()
+    pos = _make_pos(
+        asset="NVDA", side="long", entry=100.0, current=100.1, sl=98.5,
+        funding_paid=0.0,
+        opened_at=(closed_overnight - timedelta(hours=1)).isoformat(),
+    )
+    res = evaluate_and_apply_position_risk(client, pos, current_funding_daily=funding_daily, now_utc=closed_overnight)
+    assert not (res and res.get("action") == "CLOSE"), (
+        f"funding {funding_daily*100:+.3f}%/hari di bawah ambang -> tidak boleh CLOSE"
+    )
+    client.preview_close.assert_not_called()
 
 
 def test_small_negative_funding_during_open_or_247_assets_uses_standard_hysteresis(monkeypatch):
@@ -156,7 +192,12 @@ def test_small_negative_funding_during_open_or_247_assets_uses_standard_hysteres
     assert res_xau_open is not None and res_xau_open["action"] == "UPDATE_AUTO_CLOSE"
 
     c_xau_wknd = _make_client()
-    res_xau_wknd = evaluate_and_apply_position_risk(c_xau_wknd, p_xau, current_funding_daily=0.0004, now_utc=sat)
+    p_xau_wknd = _make_pos(
+        asset="XAU", side="long", entry=100.0, current=100.0, sl=98.5,
+        funding_paid=0.0,
+        opened_at=(sat - timedelta(hours=1)).isoformat(),
+    )
+    res_xau_wknd = evaluate_and_apply_position_risk(c_xau_wknd, p_xau_wknd, current_funding_daily=0.006, now_utc=sat)
     assert res_xau_wknd is not None and res_xau_wknd["action"] == "CLOSE"
     assert "Biaya Inap" in res_xau_wknd["detail"]
 
@@ -309,7 +350,8 @@ def test_run_single_monitor_pass_propagates_now_utc_for_off_hours(monkeypatch, t
                 "margin_quote": "3.0",
                 "avg_entry_price": "100.0",
                 "liquidation_price": "50.0",
-                "funding_paid_quote": "0.01",
+                "funding_paid_quote": "0",
+                "opened_at": "2026-11-28T14:00:00Z",
                 "auto_close": {
                     "take_profit": {"trigger_price_quote": "102.5"},
                     "stop_loss": {"trigger_price_quote": "98.5"},
@@ -318,7 +360,7 @@ def test_run_single_monitor_pass_propagates_now_utc_for_off_hours(monkeypatch, t
         ]
     }
     client.latest_rate.return_value = {"rate": "100.1"}
-    contracts_by_id = {42: {"contract_id": 42, "funding_rate_hourly": str(0.0004 / 24.0)}}
+    contracts_by_id = {42: {"contract_id": 42, "funding_rate_hourly": str(0.006 / 24.0)}}
 
     sat = datetime(2026, 11, 28, 15, 0, tzinfo=timezone.utc)
     remaining, _snap, actions, raw_count = _run_single_monitor_pass(
