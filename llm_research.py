@@ -75,7 +75,9 @@ def _install_crumb_redaction() -> None:
 
 _install_crumb_redaction()
 
-DASHSCOPE_BASE = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+DASHSCOPE_BASE_DEFAULT = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+DASHSCOPE_TOKEN_PLAN_BASE = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+DASHSCOPE_BASE = (os.getenv("DASHSCOPE_BASE_URL") or DASHSCOPE_BASE_DEFAULT).strip().rstrip("/")
 GEMINI_BASE = os.getenv("GEMINI_BASE_URL", "https://router.classai.id/v1").rstrip("/")
 GEMINI_CLASSAI_FALLBACK_MODEL = "claude-haiku-5.5"
 
@@ -127,7 +129,7 @@ def should_use_glm_for_secondary_voters(
 # Rantai utama Meta-Aggregator via DashScope (`DASHSCOPE_API_KEY`): glm-5.3 -> fallback GLM/Qwen.
 AGGREGATOR_MODEL_CHAIN: list[str] = []
 for _candidate in [MODEL_AGGREGATOR] + [
-    m.strip() for m in os.getenv("DASHSCOPE_MODEL_AGG_FALLBACK", "glm-5.3-prime,glm-5.2-fast-preview,qwen-plus,qwen-flash").split(",")
+    m.strip() for m in (os.getenv("DASHSCOPE_MODEL_AGG_FALLBACK") or "glm-5.3-prime,glm-5.2-fast-preview,qwen-plus,qwen-flash").split(",")
 ]:
     if _candidate and _candidate not in AGGREGATOR_MODEL_CHAIN:
         AGGREGATOR_MODEL_CHAIN.append(_candidate)
@@ -254,16 +256,39 @@ class Research:
 # API CLIENTS
 # =============================================================================
 
+def resolve_dashscope_base_url(api_key: str, base_url: Optional[str] = None) -> str:
+    """Pilih endpoint DashScope OpenAI-compatible:
+    1) Argumen `base_url` eksplisit (bila diisi).
+    2) Env `DASHSCOPE_BASE_URL` (bila diisi non-kosong).
+    3) Auto-detect Token Plan: key berawalan `sk-sp-` -> `DASHSCOPE_TOKEN_PLAN_BASE`.
+    4) Default pay-as-you-go `DASHSCOPE_BASE`.
+    """
+    if base_url and base_url.strip():
+        return base_url.strip().rstrip("/")
+    env_url = (os.getenv("DASHSCOPE_BASE_URL") or "").strip()
+    if env_url:
+        return env_url.rstrip("/")
+    if (api_key or "").strip().startswith("sk-sp-"):
+        return DASHSCOPE_TOKEN_PLAN_BASE
+    return DASHSCOPE_BASE
+
+
 class QwenClient:
     """Client untuk Alibaba Cloud Qwen via DashScope OpenAI-compatible endpoint."""
 
-    def __init__(self, api_key: Optional[str] = None, model: str = MODEL_V2):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = MODEL_V2,
+        base_url: Optional[str] = None,
+    ):
         self.api_key = (api_key or os.environ.get("DASHSCOPE_API_KEY", "")).strip()
         if not self.api_key:
             raise ValueError("DASHSCOPE_API_KEY belum di-set!")
         self.model = model
+        self.base_url = resolve_dashscope_base_url(self.api_key, base_url=base_url)
         self.client = httpx.Client(
-            base_url=DASHSCOPE_BASE,
+            base_url=self.base_url,
             headers={
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json",

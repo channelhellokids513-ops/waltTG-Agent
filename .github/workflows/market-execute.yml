@@ -56,6 +56,8 @@ jobs:
           WALT_REFRESH_TOKEN: ${{ secrets.WALT_REFRESH_TOKEN }}
           WALT_TOKEN_SYNC: "on"  # eksplisit: default on pernah hampir membakar token tanpa jalur tulis-balik (invarian R8)
           DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+          DASHSCOPE_BASE_URL: ${{ vars.DASHSCOPE_BASE_URL || '' }}
+          DASHSCOPE_MODEL_AGG_FALLBACK: ${{ vars.DASHSCOPE_MODEL_AGG_FALLBACK || '' }}
           DASHSCOPE_MODEL: ${{ vars.DASHSCOPE_MODEL || 'glm-5.3-prime' }}
           DASHSCOPE_MODEL_V1: ${{ vars.DASHSCOPE_MODEL_V1 || 'glm-5.2-fast-preview' }}
           DASHSCOPE_MODEL_AGG: ${{ vars.DASHSCOPE_MODEL_AGG || 'glm-5.2-fast-preview' }}
